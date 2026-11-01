@@ -1,10 +1,6 @@
-//! Sample audition.
-//!
-//! Deliberately a stub with a real seam. Wiring an audio backend (rodio +
-//! symphonia, or cpal directly) is a decision about decoding, device handling
-//! and latency that shouldn't be buried inside a file-manager scaffold -- but
-//! every call site the UI needs already exists and is wired up, so dropping a
-//! backend in later touches only this file.
+//! What's playing, as far as the file list cares: a mirror of the audio
+//! engine's voice, refreshed by the app every frame so the table can draw its
+//! speaker icon without touching the engine.
 
 use std::path::{Path, PathBuf};
 
@@ -14,19 +10,8 @@ pub struct Preview {
 }
 
 impl Preview {
-    /// Space on a sample: start it, or stop it if it's already the one playing.
-    pub fn toggle(&mut self, path: &Path) {
-        if self.playing.as_deref() == Some(path) {
-            self.stop();
-        } else {
-            // TODO: decode and play. Until then this just tracks intent so the
-            // UI's playing indicator is already correct.
-            self.playing = Some(path.to_path_buf());
-        }
-    }
-
-    pub fn stop(&mut self) {
-        self.playing = None;
+    pub fn set(&mut self, path: Option<PathBuf>) {
+        self.playing = path;
     }
 
     pub fn playing(&self) -> Option<&Path> {

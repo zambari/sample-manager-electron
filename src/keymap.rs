@@ -177,3 +177,81 @@ pub fn format_chord(c: Chord) -> String {
     });
     s
 }
+
+// ---- sample editor ----------------------------------------------------------
+
+/// How far a nudge moves the playhead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Nudge {
+    /// One screen pixel at the current zoom, so precision follows zoom.
+    Pixel,
+    TenPixels,
+    /// Exactly one sample frame.
+    Frame,
+}
+
+/// Keys while the editor column has focus. Kept apart from [`Action`] because
+/// the same keys (Space, arrows, Enter) mean different things here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EdAction {
+    TogglePlay,
+    Stop,
+    SetIn,
+    SetOut,
+    ToggleLoop,
+    Nudge(Nudge, i8),
+    JumpIn,
+    JumpOut,
+    ZoomIn,
+    ZoomOut,
+    ZoomFit,
+    ZoomRegion,
+    SelectAll,
+    Normalize,
+    Export,
+    /// Step the file cursor in the last-focused pane to the next/previous
+    /// sample without leaving the editor.
+    NextFile,
+    PrevFile,
+    SwitchPane,
+}
+
+pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
+    use EdAction as A;
+    let m = i.modifiers;
+    let none = !m.any();
+    let mut out = Vec::new();
+    let mut hit = |k: Key, ok: bool, a: EdAction| {
+        if ok && i.key_pressed(k) {
+            out.push(a);
+        }
+    };
+    hit(Key::Space, none, A::TogglePlay);
+    hit(Key::Escape, none, A::Stop);
+    hit(Key::I, none, A::SetIn);
+    hit(Key::O, none, A::SetOut);
+    hit(Key::L, none, A::ToggleLoop);
+    for (k, dir) in [(Key::ArrowLeft, -1i8), (Key::ArrowRight, 1)] {
+        hit(k, none, A::Nudge(Nudge::Pixel, dir));
+        hit(k, m.shift_only(), A::Nudge(Nudge::TenPixels, dir));
+        hit(k, m.alt && !m.shift && !m.command, A::Nudge(Nudge::Frame, dir));
+    }
+    hit(Key::Home, none, A::JumpIn);
+    hit(Key::End, none, A::JumpOut);
+    hit(Key::Equals, !m.command, A::ZoomIn);
+    hit(Key::Plus, !m.command, A::ZoomIn);
+    hit(Key::Minus, !m.command, A::ZoomOut);
+    hit(Key::F, none, A::ZoomFit);
+    hit(Key::Z, none, A::ZoomRegion);
+    hit(Key::A, m.command_only(), A::SelectAll);
+    hit(Key::N, none, A::Normalize);
+    hit(Key::Enter, none, A::Export);
+    hit(Key::ArrowDown, none, A::NextFile);
+    hit(Key::ArrowUp, none, A::PrevFile);
+    hit(Key::Tab, none, A::SwitchPane);
+    out
+}
+
+pub const EDITOR_HELP: &str = "Space play/stop · I / O set in/out (live while playing) · L loop · \
+←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
+N normalize · ↩ export · ↑/↓ next/prev sample · Tab next column";

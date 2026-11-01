@@ -1,4 +1,6 @@
 mod app;
+mod audio;
+mod editor;
 mod fs_model;
 mod jobs;
 mod keymap;
@@ -13,8 +15,8 @@ mod ui;
 fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 740.0])
-            .with_min_inner_size([720.0, 420.0])
+            .with_inner_size([1560.0, 880.0])
+            .with_min_inner_size([960.0, 520.0])
             .with_title("Sample Manager"),
         ..Default::default()
     };

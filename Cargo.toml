@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cpal = "0.18.2"
 eframe = { version = "0.37.0", features = ["persistence"] }
 egui = "0.37"
+hound = "3.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
+symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
 trash = "5.2.9"
 walkdir = "2.5.0"
+
+# Decoding and drawing waveforms in an unoptimized build is painfully slow.
+# Optimize dependencies even in dev; our own crate stays fast to rebuild.
+[profile.dev.package."*"]
+opt-level = 2

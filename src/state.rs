@@ -1,7 +1,7 @@
-//! What survives a restart: open tabs per pane, their sort, focus and the
-//! hidden-files toggle. eframe stores it (with window size/position) in its
-//! per-app storage file and calls [`crate::app::App`]'s `save` on exit and
-//! every [`SAVE_INTERVAL`].
+//! What survives a restart: open tabs per pane, their sort, focus, the
+//! hidden-files toggle, editor toggles and the output device. eframe stores
+//! it (with window size/position) in its per-app storage file and calls
+//! [`crate::app::App`]'s `save` on exit and every [`SAVE_INTERVAL`].
 //!
 //! Transient state (selection, listings, jobs, dialogs) is deliberately left
 //! out. Add a field here with `#[serde(default)]` so older saves still load.
@@ -40,6 +40,11 @@ pub struct AppState {
     pub focused: Role,
     #[serde(default)]
     pub show_hidden: bool,
+    #[serde(default)]
+    pub editor: crate::editor::Prefs,
+    /// cpal device id; `None` means the system default.
+    #[serde(default)]
+    pub output_device: Option<String>,
 }
 
 fn default_focus() -> Role {

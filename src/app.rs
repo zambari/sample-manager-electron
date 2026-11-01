@@ -8,9 +8,12 @@
 //!    each `ui()` pass *and* while the window is hidden -- so results are
 //!    never dropped on the floor.
 
+use crate::audio::engine::{DeviceInfo, Engine, PlayParams};
+use crate::editor::{Editor, Outcome};
 use crate::fs_model::{self, SortKey};
 use crate::jobs::{Ev, Jobs};
-use crate::keymap::{Action, Keymap};
+use crate::keymap::{self, Action, EdAction, Keymap, Nudge};
+use crate::ui::editor_view::{self, EdIntent, PlayView};
 use crate::ops::{self, Kind, Plan, Policy};
 use crate::pane::{Pane, Role};
 use crate::preview::Preview;
@@ -51,6 +54,18 @@ pub struct App {
     errors: Vec<String>,
     /// Last state seen by `logic`, to notice changes that need saving.
     last_state: Option<state::AppState>,
+    engine: Engine,
+    editor: Editor,
+    /// The editor column has the keyboard. `focused` then remembers which
+    /// file pane had it last, so ↑/↓ in the editor still steps through files.
+    editor_focused: bool,
+    devices: Vec<DeviceInfo>,
+    output_device: Option<String>,
+    /// Which file the engine's voice is playing.
+    voice_path: Option<PathBuf>,
+    /// File-cursor target last seen, to auto-load on change.
+    last_cursor: Option<PathBuf>,
+    last_stream_error: Option<String>,
 }
 
 impl App {
@@ -83,7 +98,23 @@ impl App {
         let source = restore(Role::Source, saved.as_ref().map(|s| &s.source));
         let dest = restore(Role::Dest, saved.as_ref().map(|s| &s.dest));
 
+        let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
+        let engine = Engine::open(output_device.as_deref());
+        let editor = Editor::new(ctx.clone(), saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default());
+        let mut errors = Vec::new();
+        if let Some(e) = &engine.open_error {
+            errors.push(format!("audio output: {e}"));
+        }
+
         let mut app = Self {
+            engine,
+            editor,
+            editor_focused: false,
+            devices: Engine::devices(),
+            output_device,
+            voice_path: None,
+            last_cursor: None,
+            last_stream_error: None,
             jobs: Jobs::new(ctx),
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
@@ -96,7 +127,7 @@ impl App {
             pending: None,
             active_job: None,
             status: String::new(),
-            errors: Vec::new(),
+            errors,
             last_state: None,
         };
         app.reload_all();
@@ -121,6 +152,8 @@ impl App {
             dest: pane(&self.dest),
             focused: self.focused,
             show_hidden: self.show_hidden,
+            editor: self.editor.prefs.clone(),
+            output_device: self.output_device.clone(),
         }
     }
 
@@ -318,13 +351,189 @@ impl App {
         if renaming || self.pending.is_some() {
             return;
         }
-        if ui.memory(|m| m.focused().is_some()) {
-            return; // a text field (filter box) has focus
+        if ui.ctx().text_edit_focused() {
+            return; // a text field (filter box, typed value) has the keyboard
+        }
+
+        if self.editor_focused {
+            let actions = ui.input(keymap::editor_actions);
+            let wave = self.editor.wave_rect;
+            for a in actions {
+                self.perform_editor(a, wave);
+            }
+            return;
         }
 
         let actions = ui.input(|i| self.keymap.actions(i));
         for action in actions {
             self.perform(action);
+        }
+    }
+
+    // ---- playback ---------------------------------------------------------
+
+    fn playing_current(&self) -> bool {
+        self.engine.is_playing() && self.voice_path.is_some() && self.voice_path.as_deref() == self.editor.path()
+    }
+
+    /// Play the editor's sample from the parked playhead, or from the in point
+    /// if the playhead is outside the region.
+    fn start_play(&mut self) {
+        let Some(s) = self.editor.sample().cloned() else { return };
+        let (a, b) = self.editor.sel;
+        let ph = self.editor.playhead;
+        let from = if (a..b).contains(&ph) { ph } else { a };
+        self.voice_path = Some(s.path.clone());
+        self.engine.play(
+            s,
+            PlayParams {
+                from,
+                loop_start: a,
+                end: b,
+                looping: self.editor.prefs.looping,
+                gain: self.editor.gain(),
+            },
+        );
+    }
+
+    fn toggle_play(&mut self) {
+        if self.playing_current() {
+            self.engine.stop();
+        } else {
+            self.start_play();
+        }
+    }
+
+    /// Load `path` into the editor, optionally starting playback once it's in.
+    fn audition(&mut self, path: &Path, play: bool) {
+        if self.editor.path() == Some(path) {
+            if play {
+                self.start_play();
+            }
+            return;
+        }
+        if self.engine.is_playing() {
+            self.engine.stop();
+        }
+        self.editor.play_when_loaded = play;
+        self.editor.request(path);
+    }
+
+    /// Space / double-click on a file row.
+    fn preview_toggle(&mut self, path: &Path) {
+        if self.editor.path() == Some(path) && self.playing_current() {
+            self.engine.stop();
+        } else {
+            self.audition(path, true);
+        }
+    }
+
+    /// Auto-load whatever the file cursor is on, when it changes.
+    fn follow_cursor(&mut self) {
+        let cur = self
+            .pane(self.focused)
+            .active_tab()
+            .cursor_entry()
+            .filter(|e| e.is_audio)
+            .map(|e| e.path.clone());
+        if cur == self.last_cursor {
+            return;
+        }
+        self.last_cursor = cur.clone();
+        if let Some(p) = cur {
+            if self.editor.prefs.auto_load {
+                self.audition(&p, self.editor.prefs.auto_play);
+            }
+        }
+    }
+
+    /// Step the file cursor to the next audio file in `dir` direction.
+    fn step_file(&mut self, dir: isize) {
+        let tab = self.pane_mut(self.focused).active_tab_mut();
+        for _ in 0..tab.entries.len() {
+            let before = tab.cursor;
+            tab.move_cursor(dir, false);
+            if tab.cursor == before || tab.cursor_entry().is_some_and(|e| e.is_audio) {
+                break;
+            }
+        }
+        let path = tab.cursor_entry().filter(|e| e.is_audio).map(|e| e.path.clone());
+        if let Some(p) = path {
+            // Explicit request: load even when auto-load is off.
+            self.last_cursor = Some(p.clone());
+            self.audition(&p, self.editor.prefs.auto_play);
+        }
+    }
+
+    fn export(&mut self) {
+        if self.editor.current.is_none() {
+            return;
+        }
+        let dest = self.pane(Role::Dest).active_tab().cwd.clone();
+        self.status = format!("Exporting to {}…", dest.display());
+        self.editor.export(dest);
+    }
+
+    fn perform_editor(&mut self, a: EdAction, wave: Option<egui::Rect>) {
+        let ed = &mut self.editor;
+        let frames = ed.frames();
+        // Points set while playing land where you hear them.
+        let here = if self.engine.is_playing() && self.voice_path.as_deref() == ed.path() {
+            self.engine.position().min(frames)
+        } else {
+            ed.playhead
+        };
+        match a {
+            EdAction::TogglePlay => self.toggle_play(),
+            EdAction::Stop => self.engine.stop(),
+            EdAction::SetIn => ed.set_in(here),
+            EdAction::SetOut => ed.set_out(here),
+            EdAction::ToggleLoop => ed.prefs.looping = !ed.prefs.looping,
+            EdAction::Nudge(n, dir) => {
+                let px = ed.view.fpp.round().max(1.0) as isize;
+                let step = match n {
+                    Nudge::Pixel => px,
+                    Nudge::TenPixels => px * 10,
+                    Nudge::Frame => 1,
+                };
+                ed.playhead = (ed.playhead as isize + step * dir as isize).clamp(0, frames as isize) as usize;
+                if let Some(r) = wave {
+                    editor_view::ensure_visible(ed, r.width(), ed.playhead);
+                }
+            }
+            EdAction::JumpIn | EdAction::JumpOut => {
+                ed.playhead = if a == EdAction::JumpIn { ed.sel.0 } else { ed.sel.1.saturating_sub(1) };
+                if let Some(r) = wave {
+                    editor_view::ensure_visible(ed, r.width(), ed.playhead);
+                }
+            }
+            EdAction::ZoomIn | EdAction::ZoomOut => {
+                if let Some(r) = wave {
+                    let factor = if a == EdAction::ZoomIn { 0.5 } else { 2.0 };
+                    // Zoom around the playhead when it's on screen.
+                    let xp = r.left() + ((ed.playhead as f64 - ed.view.start) / ed.view.fpp) as f32;
+                    let anchor = if r.x_range().contains(xp) { xp } else { r.center().x };
+                    editor_view::zoom_at(ed, r, anchor, factor);
+                }
+            }
+            EdAction::ZoomFit => ed.view.fit_pending = true,
+            EdAction::ZoomRegion => {
+                if let Some(r) = wave {
+                    let len = (ed.sel.1 - ed.sel.0).max(1) as f64;
+                    ed.view.fpp = len * 1.1 / r.width().max(1.0) as f64;
+                    ed.view.start = ed.sel.0 as f64 - len * 0.05;
+                    editor_view::clamp_view(ed, r.width());
+                }
+            }
+            EdAction::SelectAll => ed.select_all(),
+            EdAction::Normalize => ed.normalize(),
+            EdAction::Export => self.export(),
+            EdAction::NextFile => self.step_file(1),
+            EdAction::PrevFile => self.step_file(-1),
+            EdAction::SwitchPane => {
+                self.editor_focused = false;
+                self.focused = Role::Dest;
+            }
         }
     }
 
@@ -339,9 +548,9 @@ impl App {
                         // as "tell me how big this is" instead of doing nothing.
                         let p = e.path.clone();
                         self.request_sizes(vec![p]);
-                    } else {
+                    } else if e.is_audio {
                         let p = e.path.clone();
-                        self.preview.toggle(&p);
+                        self.preview_toggle(&p);
                     }
                 }
             }
@@ -402,9 +611,13 @@ impl App {
             }
             Action::NextTab => self.pane_mut(role).cycle(1),
             Action::PrevTab => self.pane_mut(role).cycle(-1),
-            Action::SwitchPane => self.focused = self.focused.other(),
+            // Tab walks the columns left to right: Source → Editor → Destination.
+            Action::SwitchPane => match self.focused {
+                Role::Source => self.editor_focused = true,
+                Role::Dest => self.focused = Role::Source,
+            },
             Action::Cancel => {
-                self.preview.stop();
+                self.engine.stop();
                 if let Some(a) = &self.active_job {
                     self.jobs.cancel(a.id);
                 }
@@ -472,18 +685,42 @@ impl eframe::App for App {
         if !events.is_empty() {
             self.absorb(events);
         }
+        self.absorb_editor();
+
+        // Edits apply live to the running voice: drag an out point while the
+        // loop plays and you hear the seam move.
+        if self.playing_current() {
+            let ed = &self.editor;
+            self.engine.update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain());
+            ctx.request_repaint();
+        }
+        self.preview.set(if self.engine.is_playing() { self.voice_path.clone() } else { None });
+
+        if let Some(e) = self.engine.stream_error() {
+            if self.last_stream_error.as_ref() != Some(&e) {
+                self.errors.push(format!("audio output: {e}"));
+                self.last_stream_error = Some(e);
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
-        egui::Panel::left("source_pane")
+        // Three columns: Source | Sample Editor | Destination.
+        let w = ui.available_width();
+        egui::Panel::left("source_col")
             .resizable(true)
-            .default_size(ui.available_width() * 0.5)
+            .default_size(w * 0.27)
+            .min_size(220.0)
             .show(ui, |ui| self.show_pane(ui, Role::Source));
-
-        egui::CentralPanel::default().show(ui, |ui| self.show_pane(ui, Role::Dest));
+        egui::Panel::right("dest_col")
+            .resizable(true)
+            .default_size(w * 0.27)
+            .min_size(220.0)
+            .show(ui, |ui| self.show_pane(ui, Role::Dest));
+        egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
 
         // Modal last, so it paints over both panes.
         if let Some(p) = &self.pending {
@@ -497,10 +734,102 @@ impl eframe::App for App {
         }
 
         self.handle_keys(ui);
+        self.follow_cursor();
+
+        // Buttons and toggles take keyboard focus when clicked, after which
+        // egui would turn Space/Enter into clicks on them and arrows into
+        // focus moves. This app drives everything from its own keymaps, so
+        // only text fields get to keep focus.
+        let ctx = ui.ctx().clone();
+        if !ctx.text_edit_focused() {
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        }
     }
 }
 
 impl App {
+    fn absorb_editor(&mut self) {
+        for o in self.editor.drain() {
+            match o {
+                Outcome::Loaded => {
+                    if std::mem::take(&mut self.editor.play_when_loaded) {
+                        self.start_play();
+                    }
+                }
+                Outcome::Exported(p) => {
+                    self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
+                    if let Some(dir) = p.parent() {
+                        self.sizes.invalidate_subtree(dir);
+                        self.reload_showing(dir);
+                    }
+                }
+                Outcome::Error(e) => self.errors.push(e),
+            }
+        }
+    }
+
+    fn show_editor(&mut self, ui: &mut egui::Ui) {
+        let pv = PlayView {
+            playing: self.playing_current(),
+            pos: self.engine.position(),
+        };
+        let can_export = !self.pane(Role::Dest).active_tab().loading;
+        let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export);
+        for i in intents {
+            match i {
+                EdIntent::TookFocus => self.editor_focused = true,
+                EdIntent::TogglePlay => {
+                    self.editor_focused = true;
+                    self.toggle_play();
+                }
+                EdIntent::Seek(f) => self.engine.seek(f),
+                EdIntent::Export => self.export(),
+            }
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.label(egui::RichText::new(keymap::EDITOR_HELP).weak().small());
+        });
+    }
+
+    fn device_picker(&mut self, ui: &mut egui::Ui) {
+        let mut choice: Option<Option<String>> = None;
+        let name = if self.engine.device_name.is_empty() { "no output".to_owned() } else { self.engine.device_name.clone() };
+        if ui.small_button("⟳").on_hover_text("Rescan audio devices").clicked() {
+            self.devices = Engine::devices();
+        }
+        egui::ComboBox::from_id_salt("output_device")
+            .selected_text(format!("🔈 {name}"))
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(self.output_device.is_none(), "System default").clicked() {
+                    choice = Some(None);
+                }
+                for d in &self.devices {
+                    let on = self.output_device.as_deref() == Some(d.id.as_str());
+                    if ui.selectable_label(on, &d.name).on_hover_text(&d.id).clicked() {
+                        choice = Some(Some(d.id.clone()));
+                    }
+                }
+            });
+        if self.engine.device_rate > 0 {
+            ui.label(
+                egui::RichText::new(format!("{:.1} kHz · {} ch", self.engine.device_rate as f64 / 1000.0, self.engine.device_channels))
+                    .weak()
+                    .small(),
+            );
+        }
+        if let Some(dev) = choice {
+            self.engine.switch(dev.as_deref());
+            self.output_device = dev;
+            self.last_stream_error = None;
+            if let Some(e) = &self.engine.open_error {
+                self.errors.push(format!("audio output: {e}"));
+            }
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Sample Manager");
@@ -529,6 +858,10 @@ impl App {
                         .weak()
                         .small(),
                 );
+                ui.separator();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    self.device_picker(ui);
+                });
             });
         });
     }
@@ -575,7 +908,7 @@ impl App {
                 .sum();
             ui.label(format!(
                 "{} · {} items · {n_sel} selected ({})",
-                self.focused.label(),
+                if self.editor_focused { "Editor" } else { self.focused.label() },
                 tab.entries.len(),
                 fs_model::human_bytes(sel_bytes)
             ));
@@ -608,7 +941,7 @@ impl App {
     }
 
     fn show_pane(&mut self, ui: &mut egui::Ui, role: Role) {
-        let focused = self.focused == role;
+        let focused = self.focused == role && !self.editor_focused;
 
         // Pane header: role, path, and the sub-tab strip.
         ui.horizontal(|ui| {
@@ -616,6 +949,7 @@ impl App {
             let title = if focused { title.strong() } else { title.weak() };
             if ui.selectable_label(focused, title).clicked() {
                 self.focused = role;
+                self.editor_focused = false;
             }
             ui.separator();
             let cwd = self.pane(role).active_tab().cwd.display().to_string();
@@ -648,12 +982,15 @@ impl App {
 
         for intent in intents {
             match intent {
-                Intent::TookFocus => self.focused = role,
+                Intent::TookFocus => {
+                    self.focused = role;
+                    self.editor_focused = false;
+                }
                 Intent::Open(p) => {
                     if p.is_dir() {
                         self.open_in(role, p);
                     } else {
-                        self.preview.toggle(&p);
+                        self.preview_toggle(&p);
                     }
                 }
                 Intent::BeginRename(p) => {
@@ -735,6 +1072,7 @@ impl App {
         if let Some(i) = switch_to {
             self.pane_mut(role).active = i;
             self.focused = role;
+            self.editor_focused = false;
         }
         if let Some((i, paths)) = drop_on {
             if let Some(tab) = self.pane(role).tabs.get(i) {
