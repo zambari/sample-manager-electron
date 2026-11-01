@@ -141,7 +141,21 @@ impl Jobs {
                 .collect();
             // Move to the OS recycle bin, never unlink. Losing a one-off
             // recording to a stray keypress is not recoverable.
-            let errors = match trash::delete_all(&paths) {
+            let ctx = {
+                #[allow(unused_mut)]
+                let mut ctx = trash::TrashContext::default();
+                // The default asks Finder over AppleScript, which can stall on
+                // an automation-permission prompt and finish after we've
+                // already re-listed the folder, leaving ghost rows. The
+                // file-manager call is synchronous and needs no permission.
+                #[cfg(target_os = "macos")]
+                {
+                    use trash::macos::{DeleteMethod, TrashContextExtMacos};
+                    ctx.set_delete_method(DeleteMethod::NsFileManager);
+                }
+                ctx
+            };
+            let errors = match ctx.delete_all(&paths) {
                 Ok(()) => Vec::new(),
                 Err(e) => vec![e.to_string()],
             };

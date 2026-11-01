@@ -25,6 +25,8 @@ struct Voice {
     end: usize,
     looping: bool,
     gain: f32,
+    /// Fold all source channels into one and send it to every output.
+    mono: bool,
     playing: bool,
 }
 
@@ -58,6 +60,7 @@ pub struct PlayParams {
     pub end: usize,
     pub looping: bool,
     pub gain: f32,
+    pub mono: bool,
 }
 
 impl Engine {
@@ -140,18 +143,20 @@ impl Engine {
         v.end = p.end;
         v.looping = p.looping;
         v.gain = p.gain;
+        v.mono = p.mono;
         v.playing = true;
         self.shared.pos.store(p.from as u64, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Relaxed);
     }
 
     /// Live parameter changes while playing.
-    pub fn update(&self, loop_start: usize, end: usize, looping: bool, gain: f32) {
+    pub fn update(&self, loop_start: usize, end: usize, looping: bool, gain: f32, mono: bool) {
         let mut v = self.shared.voice.lock().expect("poisoned");
         v.loop_start = loop_start;
         v.end = end;
         v.looping = looping;
         v.gain = gain;
+        v.mono = mono;
     }
 
     pub fn seek(&self, frame: usize) {
@@ -219,6 +224,8 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
     let frames = sample.frames();
     let end = v.end.min(frames).max(1);
     let gain = v.gain;
+    let mono = v.mono && src_ch > 1;
+    let inv_ch = 1.0 / src_ch.max(1) as f32;
 
     for frame in data.chunks_mut(out_ch) {
         if !v.playing {
@@ -242,6 +249,14 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
         // Interpolate within the region only, so a loop seam sounds exactly as
         // the exported file will when looped on a sampler.
         let j = if i + 1 < end { i + 1 } else if v.looping { v.loop_start } else { i };
+        if mono {
+            let a: f32 = sample.channels.iter().map(|ch| ch[i]).sum::<f32>() * inv_ch;
+            let b: f32 = sample.channels.iter().map(|ch| ch[j]).sum::<f32>() * inv_ch;
+            let s = T::from_sample(((a + (b - a) * t) * gain).clamp(-1.0, 1.0));
+            frame.fill(s);
+            v.pos += step;
+            continue;
+        }
         for (k, out) in frame.iter_mut().enumerate() {
             let c = if src_ch == 1 { 0 } else if k < src_ch { k } else { usize::MAX };
             let s = if c == usize::MAX {

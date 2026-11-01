@@ -52,6 +52,17 @@ pub struct AppState {
     /// Bookmarked folders, shared by both panes, in the order added.
     #[serde(default)]
     pub favourites: Vec<PathBuf>,
+    /// Files that have been loaded into the editor at least once; the file
+    /// table dims their names.
+    #[serde(default)]
+    pub opened: Vec<PathBuf>,
+    /// Files committed to a destination at least once; the file table shows
+    /// a check badge next to them.
+    #[serde(default)]
+    pub committed: Vec<PathBuf>,
+    /// File loaded in the editor with its in/out, playhead, gain and crop.
+    #[serde(default)]
+    pub session: Option<crate::editor::Session>,
 }
 
 fn default_focus() -> Role {

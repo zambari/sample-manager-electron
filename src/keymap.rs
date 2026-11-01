@@ -199,10 +199,23 @@ pub enum Nudge {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EdAction {
     TogglePlay,
+    /// Play from the other start point than the toolbar setting says.
+    TogglePlayAlt,
+    ToggleSnap,
+    ToggleFollow,
+    /// Step the in / out point: to the next zero crossing with snap on,
+    /// one pixel otherwise.
+    InZero(i8),
+    OutZero(i8),
+    Crop,
+    Uncrop,
+    Undo,
+    Redo,
     Stop,
     SetIn,
     SetOut,
     ToggleLoop,
+    ToggleMono,
     Nudge(Nudge, i8),
     JumpIn,
     JumpOut,
@@ -231,10 +244,30 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
         }
     };
     hit(Key::Space, none, A::TogglePlay);
+    hit(Key::Space, m.shift_only(), A::TogglePlayAlt);
+    hit(Key::S, none, A::ToggleSnap);
+    hit(Key::V, none, A::ToggleFollow);
+    // `[` / `]` move the in point, with ⇧ (`{` / `}`) the out point. The
+    // shifted keys arrive as curly brackets on most layouts.
+    let mut zero = Vec::new();
+    for (plain, curly, dir) in [(Key::OpenBracket, Key::OpenCurlyBracket, -1i8), (Key::CloseBracket, Key::CloseCurlyBracket, 1)] {
+        if !m.command && !m.alt && !m.ctrl {
+            if i.key_pressed(curly) || (m.shift && i.key_pressed(plain)) {
+                zero.push(A::OutZero(dir));
+            } else if !m.shift && i.key_pressed(plain) {
+                zero.push(A::InZero(dir));
+            }
+        }
+    }
+    hit(Key::C, none, A::Crop);
+    hit(Key::C, m.shift_only(), A::Uncrop);
+    hit(Key::Z, m.command_only(), A::Undo);
+    hit(Key::Z, m.command && m.shift, A::Redo);
     hit(Key::Escape, none, A::Stop);
     hit(Key::I, none, A::SetIn);
     hit(Key::O, none, A::SetOut);
     hit(Key::L, none, A::ToggleLoop);
+    hit(Key::M, none, A::ToggleMono);
     for (k, dir) in [(Key::ArrowLeft, -1i8), (Key::ArrowRight, 1)] {
         hit(k, none, A::Nudge(Nudge::Pixel, dir));
         hit(k, m.shift_only(), A::Nudge(Nudge::TenPixels, dir));
@@ -253,9 +286,11 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     hit(Key::ArrowDown, none, A::NextFile);
     hit(Key::ArrowUp, none, A::PrevFile);
     hit(Key::Tab, none, A::SwitchPane);
+    out.extend(zero);
     out
 }
 
-pub const EDITOR_HELP: &str = "Space play/stop · I / O set in/out (live while playing) · L loop · \
-←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
+pub const EDITOR_HELP: &str = "Space play/stop (⇧ from the other start) · I / O set in/out (live while playing) · L loop · M mono preview · \
+S snap to zero · V follow playback · [ / ] step in point (to zero crossings when snapping), ⇧ for out point · C crop to region, ⇧C uncrop · \
+⌘Z undo, ⇧⌘Z redo · ←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
 N normalize · ↩ export · ↑/↓ next/prev sample · Tab next column";

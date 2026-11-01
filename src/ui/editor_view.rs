@@ -1,7 +1,8 @@
 //! Drawing and mouse handling for the sample editor column.
 //!
 //! Mouse: click parks the playhead, drag on empty space selects a region,
-//! drag near the in/out lines moves them, double-click selects all, wheel
+//! drag near the in/out lines moves them, double-click on an in/out line
+//! parks the playhead there, double-click elsewhere selects all, wheel
 //! zooms around the pointer, horizontal scroll / middle-drag / ⌥-drag pans.
 //! Keys are handled in the app (see `App::perform_editor`).
 
@@ -32,6 +33,7 @@ pub const IN_COLOR: Color32 = Color32::from_rgb(90, 200, 120);
 pub const OUT_COLOR: Color32 = Color32::from_rgb(235, 115, 90);
 const PLAY_COLOR: Color32 = Color32::from_rgb(245, 200, 70);
 const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
+const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
 
 pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_export: bool) -> Vec<EdIntent> {
     let mut out = Vec::new();
@@ -71,9 +73,56 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
     let (orect, _) = ui.allocate_exact_size(vec2(avail.x, OVERVIEW_H), Sense::hover());
     overview(ui, ed, &pv, orect, &mut out);
 
+    if ed.is_multichannel() {
+        ui.add_space(4.0);
+        phase_meter(ui, ed, &pv);
+    }
+
     ui.add_space(6.0);
     stats_table(ui, ed);
     out
+}
+
+/// L/R correlation bar: −1 (cancels in mono) … 0 (unrelated) … +1 (mono).
+/// Live around the play cursor while playing, else over the region.
+fn phase_meter(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
+    let live = pv.playing;
+    let ph = if live { ed.phase_at(pv.pos) } else { ed.region_phase() };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Phase").weak()).on_hover_text(
+            "L/R correlation. +1: both sides the same (mono-safe). 0: unrelated / very wide. \
+             Below 0: out of phase — those parts cancel when folded to mono.",
+        );
+        let (rect, _) = ui.allocate_exact_size(vec2(180.0, 12.0), Sense::hover());
+        let vis = ui.visuals().clone();
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, vis.extreme_bg_color);
+        let mid = rect.center().x;
+        let left = Rect::from_x_y_ranges(rect.left()..=mid, rect.y_range());
+        p.rect_filled(left, 2.0, CLIP_COLOR.gamma_multiply(0.18));
+        for t in [-0.5f32, 0.0, 0.5] {
+            let x = mid + t * rect.width() / 2.0;
+            let h = if t == 0.0 { 0.0 } else { 3.0 };
+            p.line_segment([Pos2::new(x, rect.top() + h), Pos2::new(x, rect.bottom() - h)], Stroke::new(1.0, vis.weak_text_color().gamma_multiply(0.6)));
+        }
+        // Ease the needle so the live reading is readable rather than jittery.
+        let target = ph.corr.unwrap_or(0.0);
+        let c = ui.ctx().animate_value_with_time(ui.scope_id().with("phase_needle"), target, if live { 0.12 } else { 0.0 });
+        if ph.corr.is_some() {
+            let x = mid + c * rect.width() / 2.0;
+            let col = if c < 0.0 { CLIP_COLOR } else if c < 0.3 { vis.warn_fg_color } else { IN_COLOR };
+            p.rect_filled(Rect::from_x_y_ranges(mid.min(x)..=mid.max(x), rect.shrink(3.0).y_range()), 1.0, col.gamma_multiply(0.5));
+            p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(2.0, col));
+        }
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, vis.widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+        let corr = ph.corr.map_or("  —  ".to_owned(), |c| format!("{c:+.2}"));
+        ui.monospace(corr);
+        ui.separator();
+        let loss = RichText::new(format!("mono sum {}", stats::fmt_db(ph.mono_loss_db))).monospace();
+        ui.label(if ph.mono_loss_db < -4.0 { loss.color(vis.warn_fg_color) } else { loss.weak() })
+            .on_hover_text("Level of the mono fold relative to the stereo signal. ~0 dB: nothing lost. ~−3 dB: wide/unrelated sides. Much lower: cancellation.");
+        ui.label(RichText::new(if live { "live" } else { "region" }).weak().small());
+    });
 }
 
 fn header(ui: &mut Ui, ed: &Editor, focused: bool, out: &mut Vec<EdIntent>) {
@@ -92,6 +141,14 @@ fn header(ui: &mut Ui, ed: &Editor, focused: bool, out: &mut Vec<EdIntent>) {
             ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
                 .on_hover_text(p.display().to_string());
         }
+        if let (Some((a, b)), Some(s)) = (ed.crop, ed.sample()) {
+            ui.label(RichText::new(format!("✂ cropped view {:.3}–{:.3}s", s.seconds(a), s.seconds(b))).weak())
+                .on_hover_text("Only part of the file is loaded for editing. ⇧C or Uncrop shows the whole file again.");
+        }
+        if ed.mono_active() {
+            ui.label(RichText::new("◐ MONO").color(MONO_COLOR).strong())
+                .on_hover_text("Playing folded to mono. M toggles.");
+        }
         if ed.loading.is_some() {
             ui.spinner();
         }
@@ -101,13 +158,34 @@ fn header(ui: &mut Ui, ed: &Editor, focused: bool, out: &mut Vec<EdIntent>) {
 fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &mut Vec<EdIntent>) {
     let has = ed.current.is_some();
     ui.horizontal_wrapped(|ui| {
-        let label = if playing { "⏹ Stop" } else { "▶ Play" };
-        if ui.add_enabled(has, egui::Button::new(label)).on_hover_text("Space").clicked() {
+        let icon = if playing { "⏹" } else { "▶" };
+        let hover = if playing { "Stop (Space)" } else { "Play (Space)" };
+        if ui.add_enabled(has, egui::Button::new(icon)).on_hover_text(hover).clicked() {
             out.push(EdIntent::TogglePlay);
         }
+        // One button that flips the start point.
+        let (label, hover) = if ed.prefs.play_from_in {
+            ("[ Playhead", "Space plays from the in point (⇧Space: from the current position). Click to switch.")
+        } else {
+            ("▸ From current", "Space plays from the parked playhead (⇧Space: from the in point). Click to switch.")
+        };
+        if ui.button(label).on_hover_text(hover).clicked() {
+            ed.prefs.play_from_in = !ed.prefs.play_from_in;
+        }
+        ui.separator();
         ui.toggle_value(&mut ed.prefs.looping, "🔁 Loop").on_hover_text("L — loop the in/out region");
-        ui.toggle_value(&mut ed.prefs.snap_zero, "Snap 0")
-            .on_hover_text("Snap in/out points to the nearest zero crossing");
+        ui.toggle_value(&mut ed.prefs.follow_playback, "Follow")
+            .on_hover_text("V — scroll the view along with the play cursor. Turn off to stay put while zoomed in on a loop end.");
+        if ui
+            .toggle_value(&mut ed.prefs.snap_zero, "Snap to 0")
+            .on_hover_text("S — snap in/out points to the nearest zero crossing. Turning it on snaps the current selection.")
+            .changed()
+            && ed.prefs.snap_zero
+        {
+            ed.snap_selection();
+        }
+        ui.toggle_value(&mut ed.prefs.mono_preview, "◐ Mono")
+            .on_hover_text("M — listen to the channels folded to mono (L+R averaged). Stats and Normalize follow what you hear.");
         ui.separator();
         ui.toggle_value(&mut ed.prefs.auto_load, "Auto-load")
             .on_hover_text("Load the sample under the file cursor");
@@ -137,8 +215,58 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
             if ui.button("Reset").on_hover_text("Whole file, 0 dB").clicked() {
                 ed.reset();
             }
+        });
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.add_enabled_ui(has, |ui| {
+            if ui.add_enabled(ed.can_undo(), egui::Button::new("↶ Undo")).on_hover_text("⌘Z").clicked() {
+                ed.undo();
+            }
+            if ui.add_enabled(ed.can_redo(), egui::Button::new("↷ Redo")).on_hover_text("⇧⌘Z").clicked() {
+                ed.redo();
+            }
             ui.separator();
-            let label = if ed.exporting { "Exporting…" } else { "Export → Destination" };
+            if ui
+                .button("✂ Crop")
+                .on_hover_text("C — load only the selected region, to zoom and fine-tune inside it. The file isn't changed.")
+                .clicked()
+            {
+                ed.crop_to_selection();
+            }
+            if ui
+                .add_enabled(ed.crop.is_some(), egui::Button::new("Uncrop"))
+                .on_hover_text("⇧C — show the whole file again, keeping the selection")
+                .clicked()
+            {
+                ed.uncrop();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(ed.sel.1 - ed.sel.0 >= 2, egui::Button::new("½ Loop"))
+                .on_hover_text("Halve the selected region, keeping the in point")
+                .clicked()
+            {
+                ed.scale_selection(0.5);
+            }
+            if ui
+                .add_enabled(ed.can_double_selection(), egui::Button::new("×2 Loop"))
+                .on_hover_text("Double the selected region, keeping the in point")
+                .clicked()
+            {
+                ed.scale_selection(2.0);
+            }
+            ui.separator();
+            ui.toggle_value(&mut ed.prefs.save_mono, "Save mono").on_hover_text(
+                "Export stereo / multichannel files as a single mono channel. \
+                 If mono preview is off you'll be asked first, since the fold loses the stereo image.",
+            );
+            let label = if ed.exporting {
+                "Exporting…"
+            } else if ed.exports_mono() {
+                "Export mono → Destination"
+            } else {
+                "Export → Destination"
+            };
             if ui
                 .add_enabled(can_export && !ed.exporting, egui::Button::new(label))
                 .on_hover_text("↩ — write the trimmed, gained region as a new WAV into the active destination tab")
@@ -261,7 +389,7 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     }
 
     // Keep the play cursor on screen: page forward when it runs off.
-    if pv.playing && ed.drag.is_none() {
+    if pv.playing && ed.drag.is_none() && ed.prefs.follow_playback {
         let x = rect.left() + ((pv.pos as f64 - ed.view.start) / ed.view.fpp) as f32;
         if x > rect.right() || x < rect.left() {
             ed.view.start = pv.pos as f64 - rect.width() as f64 * ed.view.fpp * 0.05;
@@ -330,7 +458,27 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
         }
     }
     if resp.double_clicked() {
-        ed.select_all();
+        // On a marker: park the playhead exactly on it. Elsewhere: select all.
+        let p = resp.interact_pointer_pos();
+        let target = p.and_then(|p| {
+            let (di, dout) = ((p.x - x_in).abs(), (p.x - x_out).abs());
+            if near(x_in, p) && di <= dout {
+                Some(ed.sel.0)
+            } else if near(x_out, p) {
+                Some(ed.sel.1.saturating_sub(1))
+            } else {
+                None
+            }
+        });
+        match target {
+            Some(f) => {
+                ed.playhead = f;
+                if pv.playing {
+                    out.push(EdIntent::Seek(f));
+                }
+            }
+            None => ed.select_all(),
+        }
     }
     if resp.secondary_clicked() {
         out.push(EdIntent::TookFocus);
@@ -359,7 +507,7 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     let wave_in = vis.selection.stroke.color;
     let wave_out = vis.weak_text_color();
 
-    for (c, (data, peaks)) in cur.sample.channels.iter().zip(&cur.peaks).enumerate() {
+    for (c, (data, peaks)) in cur.sample.channels.iter().zip(cur.peaks.iter()).enumerate() {
         let lane = Rect::from_min_size(
             Pos2::new(lanes.left(), lanes.top() + c as f32 * lane_h),
             vec2(lanes.width(), lane_h),
@@ -531,7 +679,7 @@ fn overview(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, out: &mut V
             let f0 = (px as f64 * fpp) as usize;
             let f1 = (((px + 1) as f64 * fpp) as usize).max(f0 + 1);
             let mut hi = 0f32;
-            for (data, peaks) in cur.sample.channels.iter().zip(&cur.peaks) {
+            for (data, peaks) in cur.sample.channels.iter().zip(cur.peaks.iter()) {
                 let (lo, h) = peaks.range(data, f0, f1);
                 hi = hi.max(h.abs()).max(lo.abs());
             }
@@ -584,7 +732,7 @@ fn stats_table(ui: &mut Ui, ed: &mut Editor) {
 
     egui::Grid::new("editor_stats").num_columns(3).spacing([18.0, 3.0]).striped(true).show(ui, |ui| {
         ui.label("");
-        ui.label(RichText::new("Region (with gain)").weak());
+        ui.label(RichText::new(if ed.mono_active() { "Region (mono, with gain)" } else { "Region (with gain)" }).weak());
         ui.label(RichText::new("File").weak());
         ui.end_row();
 

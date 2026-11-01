@@ -20,13 +20,25 @@ use crate::preview::Preview;
 use crate::sizes::SizeCache;
 use crate::state;
 use crate::tab::DirTab;
-use crate::ui::dialogs::{self, Decision};
+use crate::ui::dialogs::{self, Decision, MonoChoice};
 use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
 use std::path::{Path, PathBuf};
 
 /// A transfer the user has been asked about and not yet answered.
 struct PendingPlan {
     plan: Plan,
+    /// What each op means once the conflict question is answered.
+    what: PlanKind,
+}
+
+enum PlanKind {
+    /// Plain copy/move of everything in the plan.
+    Transfer,
+    /// A commit: ops whose source is in `fold` are mono-folded exports, the
+    /// rest are plain copies.
+    Commit { fold: std::collections::HashSet<PathBuf>, dest_dir: PathBuf },
+    /// The editor's single-file export (one op).
+    Export { mono: bool },
 }
 
 struct ActiveJob {
@@ -49,6 +61,10 @@ pub struct App {
     next_tab_id: u64,
     show_hidden: bool,
     pending: Option<PendingPlan>,
+    /// Destination of an export waiting on the mono-fold warning.
+    mono_pending: Option<PathBuf>,
+    /// Paths waiting on the "move to Trash?" confirmation.
+    trash_pending: Option<Vec<PathBuf>>,
     active_job: Option<ActiveJob>,
     status: String,
     errors: Vec<String>,
@@ -62,11 +78,29 @@ pub struct App {
     devices: Vec<DeviceInfo>,
     output_device: Option<String>,
     favourites: Vec<PathBuf>,
+    /// Files ever loaded into the editor (persisted).
+    opened: std::collections::HashSet<PathBuf>,
+    /// `opened` grew since the last change check. Kept out of the per-frame
+    /// snapshot comparison because the set can get large.
+    opened_dirty: bool,
+    /// Files ever committed to a destination (persisted). Tracked like
+    /// `opened`, through `committed_dirty`.
+    committed: std::collections::HashSet<PathBuf>,
+    committed_dirty: bool,
     /// Which file the engine's voice is playing.
     voice_path: Option<PathBuf>,
+    /// The exact sample buffer the voice was given. A crop (or undoing one)
+    /// swaps the editor's buffer, and the voice has to follow.
+    voice_sample: Option<std::sync::Arc<crate::audio::decode::Sample>>,
     /// File-cursor target last seen, to auto-load on change.
     last_cursor: Option<PathBuf>,
+    /// A saved editor session was restored: don't let the file cursor's
+    /// first landing auto-load something else over it.
+    hold_cursor_load: bool,
     last_stream_error: Option<String>,
+    /// Source / destination column widths from the last frame, used to keep
+    /// the editor column from being squeezed below its minimum.
+    side_widths: [f32; 2],
 }
 
 impl App {
@@ -103,7 +137,11 @@ impl App {
 
         let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
         let engine = Engine::open(output_device.as_deref());
-        let editor = Editor::new(ctx.clone(), saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default());
+        let mut editor = Editor::new(ctx.clone(), saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default());
+        let session = saved.as_ref().and_then(|s| s.session.clone()).filter(|s| s.path.is_file());
+        if let Some(s) = &session {
+            editor.restore_session(s);
+        }
         let mut errors = Vec::new();
         if let Some(e) = &engine.open_error {
             errors.push(format!("audio output: {e}"));
@@ -116,9 +154,16 @@ impl App {
             devices: Engine::devices(),
             output_device,
             favourites: saved.as_ref().map(|s| s.favourites.clone()).unwrap_or_default(),
+            opened: saved.as_ref().map(|s| s.opened.iter().cloned().collect()).unwrap_or_default(),
+            opened_dirty: false,
+            committed: saved.as_ref().map(|s| s.committed.iter().cloned().collect()).unwrap_or_default(),
+            committed_dirty: false,
             voice_path: None,
+            voice_sample: None,
             last_cursor: None,
+            hold_cursor_load: session.is_some(),
             last_stream_error: None,
+            side_widths: [0.0; 2],
             jobs: Jobs::new(ctx),
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
@@ -129,6 +174,8 @@ impl App {
             next_tab_id,
             show_hidden: saved.as_ref().is_some_and(|s| s.show_hidden),
             pending: None,
+            mono_pending: None,
+            trash_pending: None,
             active_job: None,
             status: String::new(),
             errors,
@@ -138,7 +185,9 @@ impl App {
         app
     }
 
-    fn snapshot(&self) -> state::AppState {
+    /// `with_opened` is false for the per-frame change check, which tracks
+    /// `opened` through `opened_dirty` instead.
+    fn snapshot(&self, with_opened: bool) -> state::AppState {
         let pane = |p: &Pane| state::PaneState {
             tabs: p
                 .tabs
@@ -161,6 +210,21 @@ impl App {
             editor: self.editor.prefs.clone(),
             output_device: self.output_device.clone(),
             favourites: self.favourites.clone(),
+            opened: if with_opened {
+                let mut v: Vec<PathBuf> = self.opened.iter().cloned().collect();
+                v.sort();
+                v
+            } else {
+                Vec::new()
+            },
+            committed: if with_opened {
+                let mut v: Vec<PathBuf> = self.committed.iter().cloned().collect();
+                v.sort();
+                v
+            } else {
+                Vec::new()
+            },
+            session: self.editor.session(),
         }
     }
 
@@ -235,6 +299,12 @@ impl App {
         }
     }
 
+    fn mark_committed(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for p in paths {
+            self.committed_dirty |= self.committed.insert(p);
+        }
+    }
+
     fn request_sizes(&mut self, paths: Vec<PathBuf>) {
         for p in paths {
             if p.is_dir() && self.sizes.request(&p) {
@@ -252,16 +322,68 @@ impl App {
     /// swap the two role arguments for `(self.focused, self.focused.other())`.
     fn commit(&mut self, kind: Kind) {
         let sources = self.pane(Role::Source).active_tab().effective_selection();
+        // Nothing selected (e.g. right after launch, with a file restored in
+        // the editor): commit the editor's file as you hear it.
+        if sources.is_empty() && kind == Kind::Copy && self.editor.current.is_some() {
+            self.export();
+            return;
+        }
         if sources.is_empty() {
             self.status = "Nothing selected in the source pane".to_owned();
             return;
         }
         let dest_dir = self.pane(Role::Dest).active_tab().cwd.clone();
-        self.start_transfer(kind, sources, dest_dir);
+        if kind == Kind::Move {
+            self.start_transfer(kind, sources, dest_dir);
+            return;
+        }
+
+        // A single file that's open in the editor goes out as you hear it:
+        // trimmed, with gain, and folded to mono if that's set.
+        if let [only] = sources.as_slice() {
+            if self.editor.path() == Some(only.as_path())
+                && (self.editor.is_edited() || self.editor.exports_mono())
+            {
+                self.export();
+                return;
+            }
+        }
+
+        // Otherwise trim and gain don't apply; files are copied as they are,
+        // except multichannel audio when "save mono" is on, which gets folded.
+        let (fold, copy): (Vec<PathBuf>, Vec<PathBuf>) = if self.editor.prefs.save_mono {
+            sources.into_iter().partition(|p| {
+                p.is_file()
+                    && crate::fs_model::is_audio_path(p)
+                    && crate::audio::decode::channel_count(p).is_some_and(|n| n > 1)
+            })
+        } else {
+            (Vec::new(), sources)
+        };
+        // Copies and folds go into one plan so existing files are asked about
+        // once, in one popup.
+        let mut plan = ops::plan(kind, &copy, &dest_dir, |p| self.sizes.bytes_of(p));
+        for src in &fold {
+            let dst = crate::audio::export::target_for(src, &dest_dir);
+            plan.ops.push(ops::Op {
+                conflict: dst.exists(),
+                approx_bytes: std::fs::metadata(src).map(|m| m.len()).unwrap_or(0),
+                src: src.clone(),
+                dst,
+                is_dir: false,
+            });
+        }
+        let what = PlanKind::Commit { fold: fold.into_iter().collect(), dest_dir };
+        self.offer(plan, what);
     }
 
     fn start_transfer(&mut self, kind: Kind, sources: Vec<PathBuf>, dest_dir: PathBuf) {
         let plan = ops::plan(kind, &sources, &dest_dir, |p| self.sizes.bytes_of(p));
+        self.offer(plan, PlanKind::Transfer);
+    }
+
+    /// Run `plan` now, or hold it and ask first if anything already exists.
+    fn offer(&mut self, plan: Plan, what: PlanKind) {
 
         for (path, why) in &plan.rejected {
             self.errors.push(format!("{}: {why}", path.display()));
@@ -272,17 +394,44 @@ impl App {
         }
         if plan.conflicts() > 0 {
             // Hold the plan and let the modal decide. No bytes move until then.
-            self.pending = Some(PendingPlan { plan });
+            self.pending = Some(PendingPlan { plan, what });
             return;
         }
-        self.launch(&plan, Policy::KeepBoth);
+        self.launch(&plan, what, Policy::KeepBoth);
     }
 
-    fn launch(&mut self, plan: &Plan, policy: Policy) {
-        let resolved = ops::resolve(plan, policy);
+    fn launch(&mut self, plan: &Plan, what: PlanKind, policy: Policy) {
+        let mut resolved = ops::resolve(plan, policy);
         if resolved.is_empty() {
             self.status = "All items skipped".to_owned();
             return;
+        }
+        match what {
+            PlanKind::Transfer => {}
+            PlanKind::Export { mono } => {
+                let op = resolved.remove(0);
+                if let Some(p) = self.editor.path().map(Path::to_path_buf) {
+                    self.mark_committed([p]);
+                }
+                self.status = format!("Exporting{} to {}…", if mono { " (mono)" } else { "" }, op.dst.display());
+                self.editor.export(op.dst, mono);
+                return;
+            }
+            PlanKind::Commit { fold, dest_dir } => {
+                let (folds, copies): (Vec<_>, Vec<_>) = resolved.into_iter().partition(|o| fold.contains(&o.src));
+                resolved = copies;
+                if !folds.is_empty() {
+                    self.mark_committed(folds.iter().map(|o| o.src.clone()));
+                    self.status = format!("Folding {} file(s) to mono…", folds.len());
+                    self.editor.export_mono_batch(folds.into_iter().map(|o| (o.src, o.dst)).collect(), dest_dir);
+                }
+                if resolved.is_empty() {
+                    return;
+                }
+            }
+        }
+        if plan.kind == Kind::Copy {
+            self.mark_committed(resolved.iter().map(|o| o.src.clone()));
         }
         let total_items = resolved.len();
         let total_bytes = resolved.iter().map(|o| o.approx_bytes).sum();
@@ -374,7 +523,7 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
         let renaming = self.pane(self.focused).active_tab().renaming.is_some();
-        if renaming || self.pending.is_some() {
+        if renaming || self.pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -402,14 +551,21 @@ impl App {
         self.engine.is_playing() && self.voice_path.is_some() && self.voice_path.as_deref() == self.editor.path()
     }
 
-    /// Play the editor's sample from the parked playhead, or from the in point
-    /// if the playhead is outside the region.
+    /// Play from wherever the toolbar's "From" setting says.
     fn start_play(&mut self) {
+        self.start_play_from(self.editor.prefs.play_from_in);
+    }
+
+    /// Play the editor's sample from the in point, or from the parked
+    /// playhead (falling back to the in point if the playhead is outside
+    /// the region).
+    fn start_play_from(&mut self, from_in: bool) {
         let Some(s) = self.editor.sample().cloned() else { return };
         let (a, b) = self.editor.sel;
         let ph = self.editor.playhead;
-        let from = if (a..b).contains(&ph) { ph } else { a };
+        let from = if !from_in && (a..b).contains(&ph) { ph } else { a };
         self.voice_path = Some(s.path.clone());
+        self.voice_sample = Some(s.clone());
         self.engine.play(
             s,
             PlayParams {
@@ -418,6 +574,7 @@ impl App {
                 end: b,
                 looping: self.editor.prefs.looping,
                 gain: self.editor.gain(),
+                mono: self.editor.mono_active(),
             },
         );
     }
@@ -443,6 +600,9 @@ impl App {
         }
         self.editor.play_when_loaded = play;
         self.editor.request(path);
+        if self.opened.insert(path.to_path_buf()) {
+            self.opened_dirty = true;
+        }
     }
 
     /// Space / double-click on a file row.
@@ -462,6 +622,15 @@ impl App {
             .cursor_entry()
             .filter(|e| e.is_audio)
             .map(|e| e.path.clone());
+        if self.hold_cursor_load {
+            // Wait for the restored listing to settle, then adopt its cursor
+            // without loading it.
+            if !self.pane(self.focused).active_tab().loading {
+                self.hold_cursor_load = false;
+                self.last_cursor = cur;
+            }
+            return;
+        }
         if cur == self.last_cursor {
             return;
         }
@@ -496,8 +665,27 @@ impl App {
             return;
         }
         let dest = self.pane(Role::Dest).active_tab().cwd.clone();
-        self.status = format!("Exporting to {}…", dest.display());
-        self.editor.export(dest);
+        // Folding to mono without having listened to the fold: ask first.
+        if self.editor.exports_mono() && !self.editor.mono_active() {
+            self.mono_pending = Some(dest);
+            return;
+        }
+        let mono = self.editor.exports_mono();
+        self.export_to(dest, mono);
+    }
+
+    fn export_to(&mut self, dest: PathBuf, mono: bool) {
+        let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        let dst = crate::audio::export::target_for(&src, &dest);
+        let op = ops::Op {
+            conflict: dst.exists(),
+            approx_bytes: 0,
+            src,
+            dst,
+            is_dir: false,
+        };
+        let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
+        self.offer(plan, PlanKind::Export { mono });
     }
 
     fn perform_editor(&mut self, a: EdAction, wave: Option<egui::Rect>) {
@@ -511,10 +699,40 @@ impl App {
         };
         match a {
             EdAction::TogglePlay => self.toggle_play(),
+            EdAction::TogglePlayAlt => {
+                if self.playing_current() {
+                    self.engine.stop();
+                } else {
+                    self.start_play_from(!self.editor.prefs.play_from_in);
+                }
+            }
+            EdAction::ToggleFollow => ed.prefs.follow_playback = !ed.prefs.follow_playback,
+            EdAction::ToggleSnap => {
+                ed.prefs.snap_zero = !ed.prefs.snap_zero;
+                if ed.prefs.snap_zero {
+                    ed.snap_selection();
+                }
+            }
+            EdAction::InZero(dir) | EdAction::OutZero(dir) => {
+                if matches!(a, EdAction::InZero(_)) {
+                    ed.step_in(dir);
+                } else {
+                    ed.step_out(dir);
+                }
+                let f = if matches!(a, EdAction::InZero(_)) { ed.sel.0 } else { ed.sel.1 };
+                if let Some(r) = wave {
+                    editor_view::ensure_visible(ed, r.width(), f);
+                }
+            }
+            EdAction::Crop => ed.crop_to_selection(),
+            EdAction::Uncrop => ed.uncrop(),
+            EdAction::Undo => ed.undo(),
+            EdAction::Redo => ed.redo(),
             EdAction::Stop => self.engine.stop(),
             EdAction::SetIn => ed.set_in(here),
             EdAction::SetOut => ed.set_out(here),
             EdAction::ToggleLoop => ed.prefs.looping = !ed.prefs.looping,
+            EdAction::ToggleMono => ed.prefs.mono_preview = !ed.prefs.mono_preview,
             EdAction::Nudge(n, dir) => {
                 let px = ed.view.fpp.round().max(1.0) as isize;
                 let step = match n {
@@ -637,7 +855,7 @@ impl App {
             Action::Trash => {
                 let sel = self.pane(role).active_tab().effective_selection();
                 if !sel.is_empty() {
-                    self.jobs.trash(sel);
+                    self.trash_pending = Some(sel);
                 }
             }
             Action::SelectAll => self.pane_mut(role).active_tab_mut().select_all(),
@@ -727,7 +945,7 @@ impl App {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, state::KEY, &self.snapshot());
+        eframe::set_value(storage, state::KEY, &self.snapshot(true));
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -737,8 +955,10 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // eframe only autosaves on a frame. After a change, make sure one
         // happens once the interval has passed, even if the app goes idle.
-        let snap = self.snapshot();
-        if self.last_state.as_ref() != Some(&snap) {
+        let snap = self.snapshot(false);
+        if self.last_state.as_ref() != Some(&snap) || std::mem::take(&mut self.opened_dirty)
+            | std::mem::take(&mut self.committed_dirty)
+        {
             self.last_state = Some(snap);
             ctx.request_repaint_after(state::SAVE_INTERVAL + std::time::Duration::from_millis(100));
         }
@@ -753,8 +973,15 @@ impl eframe::App for App {
         // Edits apply live to the running voice: drag an out point while the
         // loop plays and you hear the seam move.
         if self.playing_current() {
+            let swapped = match (&self.voice_sample, self.editor.sample()) {
+                (Some(v), Some(e)) => !std::sync::Arc::ptr_eq(v, e),
+                _ => false,
+            };
+            if swapped {
+                self.start_play();
+            }
             let ed = &self.editor;
-            self.engine.update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain());
+            self.engine.update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain(), ed.mono_active());
             ctx.request_repaint();
         }
         self.preview.set(if self.engine.is_playing() { self.voice_path.clone() } else { None });
@@ -772,17 +999,30 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
 
         // Three columns: Source | Sample Editor | Destination.
+        // The side columns are drag-resizable; the editor takes whatever is
+        // left, but never less than MIN_EDITOR_W.
+        const MIN_SIDE_W: f32 = 220.0;
+        const MIN_EDITOR_W: f32 = 360.0;
         let w = ui.available_width();
-        egui::Panel::left("source_col")
+        let default_w = w * 0.27;
+        let prev_r = if self.side_widths[1] > 0.0 { self.side_widths[1] } else { default_w };
+        let max_for = |other: f32| (w - other - MIN_EDITOR_W).max(MIN_SIDE_W);
+
+        let left = egui::Panel::left("source_col")
             .resizable(true)
-            .default_size(w * 0.27)
-            .min_size(220.0)
+            .default_size(default_w)
+            .size_range(MIN_SIDE_W..=max_for(prev_r))
             .show(ui, |ui| self.show_pane(ui, Role::Source));
-        egui::Panel::right("dest_col")
+        self.side_widths[0] = left.response.rect.width();
+        let right = egui::Panel::right("dest_col")
             .resizable(true)
-            .default_size(w * 0.27)
-            .min_size(220.0)
+            .default_size(default_w)
+            .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
             .show(ui, |ui| self.show_pane(ui, Role::Dest));
+        self.side_widths[1] = right.response.rect.width();
+        draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
+        draw_divider(ui, right.response.rect.left(), right.response.rect.y_range());
+
         egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
 
         // Modal last, so it paints over both panes.
@@ -790,14 +1030,47 @@ impl eframe::App for App {
             if let Some(decision) = dialogs::conflicts(ui.ctx(), &p.plan) {
                 let pending = self.pending.take().expect("checked above");
                 match decision {
-                    Decision::Proceed(policy) => self.launch(&pending.plan, policy),
+                    Decision::Proceed(policy) => self.launch(&pending.plan, pending.what, policy),
                     Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
+                }
+            }
+        }
+
+        if self.mono_pending.is_some() {
+            let ph = self.editor.region_phase();
+            if let Some(c) = dialogs::mono_export(ui.ctx(), &ph) {
+                let dest = self.mono_pending.take().expect("checked above");
+                match c {
+                    MonoChoice::SaveMono => self.export_to(dest, true),
+                    MonoChoice::SaveStereo => self.export_to(dest, false),
+                    MonoChoice::Listen => {
+                        self.editor.prefs.mono_preview = true;
+                        self.status = "Mono preview on — export again when it sounds right".to_owned();
+                    }
+                    MonoChoice::Cancel => self.status = "Export cancelled".to_owned(),
+                }
+            }
+        }
+
+        if let Some(paths) = &self.trash_pending {
+            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths) {
+                let paths = self.trash_pending.take().expect("checked above");
+                if yes {
+                    self.jobs.trash(paths);
+                } else {
+                    self.status = "Delete cancelled".to_owned();
                 }
             }
         }
 
         self.handle_keys(ui);
         self.follow_cursor();
+
+        // Undo steps are recorded by diffing the editor state once a frame,
+        // after any drag, slider or typed value has been let go.
+        let (busy_ptr, now) = ui.input(|i| (i.pointer.any_down(), i.time));
+        let busy = busy_ptr || self.editor.drag.is_some() || ui.ctx().text_edit_focused();
+        self.editor.track_history(busy, now);
 
         // Buttons and toggles take keyboard focus when clicked, after which
         // egui would turn Space/Enter into clicks on them and arrows into
@@ -827,6 +1100,11 @@ impl App {
                         self.sizes.invalidate_subtree(dir);
                         self.reload_showing(dir);
                     }
+                }
+                Outcome::BatchExported(dir, n) => {
+                    self.status = format!("Folded {n} file(s) to mono");
+                    self.sizes.invalidate_subtree(&dir);
+                    self.reload_showing(&dir);
                 }
                 Outcome::Error(e) => self.errors.push(e),
             }
@@ -898,24 +1176,27 @@ impl App {
             ui.heading("Sample Manager");
             ui.separator();
 
-            let commit_key = self.keymap.describe(Action::Commit);
-            if ui
-                .button(format!("Commit to destination  {commit_key}"))
-                .on_hover_text("Copy the source selection into the active destination tab")
-                .clicked()
-            {
-                self.commit(Kind::Copy);
-            }
-            if ui.button("Move").clicked() {
-                self.commit(Kind::Move);
-            }
-
-            ui.separator();
             if ui.checkbox(&mut self.show_hidden, "Hidden").changed() {
                 self.reload_all();
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right to left: the first widget lands at the far right.
+                let commit_key = self.keymap.describe(Action::Commit);
+                if ui
+                    .button(format!("Commit to destination  {commit_key}"))
+                    .on_hover_text(
+                        "Copy the source selection into the active destination tab.\n\
+                         A single file open in the editor is written with its trim, gain and mono settings.",
+                    )
+                    .clicked()
+                {
+                    self.commit(Kind::Copy);
+                }
+                if ui.button("Move").clicked() {
+                    self.commit(Kind::Move);
+                }
+                ui.separator();
                 ui.label(
                     egui::RichText::new(format!("keys: {}", self.keymap.name))
                         .weak()
@@ -1026,6 +1307,8 @@ impl App {
         let intents = {
             let sizes = &self.sizes;
             let preview = &self.preview;
+            let opened = &self.opened;
+            let committed = &self.committed;
             // Borrow the pane field directly rather than via `pane_mut`, so
             // the borrow checker can see it is disjoint from `sizes`/`preview`.
             let pane = match role {
@@ -1039,6 +1322,8 @@ impl App {
                 TableCtx {
                     sizes,
                     preview,
+                    opened,
+                    committed,
                     pane_focused: focused,
                 },
             )
@@ -1075,6 +1360,11 @@ impl App {
                 Intent::GoUp => self.go_up(role),
                 Intent::Expand(p) => self.expand(role, p),
                 Intent::AddFavourite(p) => self.add_favourite(p),
+                Intent::Trash(paths) => {
+                    if !paths.is_empty() {
+                        self.trash_pending = Some(paths);
+                    }
+                }
                 Intent::Dropped(paths) => {
                     let dest = self.pane(role).active_tab().cwd.clone();
                     self.start_transfer(Kind::Copy, paths, dest);
@@ -1246,3 +1536,22 @@ fn dirs_home() -> PathBuf {
 
 // Keep `SortKey` reachable from here for future column config.
 const _: Option<SortKey> = None;
+
+/// A visible column divider with a small grip in the middle, so the
+/// draggable panel edge is easy to find even when not hovered.
+fn draw_divider(ui: &egui::Ui, x: f32, ys: egui::Rangef) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::unique("column_dividers"),
+    ));
+    let visuals = &ui.style().visuals;
+    let line = egui::Stroke::new(1.0, visuals.widgets.inactive.bg_stroke.color.gamma_multiply(1.6));
+    painter.vline(x, ys, line);
+
+    // Grip: three dots centred on the divider.
+    let cy = ys.center();
+    let dot = visuals.widgets.inactive.fg_stroke.color;
+    for dy in [-8.0, 0.0, 8.0] {
+        painter.circle_filled(egui::pos2(x, cy + dy), 1.8, dot);
+    }
+}

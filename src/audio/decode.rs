@@ -113,3 +113,19 @@ pub fn decode(path: &Path) -> Result<Sample, String> {
         file_len,
     })
 }
+
+/// Channel count from the file header alone, without decoding any audio.
+pub fn channel_count(path: &Path) -> Option<usize> {
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension() {
+        hint.with_extension(&ext.to_string_lossy().to_ascii_lowercase());
+    }
+    let format = symphonia::default::get_probe()
+        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .ok()?;
+    let track = format.default_track(TrackType::Audio)?;
+    let params = track.codec_params.as_ref()?.audio()?;
+    params.channels.as_ref().map(|c| c.count())
+}

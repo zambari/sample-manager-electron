@@ -60,3 +60,46 @@ pub fn from_db(db: f32) -> f32 {
 pub fn fmt_db(db: f32) -> String {
     if db.is_finite() { format!("{db:+.1} dB") } else { "−∞ dB".to_owned() }
 }
+
+/// How the first two channels relate, and what folding to mono costs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Phase {
+    /// L/R correlation, −1 (out of phase) … +1 (mono). `None` on silence.
+    pub corr: Option<f32>,
+    /// Mono sum RMS relative to the stereo RMS, in dB. 0 for identical
+    /// channels, about −3 for unrelated ones, very negative when they cancel.
+    pub mono_loss_db: f32,
+}
+
+/// Mono fold used everywhere: plain average of all channels.
+pub fn mono_at(channels: &[Vec<f32>], i: usize) -> f32 {
+    channels.iter().map(|c| c[i]).sum::<f32>() / channels.len().max(1) as f32
+}
+
+pub fn mono_region(channels: &[Vec<f32>], start: usize, end: usize) -> Vec<f32> {
+    let end = end.min(channels.first().map_or(0, Vec::len));
+    (start.min(end)..end).map(|i| mono_at(channels, i)).collect()
+}
+
+pub fn phase(channels: &[Vec<f32>], start: usize, end: usize) -> Phase {
+    if channels.len() < 2 {
+        return Phase { corr: Some(1.0), mono_loss_db: 0.0 };
+    }
+    let (l, r) = (&channels[0], &channels[1]);
+    let end = end.min(l.len()).min(r.len());
+    let (mut lr, mut ll, mut rr, mut mm) = (0f64, 0f64, 0f64, 0f64);
+    for i in start.min(end)..end {
+        let (a, b) = (l[i] as f64, r[i] as f64);
+        lr += a * b;
+        ll += a * a;
+        rr += b * b;
+        let m = mono_at(channels, i) as f64;
+        mm += m * m;
+    }
+    let denom = (ll * rr).sqrt();
+    let corr = (denom > 1e-12).then(|| (lr / denom).clamp(-1.0, 1.0) as f32);
+    // Stereo power per channel (average of L and R) vs the mono sum's power.
+    let st = (ll + rr) / 2.0;
+    let mono_loss_db = if st > 1e-12 { (10.0 * (mm.max(1e-20) / st).log10()) as f32 } else { 0.0 };
+    Phase { corr, mono_loss_db }
+}

@@ -51,12 +51,9 @@ fn export_trims_and_applies_gain() {
     let out_dir = d.join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let r = Render { start: 1000, end: 13_000, gain: 2.0 };
-    let a = write_wav(&s, &r, &out_dir).unwrap();
+    let r = Render { start: 1000, end: 13_000, gain: 2.0, mono: false };
+    let a = write_wav(&s, &r, &out_dir.join("sine.wav")).unwrap();
     assert_eq!(a.file_name().unwrap(), "sine.wav");
-    // Second export keeps both rather than overwriting.
-    let b = write_wav(&s, &r, &out_dir).unwrap();
-    assert_eq!(b.file_name().unwrap(), "sine 2.wav");
 
     let e = decode(&a).unwrap();
     assert_eq!(e.frames(), 12_000);

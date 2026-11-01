@@ -8,6 +8,12 @@ pub const AUDIO_EXTS: &[&str] = &[
     "wav", "aiff", "aif", "flac", "mp3", "ogg", "m4a", "aac", "opus", "wv", "caf",
 ];
 
+/// Does `path` have one of the [`AUDIO_EXTS`] extensions?
+pub fn is_audio_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| AUDIO_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
+}
+
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub name: String,

@@ -9,7 +9,7 @@ use crate::fs_model::{self, SortKey};
 use crate::preview::Preview;
 use crate::sizes::{Size, SizeCache};
 use crate::tab::DirTab;
-use egui::{Align, Key, RichText, Sense, Stroke, StrokeKind, Ui};
+use egui::{Align, Key, Sense, Stroke, StrokeKind, Ui};
 use std::path::PathBuf;
 
 pub const ROW_HEIGHT: f32 = 22.0;
@@ -39,11 +39,17 @@ pub enum Intent {
     /// Expand this folder in tree mode (needs a listing request).
     Expand(PathBuf),
     AddFavourite(PathBuf),
+    /// Move these to the Trash (after confirmation).
+    Trash(Vec<PathBuf>),
 }
 
 pub struct TableCtx<'a> {
     pub sizes: &'a SizeCache,
     pub preview: &'a Preview,
+    /// Files already loaded into the editor; drawn gray.
+    pub opened: &'a std::collections::HashSet<PathBuf>,
+    /// Files already committed to a destination; drawn with a check badge.
+    pub committed: &'a std::collections::HashSet<PathBuf>,
     pub pane_focused: bool,
 }
 
@@ -71,7 +77,9 @@ pub fn show(ui: &mut Ui, tab: &mut DirTab, cx: TableCtx<'_>) -> Vec<Intent> {
 }
 
 fn header(ui: &mut Ui, tab: &mut DirTab) {
-    ui.horizontal(|ui| {
+    // Wraps rather than forcing a minimum width, so the column can be
+    // dragged narrower than a full row of controls.
+    ui.horizontal_wrapped(|ui| {
         for key in [SortKey::Name, SortKey::Size, SortKey::Modified, SortKey::Kind] {
             let active = tab.sort_key == key;
             let arrow = if !active {
@@ -161,13 +169,12 @@ fn parent_row(ui: &mut Ui, intents: &mut Vec<Intent>) {
         ui.painter().rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let mut content = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(6.0, 0.0)))
-            .layout(egui::Layout::left_to_right(Align::Center)),
-    );
-    content.label("⬆");
-    content.label(RichText::new("..").strong());
+    // Painted, not label widgets, so the text can't swallow clicks.
+    let inner = rect.shrink2(egui::vec2(6.0, 0.0));
+    let x = paint_text(ui, inner, "⬆", body_font(ui, 0.0), ui.visuals().text_color());
+    let mut name_rect = inner;
+    name_rect.min.x = x + ui.spacing().item_spacing.x;
+    paint_text(ui, name_rect, "..", body_font(ui, 1.0), egui::Color32::WHITE);
     // Double click, like any other folder row.
     if resp.on_hover_text("Parent folder").double_clicked() {
         intents.push(Intent::GoUp);
@@ -198,7 +205,9 @@ fn row(
         Sense::empty(),
     );
 
-    // Backgrounds first, so text draws on top.
+    // Backgrounds first, so text draws on top. The hover fill isn't known
+    // until the row's response exists, so reserve a slot for it here.
+    let bg = ui.painter().add(egui::Shape::Noop);
     if is_selected {
         let fill = if cx.pane_focused {
             ui.visuals().selection.bg_fill
@@ -246,12 +255,7 @@ fn row(
         }
         inner.min.x += ARROW_W + 2.0;
     }
-    let mut content = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::left_to_right(Align::Center)),
-    );
-    draw_cells(&mut content, cx, &entry, tab);
+    draw_cells(ui, inner, cx, &entry);
 
     // One interaction region covering the whole row, sensing both so a click
     // selects and a press-and-move starts a drag.
@@ -260,6 +264,12 @@ fn row(
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        // Highlight the full row so it's clear the whole width is a target.
+        // Painted behind the text (which was laid out before we knew).
+        if !is_selected {
+            let hover = ui.visuals().widgets.hovered.weak_bg_fill;
+            ui.painter().set(bg, egui::Shape::rect_filled(rect, 3.0, hover));
+        }
     }
 
     // The arrow sits on top of the row, so it's checked after (egui gives the
@@ -314,8 +324,22 @@ fn row(
         intents.push(Intent::Open(entry.path.clone()));
     }
 
+    // Right-clicking outside the selection selects that row first, like
+    // Finder, so the menu always acts on what's highlighted.
+    if resp.secondary_clicked() {
+        intents.push(Intent::TookFocus);
+        if !is_selected {
+            tab.selected.clear();
+            tab.selected.insert(entry.path.clone());
+            tab.cursor = Some(vis_i);
+            tab.anchor = Some(vis_i);
+        }
+    }
+
     resp.context_menu(|ui| {
-        if ui.button("Rename").clicked() {
+        // Rename and Open only make sense for one item.
+        let single = tab.selected.len() <= 1;
+        if single && ui.button("Rename").clicked() {
             intents.push(Intent::BeginRename(entry.path.clone()));
             ui.close();
         }
@@ -327,14 +351,31 @@ fn row(
             intents.push(Intent::AddFavourite(entry.path.clone()));
             ui.close();
         }
-        if entry.is_dir && ui.button("Open").clicked() {
+        if single && entry.is_dir && ui.button("Open").clicked() {
             intents.push(Intent::Open(entry.path.clone()));
+            ui.close();
+        }
+        ui.separator();
+        let sel = tab.effective_selection();
+        let label = if sel.len() > 1 {
+            format!("Move {} items to Trash", sel.len())
+        } else {
+            "Move to Trash".to_owned()
+        };
+        if ui
+            .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
+            .clicked()
+        {
+            intents.push(Intent::Trash(sel));
             ui.close();
         }
     });
 }
 
-fn draw_cells(ui: &mut Ui, cx: &TableCtx<'_>, entry: &fs_model::Entry, tab: &DirTab) {
+/// Draws a row's icon, name and size straight onto the painter. These are
+/// deliberately not widgets: a label would sit on top of the row's
+/// interaction area and swallow clicks meant for the row.
+fn draw_cells(ui: &Ui, inner: egui::Rect, cx: &TableCtx<'_>, entry: &fs_model::Entry) {
     let icon = if entry.is_dir {
         "📁"
     } else if cx.preview.is_playing(&entry.path) {
@@ -344,33 +385,84 @@ fn draw_cells(ui: &mut Ui, cx: &TableCtx<'_>, entry: &fs_model::Entry, tab: &Dir
     } else {
         "·"
     };
-    ui.label(icon);
+    let gap = ui.spacing().item_spacing.x;
 
-    let name = RichText::new(&entry.name);
-    let name = if entry.is_dir { name.strong() } else { name };
-    ui.label(name);
-
-    // Right-aligned metadata.
-    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-        let size_text = if entry.is_dir {
-            match cx.sizes.get(&entry.path) {
-                Some(Size::Known { bytes, files }) => {
-                    format!("{} · {files} files", fs_model::human_bytes(bytes))
-                }
-                Some(Size::Pending) => "calculating…".to_owned(),
-                // Dash rather than 0: we genuinely don't know yet, and
-                // claiming 0 would be a lie.
-                None => "—".to_owned(),
+    // Right-aligned size first, so the name knows how much room it has.
+    let size_text = if entry.is_dir {
+        match cx.sizes.get(&entry.path) {
+            Some(Size::Known { bytes, files }) => {
+                format!("{} · {files} files", fs_model::human_bytes(bytes))
             }
-        } else {
-            fs_model::human_bytes(entry.len)
-        };
-        ui.add(
-            egui::Label::new(RichText::new(size_text).weak().monospace())
-                .selectable(false),
+            Some(Size::Pending) => "calculating…".to_owned(),
+            // Dash rather than 0: we genuinely don't know yet, and
+            // claiming 0 would be a lie.
+            None => "—".to_owned(),
+        }
+    } else {
+        fs_model::human_bytes(entry.len)
+    };
+    let mono = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(12.0));
+    let size_galley =
+        ui.painter().layout_no_wrap(size_text, mono, ui.visuals().weak_text_color());
+    let size_pos = egui::pos2(
+        inner.right() - size_galley.size().x,
+        inner.center().y - size_galley.size().y / 2.0,
+    );
+    let mut size_left = size_pos.x;
+    ui.painter().galley(size_pos, size_galley, egui::Color32::PLACEHOLDER);
+
+    // Committed badge: a green check just left of the size column.
+    if cx.committed.contains(&entry.path) {
+        let badge = ui.painter().layout_no_wrap(
+            "✔".to_owned(),
+            body_font(ui, 0.0),
+            egui::Color32::from_rgb(110, 200, 120),
         );
-        let _ = tab;
-    });
+        let pos = egui::pos2(
+            size_left - gap - badge.size().x,
+            inner.center().y - badge.size().y / 2.0,
+        );
+        size_left = pos.x;
+        ui.painter().galley(pos, badge, egui::Color32::PLACEHOLDER);
+    }
+
+    let x = paint_text(ui, inner, icon, body_font(ui, 0.0), ui.visuals().text_color());
+
+    // Name: white (gray once opened in the editor), one point larger than
+    // body text, cut off with "…" if it would run into the size column.
+    let mut name_rect = inner;
+    name_rect.min.x = x + gap;
+    name_rect.max.x = (size_left - gap).max(name_rect.min.x);
+    let name_color = if cx.opened.contains(&entry.path) {
+        egui::Color32::GRAY
+    } else {
+        egui::Color32::WHITE
+    };
+    paint_text(ui, name_rect, &entry.name, body_font(ui, 1.0), name_color);
+}
+
+/// The body font, `extra` points larger.
+fn body_font(ui: &Ui, extra: f32) -> egui::FontId {
+    let mut f = egui::TextStyle::Body.resolve(ui.style());
+    f.size += extra;
+    f
+}
+
+/// Paints one line of text left-aligned and vertically centred in `rect`,
+/// eliding with "…" if it doesn't fit. Returns the x where the text ends.
+fn paint_text(ui: &Ui, rect: egui::Rect, text: &str, font: egui::FontId, color: egui::Color32) -> f32 {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(0.0));
+    let galley = ui.painter().layout_job(job);
+    let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+    let end = pos.x + galley.size().x;
+    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(pos, galley, color);
+    end
 }
 
 fn rename_editor(
@@ -430,5 +522,92 @@ fn rename_editor(
         intents.push(Intent::CancelRename);
     } else if let Some((_, slot)) = tab.renaming.as_mut() {
         *slot = buf;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_model::Entry;
+
+    fn tab() -> DirTab {
+        let mut t = DirTab::new(1, PathBuf::from("/"));
+        let g = t.begin_reload();
+        let e = |n: &str, d: bool| Entry {
+            name: n.into(),
+            path: PathBuf::from("/").join(n),
+            is_dir: d,
+            len: 1234,
+            modified: None,
+            is_audio: !d,
+        };
+        t.accept_listing(g, Ok(vec![e("folder", true), e("kick.wav", false)]));
+        t.selected.clear();
+        t
+    }
+
+    /// One frame with the table in a left side panel, like the app.
+    fn frame(ctx: &egui::Context, tab: &mut DirTab, events: Vec<egui::Event>) -> Vec<Intent> {
+        let (sizes, preview) = (SizeCache::default(), Preview::default());
+        let mut got = Vec::new();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::Panel::left("col").default_size(320.0).show(ui, |ui| {
+                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), pane_focused: true });
+            });
+            egui::CentralPanel::default().show(ui, |_| {});
+        });
+        out.textures_delta.clear();
+        got
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Clicking anywhere across a row -- icon, name, gaps, size column, empty
+    /// space -- selects it, and double-clicking opens it.
+    #[test]
+    fn whole_row_is_clickable() {
+        // Find the first row's top edge by clicking down through the name.
+        let y = (20..200)
+            .map(|y| y as f32)
+            .find(|&y| {
+                let mut t = tab();
+                let ctx = egui::Context::default();
+                frame(&ctx, &mut t, vec![]);
+                let pos = egui::pos2(40.0, y);
+                frame(&ctx, &mut t, vec![egui::Event::PointerMoved(pos), press(pos, true)]);
+                frame(&ctx, &mut t, vec![press(pos, false)]);
+                t.selected.contains(&PathBuf::from("/folder"))
+            })
+            .expect("row not found")
+            + ROW_HEIGHT / 2.0;
+
+        for x in (12..300).step_by(6) {
+            let ctx = egui::Context::default();
+            let mut t = tab();
+            frame(&ctx, &mut t, vec![]);
+            let pos = egui::pos2(x as f32, y);
+            let mut opened = false;
+            frame(&ctx, &mut t, vec![egui::Event::PointerMoved(pos)]);
+            for _ in 0..2 {
+                for down in [true, false] {
+                    let i = frame(&ctx, &mut t, vec![press(pos, down)]);
+                    opened |= i.iter().any(|i| matches!(i, Intent::Open(_)));
+                }
+            }
+            assert!(t.selected.contains(&PathBuf::from("/folder")), "click at x={x} missed");
+            assert!(opened, "double-click at x={x} didn't open");
+        }
     }
 }
