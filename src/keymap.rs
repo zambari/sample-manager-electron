@@ -19,6 +19,10 @@ pub enum Action {
     /// Descend into the directory under the cursor.
     OpenDir,
     GoUp,
+    /// → : expand the folder under the cursor in tree mode, else `OpenDir`.
+    Expand,
+    /// ← : collapse / jump to the parent row in tree mode, else `GoUp`.
+    Collapse,
     /// Start a recursive size walk for the selection.
     ComputeSize,
     Trash,
@@ -70,8 +74,8 @@ impl Keymap {
             (plain(Key::ArrowDown), Action::CursorDown),
             (shift(Key::ArrowUp), Action::ExtendUp),
             (shift(Key::ArrowDown), Action::ExtendDown),
-            (plain(Key::ArrowRight), Action::OpenDir),
-            (plain(Key::ArrowLeft), Action::GoUp),
+            (plain(Key::ArrowRight), Action::Expand),
+            (plain(Key::ArrowLeft), Action::Collapse),
             (plain(Key::Escape), Action::Cancel),
             (cmd(Key::A), Action::SelectAll),
             (cmd(Key::I), Action::ComputeSize),

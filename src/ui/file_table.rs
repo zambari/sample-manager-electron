@@ -34,6 +34,11 @@ pub enum Intent {
     Dropped(Vec<PathBuf>),
     /// User wants the recursive size of these directories.
     WantSize(Vec<PathBuf>),
+    /// The ".." row was activated.
+    GoUp,
+    /// Expand this folder in tree mode (needs a listing request).
+    Expand(PathBuf),
+    AddFavourite(PathBuf),
 }
 
 pub struct TableCtx<'a> {
@@ -52,10 +57,9 @@ pub fn show(ui: &mut Ui, tab: &mut DirTab, cx: TableCtx<'_>) -> Vec<Intent> {
         return intents;
     }
 
-    let vis = tab.visible_indices();
     let frame = egui::Frame::NONE;
     let (inner, dropped) = ui.dnd_drop_zone::<DragPayload, _>(frame, |ui| {
-        rows(ui, tab, &cx, &vis, &mut intents);
+        rows(ui, tab, &cx, &mut intents);
     });
     let _ = inner;
 
@@ -89,11 +93,29 @@ fn header(ui: &mut Ui, tab: &mut DirTab) {
             }
         }
         ui.separator();
-        ui.add(
+        let filter = ui.add(
             egui::TextEdit::singleline(&mut tab.filter)
                 .hint_text("filter")
                 .desired_width(110.0),
         );
+        if filter.changed() {
+            tab.rebuild();
+        }
+        ui.separator();
+        if ui
+            .selectable_label(tab.tree, "🌲 Tree")
+            .on_hover_text("Show subfolders inline; click ⏵ or press → to expand")
+            .clicked()
+        {
+            tab.set_tree(!tab.tree);
+        }
+        if ui
+            .checkbox(&mut tab.show_all, "All files")
+            .on_hover_text("Also list files the editor can't open")
+            .changed()
+        {
+            tab.rebuild();
+        }
     });
 }
 
@@ -101,11 +123,13 @@ fn rows(
     ui: &mut Ui,
     tab: &mut DirTab,
     cx: &TableCtx<'_>,
-    vis: &[usize],
     intents: &mut Vec<Intent>,
 ) {
-    let total = vis.len();
-    let scroll_target = tab.scroll_to_cursor.then(|| tab.cursor).flatten();
+    // A ".." row leads the list whenever there is somewhere to go up to. It is
+    // not an entry: it can't be selected, dragged or renamed.
+    let up = usize::from(tab.parent().is_some());
+    let total = tab.entries.len() + up;
+    let scroll_target = tab.scroll_to_cursor.then(|| tab.cursor.map(|c| c + up)).flatten();
     tab.scroll_to_cursor = false;
 
     let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
@@ -118,11 +142,36 @@ fn rows(
 
     area.show_rows(ui, ROW_HEIGHT, total, |ui, range| {
         ui.set_min_width(ui.available_width());
-        for vis_i in range {
-            let idx = vis[vis_i];
-            row(ui, tab, cx, vis_i, idx, intents);
+        for i in range {
+            if i < up {
+                parent_row(ui, intents);
+            } else {
+                row(ui, tab, cx, i - up, intents);
+            }
         }
     });
+}
+
+fn parent_row(ui: &mut Ui, intents: &mut Vec<Intent>) {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        Sense::click(),
+    );
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let mut content = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(6.0, 0.0)))
+            .layout(egui::Layout::left_to_right(Align::Center)),
+    );
+    content.label("⬆");
+    content.label(RichText::new("..").strong());
+    // Double click, like any other folder row.
+    if resp.on_hover_text("Parent folder").double_clicked() {
+        intents.push(Intent::GoUp);
+    }
 }
 
 fn row(
@@ -130,10 +179,11 @@ fn row(
     tab: &mut DirTab,
     cx: &TableCtx<'_>,
     vis_i: usize,
-    idx: usize,
     intents: &mut Vec<Intent>,
 ) {
+    let idx = vis_i;
     let entry = tab.entries[idx].clone();
+    let depth = tab.depths.get(idx).copied().unwrap_or(0);
     let is_selected = tab.selected.contains(&entry.path);
     let is_cursor = tab.cursor == Some(vis_i);
     let renaming = tab
@@ -174,10 +224,31 @@ fn row(
         return;
     }
 
-    // Row contents, laid out inside the rect we already allocated.
+    // Row contents, laid out inside the rect we already allocated. In tree
+    // mode each level indents, and folders get a disclosure arrow.
+    const INDENT: f32 = 16.0;
+    const ARROW_W: f32 = 14.0;
+    let mut inner = rect.shrink2(egui::vec2(6.0, 0.0));
+    inner.min.x += depth as f32 * INDENT;
+    let mut arrow_rect = None;
+    if tab.tree {
+        let r = egui::Rect::from_min_size(inner.min, egui::vec2(ARROW_W, rect.height()));
+        if entry.is_dir {
+            let glyph = if tab.is_expanded(&entry.path) { "⏷" } else { "⏵" };
+            ui.painter().text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(12.0),
+                ui.visuals().text_color(),
+            );
+            arrow_rect = Some(r);
+        }
+        inner.min.x += ARROW_W + 2.0;
+    }
     let mut content = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(6.0, 0.0)))
+            .max_rect(inner)
             .layout(egui::Layout::left_to_right(Align::Center)),
     );
     draw_cells(&mut content, cx, &entry, tab);
@@ -189,6 +260,21 @@ fn row(
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    // The arrow sits on top of the row, so it's checked after (egui gives the
+    // later widget the hit).
+    if let Some(r) = arrow_rect {
+        let a = ui.interact(r, ui.scope_id().with(("arrow", idx)), Sense::click());
+        if a.clicked() {
+            intents.push(Intent::TookFocus);
+            if tab.is_expanded(&entry.path) {
+                tab.collapse(&entry.path);
+            } else {
+                intents.push(Intent::Expand(entry.path.clone()));
+            }
+            return;
+        }
     }
 
     if resp.drag_started() {
@@ -235,6 +321,10 @@ fn row(
         }
         if entry.is_dir && ui.button("Calculate size").clicked() {
             intents.push(Intent::WantSize(vec![entry.path.clone()]));
+            ui.close();
+        }
+        if entry.is_dir && ui.button("Add to favourites").clicked() {
+            intents.push(Intent::AddFavourite(entry.path.clone()));
             ui.close();
         }
         if entry.is_dir && ui.button("Open").clicked() {

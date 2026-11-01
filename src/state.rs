@@ -22,6 +22,10 @@ pub struct TabState {
     pub cwd: PathBuf,
     pub sort_key: SortKey,
     pub sort_asc: bool,
+    #[serde(default)]
+    pub tree: bool,
+    #[serde(default)]
+    pub show_all: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
@@ -45,6 +49,9 @@ pub struct AppState {
     /// cpal device id; `None` means the system default.
     #[serde(default)]
     pub output_device: Option<String>,
+    /// Bookmarked folders, shared by both panes, in the order added.
+    #[serde(default)]
+    pub favourites: Vec<PathBuf>,
 }
 
 fn default_focus() -> Role {

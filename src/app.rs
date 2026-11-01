@@ -61,6 +61,7 @@ pub struct App {
     editor_focused: bool,
     devices: Vec<DeviceInfo>,
     output_device: Option<String>,
+    favourites: Vec<PathBuf>,
     /// Which file the engine's voice is playing.
     voice_path: Option<PathBuf>,
     /// File-cursor target last seen, to auto-load on change.
@@ -86,6 +87,8 @@ impl App {
                     let mut tab = mk(state::existing_dir(&t.cwd)?);
                     tab.sort_key = t.sort_key;
                     tab.sort_asc = t.sort_asc;
+                    tab.tree = t.tree;
+                    tab.show_all = t.show_all;
                     Some(tab)
                 })
                 .collect();
@@ -112,6 +115,7 @@ impl App {
             editor_focused: false,
             devices: Engine::devices(),
             output_device,
+            favourites: saved.as_ref().map(|s| s.favourites.clone()).unwrap_or_default(),
             voice_path: None,
             last_cursor: None,
             last_stream_error: None,
@@ -143,6 +147,8 @@ impl App {
                     cwd: t.cwd.clone(),
                     sort_key: t.sort_key,
                     sort_asc: t.sort_asc,
+                    tree: t.tree,
+                    show_all: t.show_all,
                 })
                 .collect(),
             active: p.active,
@@ -154,6 +160,7 @@ impl App {
             show_hidden: self.show_hidden,
             editor: self.editor.prefs.clone(),
             output_device: self.output_device.clone(),
+            favourites: self.favourites.clone(),
         }
     }
 
@@ -183,8 +190,25 @@ impl App {
         let pane = self.pane_mut(role);
         if let Some(tab) = pane.tabs.get_mut(tab_idx) {
             let generation = tab.begin_reload();
-            let cwd = tab.cwd.clone();
-            self.jobs.list(cwd, generation, show_hidden);
+            let mut requests = vec![(tab.cwd.clone(), generation)];
+            // Expanded tree folders are part of what's shown; refresh them too.
+            for dir in tab.expanded_dirs() {
+                let g = tab.begin_child_load(&dir);
+                requests.push((dir, g));
+            }
+            for (dir, g) in requests {
+                self.jobs.list(dir, g, show_hidden);
+            }
+        }
+    }
+
+    /// Expand a folder in the active tab's tree and fetch its contents.
+    fn expand(&mut self, role: Role, dir: PathBuf) {
+        let show_hidden = self.show_hidden;
+        let tab = self.pane_mut(role).active_tab_mut();
+        if tab.expand(&dir) {
+            let g = tab.begin_child_load(&dir);
+            self.jobs.list(dir, g, show_hidden);
         }
     }
 
@@ -283,6 +307,8 @@ impl App {
                         for tab in self.pane_mut(role).tabs.iter_mut() {
                             if tab.cwd == path {
                                 tab.accept_listing(generation, result.clone());
+                            } else if tab.expanded.contains(&path) {
+                                tab.accept_child_listing(&path, generation, result.clone());
                             }
                         }
                     }
@@ -568,9 +594,40 @@ impl App {
                     }
                 }
             }
-            Action::GoUp => {
-                if let Some(p) = self.pane(role).active_tab().parent() {
+            Action::GoUp => self.go_up(role),
+            Action::Expand => {
+                let tab = self.pane(role).active_tab();
+                let Some(e) = tab.cursor_entry() else { return };
+                if !e.is_dir {
+                    return;
+                }
+                let p = e.path.clone();
+                if !tab.tree {
                     self.open_in(role, p);
+                } else if tab.is_expanded(&p) {
+                    // Already open: step onto its first child, if it has one.
+                    let tab = self.pane_mut(role).active_tab_mut();
+                    let c = tab.cursor.unwrap_or(0);
+                    if tab.depths.get(c + 1) > tab.depths.get(c) {
+                        tab.set_cursor(c + 1);
+                    }
+                } else {
+                    self.expand(role, p);
+                }
+            }
+            Action::Collapse => {
+                let tab = self.pane_mut(role).active_tab_mut();
+                if !tab.tree {
+                    return self.go_up(role);
+                }
+                let Some(c) = tab.cursor else { return self.go_up(role) };
+                let path = tab.entries[c].path.clone();
+                if tab.is_expanded(&path) {
+                    tab.collapse(&path);
+                } else if let Some(pr) = tab.parent_row(c) {
+                    tab.set_cursor(pr);
+                } else {
+                    self.go_up(role);
                 }
             }
             Action::ComputeSize => {
@@ -623,6 +680,12 @@ impl App {
                 }
                 self.pane_mut(role).active_tab_mut().renaming = None;
             }
+        }
+    }
+
+    fn go_up(&mut self, role: Role) {
+        if let Some(p) = self.pane(role).active_tab().parent() {
+            self.open_in(role, p);
         }
     }
 
@@ -951,6 +1014,7 @@ impl App {
                 self.focused = role;
                 self.editor_focused = false;
             }
+            self.favourites_menu(ui, role);
             ui.separator();
             let cwd = self.pane(role).active_tab().cwd.display().to_string();
             ui.add(egui::Label::new(egui::RichText::new(cwd).weak().small()).truncate());
@@ -1008,11 +1072,83 @@ impl App {
                     self.pane_mut(role).active_tab_mut().renaming = None;
                 }
                 Intent::WantSize(paths) => self.request_sizes(paths),
+                Intent::GoUp => self.go_up(role),
+                Intent::Expand(p) => self.expand(role, p),
+                Intent::AddFavourite(p) => self.add_favourite(p),
                 Intent::Dropped(paths) => {
                     let dest = self.pane(role).active_tab().cwd.clone();
                     self.start_transfer(Kind::Copy, paths, dest);
                 }
             }
+        }
+    }
+
+    fn add_favourite(&mut self, dir: PathBuf) {
+        if !self.favourites.contains(&dir) {
+            self.favourites.push(dir);
+        }
+    }
+
+    /// Star dropdown: jump the pane's active tab to a bookmarked folder, or
+    /// bookmark the one it's showing.
+    fn favourites_menu(&mut self, ui: &mut egui::Ui, role: Role) {
+        let cwd = self.pane(role).active_tab().cwd.clone();
+        let is_fav = self.favourites.contains(&cwd);
+        let mut go = None;
+        let mut remove = None;
+        let mut toggle_current = false;
+
+        let star = if is_fav { "★ ⏷" } else { "☆ ⏷" };
+        ui.menu_button(star, |ui| {
+            ui.set_min_width(240.0);
+            if self.favourites.is_empty() {
+                ui.label(egui::RichText::new("No favourites yet").weak());
+            }
+            for (i, fav) in self.favourites.iter().enumerate() {
+                let name = fav
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| fav.display().to_string());
+                // An unplugged drive's folder stays listed but can't be opened.
+                let exists = fav.is_dir();
+                ui.horizontal(|ui| {
+                    if ui.small_button("×").on_hover_text("Remove from favourites").clicked() {
+                        remove = Some(i);
+                    }
+                    let resp = ui
+                        .add_enabled(exists, egui::Button::new(name).selected(*fav == cwd).frame(false))
+                        .on_hover_text(fav.display().to_string())
+                        .on_disabled_hover_text(format!("{} (not found)", fav.display()));
+                    if resp.clicked() {
+                        go = Some(fav.clone());
+                        ui.close();
+                    }
+                });
+            }
+            ui.separator();
+            let label = if is_fav { "Remove this folder" } else { "Add this folder" };
+            if ui.button(label).clicked() {
+                toggle_current = true;
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Favourite folders");
+
+        if let Some(i) = remove {
+            self.favourites.remove(i);
+        }
+        if toggle_current {
+            if is_fav {
+                self.favourites.retain(|f| *f != cwd);
+            } else {
+                self.add_favourite(cwd);
+            }
+        }
+        if let Some(p) = go {
+            self.focused = role;
+            self.editor_focused = false;
+            self.open_in(role, p);
         }
     }
 
