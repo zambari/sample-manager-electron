@@ -20,6 +20,9 @@ pub struct DirTab {
     pub entries: Vec<Entry>,
     /// Indent level of each row in `entries` (0 = directly in `cwd`).
     pub depths: Vec<u16>,
+    /// Parallel to `entries`: the shortened display name, when `shorten` is on
+    /// and the name shares a long prefix with many siblings.
+    pub short_names: Vec<Option<String>>,
     /// Raw listing of `cwd`.
     listing: Vec<Entry>,
     /// Raw listings of folders expanded in tree mode.
@@ -46,6 +49,8 @@ pub struct DirTab {
     pub tree: bool,
     /// List every file, not just ones the editor can load.
     pub show_all: bool,
+    /// Collapse prefixes shared by many files: `M(...)TOM_234.wav`.
+    pub shorten: bool,
     /// `Some((path, edited_name))` while an inline rename is open.
     pub renaming: Option<(PathBuf, String)>,
     /// Set when the cursor moves by keyboard, so the table scrolls to follow.
@@ -59,6 +64,7 @@ impl DirTab {
             cwd,
             entries: Vec::new(),
             depths: Vec::new(),
+            short_names: Vec::new(),
             listing: Vec::new(),
             children: HashMap::new(),
             expanded: HashSet::new(),
@@ -74,6 +80,7 @@ impl DirTab {
             filter: String::new(),
             tree: false,
             show_all: false,
+            shorten: false,
             renaming: None,
             scroll_to_cursor: false,
         }
@@ -209,6 +216,7 @@ impl DirTab {
         let mut entries = Vec::new();
         let mut depths = Vec::new();
         self.flatten(&self.listing, 0, &needle, &mut entries, &mut depths);
+        self.short_names = if self.shorten { short_names(&entries) } else { Vec::new() };
         self.entries = entries;
         self.depths = depths;
 
@@ -221,6 +229,11 @@ impl DirTab {
             None if self.entries.is_empty() => None,
             None => self.cursor.map(|c| c.min(self.entries.len() - 1)),
         };
+    }
+
+    /// The name to draw for row `i`.
+    pub fn display_name(&self, i: usize) -> Option<&str> {
+        self.short_names.get(i)?.as_deref()
     }
 
     /// Append the visible rows of one listing. Returns whether anything was
@@ -469,4 +482,44 @@ mod tests {
             [PathBuf::from("/r/kicks"), PathBuf::from("/r/a.wav")]
         );
     }
+}
+
+/// How many files must share a prefix before it gets collapsed.
+const SHORTEN_MIN_COUNT: usize = 10;
+/// Shorter prefixes aren't worth replacing with `X(...)`.
+const SHORTEN_MIN_PREFIX: usize = 8;
+
+/// For each file, the longest prefix ending at a separator (`_ - . space`)
+/// that at least `SHORTEN_MIN_COUNT` files share is collapsed to its first
+/// character plus `(...)`. Folders are left alone.
+fn short_names(entries: &[Entry]) -> Vec<Option<String>> {
+    fn prefixes(name: &str) -> impl Iterator<Item = &str> {
+        // Never eat into the extension: stop before the last '.'.
+        let stem_end = name.rfind('.').filter(|&i| i > 0).unwrap_or(name.len());
+        name[..stem_end]
+            .char_indices()
+            .filter(|&(_, c)| matches!(c, '_' | '-' | ' ' | '.'))
+            .map(move |(i, c)| &name[..i + c.len_utf8()])
+            .filter(|p| p.len() >= SHORTEN_MIN_PREFIX)
+    }
+
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for e in entries.iter().filter(|e| !e.is_dir) {
+        for p in prefixes(&e.name) {
+            *counts.entry(p).or_default() += 1;
+        }
+    }
+    entries
+        .iter()
+        .map(|e| {
+            if e.is_dir {
+                return None;
+            }
+            let p = prefixes(&e.name)
+                .filter(|p| counts.get(p).copied().unwrap_or(0) >= SHORTEN_MIN_COUNT)
+                .last()?;
+            let first = e.name.chars().next()?;
+            Some(format!("{first}(...){}", &e.name[p.len()..]))
+        })
+        .collect()
 }

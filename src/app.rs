@@ -143,6 +143,9 @@ impl App {
         let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
         let engine = Engine::open(output_device.as_deref());
         let mut editor = Editor::new(ctx.clone(), saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default());
+        // Mono preview and Save mono are linked; older saved prefs may disagree.
+        let mono = editor.prefs.mono_preview;
+        editor.set_mono(mono);
         let session = saved.as_ref().and_then(|s| s.session.clone()).filter(|s| s.path.is_file());
         if let Some(s) = &session {
             editor.restore_session(s);
@@ -790,7 +793,10 @@ impl App {
             EdAction::SetIn => ed.set_in(here),
             EdAction::SetOut => ed.set_out(here),
             EdAction::ToggleLoop => ed.prefs.looping = !ed.prefs.looping,
-            EdAction::ToggleMono => ed.prefs.mono_preview = !ed.prefs.mono_preview,
+            EdAction::ToggleMono => {
+                let on = !ed.prefs.mono_preview;
+                ed.set_mono(on);
+            }
             EdAction::Nudge(n, dir) => {
                 let px = ed.view.fpp.round().max(1.0) as isize;
                 let step = match n {

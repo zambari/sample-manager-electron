@@ -627,6 +627,31 @@ impl Editor {
         }
     }
 
+    /// Whether the selection can move half its length left (-1) or right (+1)
+    /// without running past either end of the file.
+    pub fn can_shift_selection(&self, dir: i32) -> bool {
+        let (a, b) = self.sel;
+        let half = (b - a) / 2;
+        half > 0 && if dir < 0 { a >= half } else { b + half <= self.frames() }
+    }
+
+    /// Move the selection half its length left (-1) or right (+1), keeping its
+    /// length exactly (no zero snapping, so loops stay the same size).
+    pub fn shift_selection(&mut self, dir: i32) {
+        if !self.can_shift_selection(dir) {
+            return;
+        }
+        let (a, b) = self.sel;
+        let half = (b - a) / 2;
+        self.sel = if dir < 0 { (a - half, b - half) } else { (a + half, b + half) };
+    }
+
+    /// Mono preview and mono export are one switch for now.
+    pub fn set_mono(&mut self, on: bool) {
+        self.prefs.mono_preview = on;
+        self.prefs.save_mono = on;
+    }
+
     pub fn select_all(&mut self) {
         self.sel = (0, self.frames());
     }

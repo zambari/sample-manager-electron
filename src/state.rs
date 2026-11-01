@@ -26,6 +26,8 @@ pub struct TabState {
     pub tree: bool,
     #[serde(default)]
     pub show_all: bool,
+    #[serde(default)]
+    pub shorten: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq)]

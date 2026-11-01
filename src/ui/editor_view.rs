@@ -238,8 +238,6 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
         {
             ed.snap_selection();
         }
-        ui.toggle_value(&mut ed.prefs.mono_preview, "◐ Mono")
-            .on_hover_text("M — listen to the channels folded to mono (L+R averaged). Stats and Normalize follow what you hear.");
         ui.separator();
         ui.toggle_value(&mut ed.prefs.auto_load, "Auto-load")
             .on_hover_text("Load the sample under the file cursor");
@@ -313,11 +311,32 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
             {
                 ed.scale_selection(2.0);
             }
+            if ui
+                .add_enabled(ed.can_shift_selection(-1), egui::Button::new("◀"))
+                .on_hover_text("Move the loop left by half its length")
+                .clicked()
+            {
+                ed.shift_selection(-1);
+            }
+            if ui
+                .add_enabled(ed.can_shift_selection(1), egui::Button::new("▶"))
+                .on_hover_text("Move the loop right by half its length")
+                .clicked()
+            {
+                ed.shift_selection(1);
+            }
             ui.separator();
-            ui.toggle_value(&mut ed.prefs.save_mono, "Save mono").on_hover_text(
-                "Export stereo / multichannel files as a single mono channel. \
-                 If mono preview is off you'll be asked first, since the fold loses the stereo image.",
-            );
+            // Mono preview and Save mono are one switch for now.
+            let mut mono = ed.prefs.mono_preview;
+            let a = ui
+                .toggle_value(&mut mono, "◐ Mono")
+                .on_hover_text("M — listen to the channels folded to mono (L+R averaged). Stats and Normalize follow what you hear.");
+            let b = ui
+                .toggle_value(&mut mono, "Save mono")
+                .on_hover_text("Export stereo / multichannel files as a single mono channel. Linked to ◐ Mono for now.");
+            if a.changed() || b.changed() {
+                ed.set_mono(mono);
+            }
             let label = if ed.exporting {
                 "Exporting…"
             } else if ed.exports_mono() {
