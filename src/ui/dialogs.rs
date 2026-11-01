@@ -148,10 +148,12 @@ pub fn mono_export(ctx: &Context, ph: &Phase) -> Option<MonoChoice> {
     choice
 }
 
-/// Confirm moving `paths` to the Trash. `Some(true)` = go ahead,
-/// `Some(false)` = cancelled, `None` = still open.
-pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf]) -> Option<bool> {
+/// Confirm moving `paths` to the Trash (`device`: the Digitakt's /trash
+/// folder). `Some(true)` = go ahead, `Some(false)` = cancelled, `None` =
+/// still open.
+pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool) -> Option<bool> {
     let mut answer = None;
+    let bin = if device { "/trash" } else { "Trash" };
     Modal::new(Id::unique("trash_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
         let n = paths.len();
@@ -160,9 +162,9 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf]) -> Option<bool
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            ui.heading(format!("Move \"{name}\" to Trash?"));
+            ui.heading(format!("Move \"{name}\" to {bin}?"));
         } else {
-            ui.heading(format!("Move {n} items to Trash?"));
+            ui.heading(format!("Move {n} items to {bin}?"));
             ui.add_space(6.0);
             egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                 for p in paths {
@@ -171,14 +173,19 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf]) -> Option<bool
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     ui.horizontal(|ui| {
-                        ui.label(if p.is_dir() { "📁" } else { "🎵" });
+                        ui.label(if !device && p.is_dir() { "📁" } else { "🎵" });
                         ui.label(RichText::new(name).monospace());
                     });
                 }
             });
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("You can restore them from the Trash.").weak());
+        let note = if device {
+            "They go to the /trash folder on the Digitakt; move them back from there."
+        } else {
+            "You can restore them from the Trash."
+        };
+        ui.label(RichText::new(note).weak());
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -186,7 +193,7 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf]) -> Option<bool
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(RichText::new("Move to Trash").color(ui.visuals().error_fg_color))
+                    .button(RichText::new(format!("Move to {bin}")).color(ui.visuals().error_fg_color))
                     .on_hover_text("↩")
                     .clicked()
                 {

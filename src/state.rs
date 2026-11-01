@@ -28,6 +28,9 @@ pub struct TabState {
     pub show_all: bool,
     #[serde(default)]
     pub shorten: bool,
+    /// A Digitakt tab; `cwd` is a device path.
+    #[serde(default)]
+    pub device: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq)]

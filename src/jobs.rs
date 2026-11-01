@@ -19,6 +19,8 @@ use std::sync::Arc;
 /// Results flowing worker -> UI.
 pub enum Ev {
     Listed {
+        /// From the Digitakt rather than the local disk.
+        device: bool,
         /// Generation of the request, so a slow listing for a directory the
         /// user has already navigated away from can be discarded.
         generation: u64,
@@ -47,9 +49,13 @@ pub enum Ev {
         job: u64,
         /// Directories that changed and should be re-listed.
         touched: Vec<PathBuf>,
+        /// Same, on the device.
+        device_touched: Vec<PathBuf>,
         errors: Vec<String>,
         cancelled: bool,
     },
+    /// The device connection changed: its name, or why there is none.
+    DeviceStatus(Result<String, String>),
 }
 
 /// Files with identical contents: `keep` has the shortest name.
@@ -91,6 +97,19 @@ impl Jobs {
         }
     }
 
+    /// A worker-side handle, for threads that live outside this module.
+    pub fn emitter(&self) -> Emitter {
+        Emitter { tx: self.tx.clone(), ctx: self.ctx.clone() }
+    }
+
+    /// A fresh job id with its cancel flag, for work run elsewhere.
+    pub fn register(&mut self) -> (u64, Arc<AtomicBool>) {
+        let job = self.next_job.fetch_add(1, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.cancels.insert(job, cancel.clone());
+        (job, cancel)
+    }
+
     pub fn forget(&mut self, job: u64) {
         self.cancels.remove(&job);
     }
@@ -111,7 +130,7 @@ impl Jobs {
     pub fn list(&self, path: PathBuf, generation: u64, show_hidden: bool) {
         self.spawn("list", move |em| {
             let result = fs_model::list_dir(&path, show_hidden).map_err(|e| e.to_string());
-            em.send(Ev::Listed { generation, path, result });
+            em.send(Ev::Listed { device: false, generation, path, result });
         });
     }
 
@@ -184,6 +203,7 @@ impl Jobs {
             em.send(Ev::Finished {
                 job,
                 touched,
+                device_touched: Vec::new(),
                 errors,
                 cancelled: false,
             });
@@ -199,7 +219,7 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    fn send(&self, ev: Ev) {
+    pub fn send(&self, ev: Ev) {
         // If the receiver is gone the app is shutting down; drop silently.
         if self.tx.send(ev).is_ok() {
             self.ctx.request_repaint();
@@ -359,6 +379,7 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
     em.send(Ev::Finished {
         job,
         touched,
+        device_touched: Vec::new(),
         errors,
         cancelled: cancel.load(Ordering::Relaxed),
     });

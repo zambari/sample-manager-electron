@@ -9,6 +9,7 @@
 //!    never dropped on the floor.
 
 use crate::audio::engine::{DeviceInfo, Engine, PlayParams};
+use crate::device::{self, Device};
 use crate::editor::{Editor, Outcome};
 use crate::fs_model::{self, SortKey};
 use crate::jobs::{Ev, Jobs};
@@ -39,6 +40,18 @@ enum PlanKind {
     Commit { fold: std::collections::HashSet<PathBuf>, dest_dir: PathBuf },
     /// The editor's single-file export (one op).
     Export { mono: bool },
+    /// Anything touching the Digitakt. Op destinations are only used to ask
+    /// about conflicts; the device worker settles the final names.
+    Device { dir: device::Dir, mono: bool },
+    /// The editor's export, rendered locally and then uploaded (one op).
+    DeviceExport { mono: bool },
+}
+
+/// An editor export rendered to a temp file, waiting to be uploaded.
+struct StagedUpload {
+    staged: PathBuf,
+    dest_dir: PathBuf,
+    policy: Policy,
 }
 
 struct ActiveJob {
@@ -52,6 +65,10 @@ struct ActiveJob {
 
 pub struct App {
     jobs: Jobs,
+    device: Device,
+    /// Last connection news from the device worker.
+    device_status: Option<Result<String, String>>,
+    staged_upload: Option<StagedUpload>,
     keymap: Keymap,
     sizes: SizeCache,
     preview: Preview,
@@ -61,10 +78,12 @@ pub struct App {
     next_tab_id: u64,
     show_hidden: bool,
     pending: Option<PendingPlan>,
-    /// Destination of an export waiting on the mono-fold warning.
-    mono_pending: Option<PathBuf>,
-    /// Paths waiting on the "move to Trash?" confirmation.
-    trash_pending: Option<Vec<PathBuf>>,
+    /// Destination of an export waiting on the mono-fold warning, and
+    /// whether it is on the device.
+    mono_pending: Option<(PathBuf, bool)>,
+    /// Paths waiting on the "move to Trash?" confirmation; `true` if they
+    /// are on the device.
+    trash_pending: Option<(bool, Vec<PathBuf>)>,
     /// Duplicate groups waiting on the "trash duplicates?" confirmation.
     dupes_pending: Option<Vec<crate::jobs::DupGroup>>,
     /// Paths cut or copied in a file pane, waiting for Paste.
@@ -112,9 +131,9 @@ impl App {
         let home = dirs_home();
         let saved = state::load(storage);
         let mut next_tab_id = 0;
-        let mut mk = |p: PathBuf| {
+        let mut mk = |p: PathBuf, device: bool| {
             next_tab_id += 1;
-            DirTab::new(next_tab_id, p)
+            if device { DirTab::new_device(next_tab_id, p) } else { DirTab::new(next_tab_id, p) }
         };
         let mut restore = |role: Role, ps: Option<&state::PaneState>| -> Pane {
             let mut tabs: Vec<DirTab> = ps
@@ -122,7 +141,11 @@ impl App {
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|t| {
-                    let mut tab = mk(state::existing_dir(&t.cwd)?);
+                    let mut tab = if t.device {
+                        mk(t.cwd.clone(), true)
+                    } else {
+                        mk(state::existing_dir(&t.cwd)?, false)
+                    };
                     tab.sort_key = t.sort_key;
                     tab.sort_asc = t.sort_asc;
                     tab.tree = t.tree;
@@ -132,7 +155,7 @@ impl App {
                 })
                 .collect();
             if tabs.is_empty() {
-                tabs.push(mk(home.clone()));
+                tabs.push(mk(home.clone(), false));
             }
             let active = ps.map_or(0, |ps| ps.active).min(tabs.len() - 1);
             Pane { role, tabs, active }
@@ -155,7 +178,12 @@ impl App {
             errors.push(format!("audio output: {e}"));
         }
 
+        let jobs = Jobs::new(ctx);
+        let device = Device::new(jobs.emitter());
         let mut app = Self {
+            device,
+            device_status: None,
+            staged_upload: None,
             engine,
             editor,
             editor_focused: false,
@@ -172,7 +200,7 @@ impl App {
             hold_cursor_load: session.is_some(),
             last_stream_error: None,
             side_widths: [0.0; 2],
-            jobs: Jobs::new(ctx),
+            jobs,
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
             preview: Preview::default(),
@@ -209,6 +237,7 @@ impl App {
                     tree: t.tree,
                     show_all: t.show_all,
                     shorten: t.shorten,
+                    device: t.device,
                 })
                 .collect(),
             active: p.active,
@@ -265,6 +294,7 @@ impl App {
         let pane = self.pane_mut(role);
         if let Some(tab) = pane.tabs.get_mut(tab_idx) {
             let generation = tab.begin_reload();
+            let device = tab.device;
             let mut requests = vec![(tab.cwd.clone(), generation)];
             // Expanded tree folders are part of what's shown; refresh them too.
             for dir in tab.expanded_dirs() {
@@ -272,8 +302,16 @@ impl App {
                 requests.push((dir, g));
             }
             for (dir, g) in requests {
-                self.jobs.list(dir, g, show_hidden);
+                self.list(device, dir, g, show_hidden);
             }
+        }
+    }
+
+    fn list(&self, device: bool, dir: PathBuf, generation: u64, show_hidden: bool) {
+        if device {
+            self.device.list(dir, generation);
+        } else {
+            self.jobs.list(dir, generation, show_hidden);
         }
     }
 
@@ -283,7 +321,8 @@ impl App {
         let tab = self.pane_mut(role).active_tab_mut();
         if tab.expand(&dir) {
             let g = tab.begin_child_load(&dir);
-            self.jobs.list(dir, g, show_hidden);
+            let device = tab.device;
+            self.list(device, dir, g, show_hidden);
         }
     }
 
@@ -295,12 +334,13 @@ impl App {
         }
     }
 
-    /// Re-list any tab showing a directory at or under `dir`.
-    fn reload_showing(&mut self, dir: &Path) {
+    /// Re-list any tab showing a directory at or under `dir`, on the disk or
+    /// (`device`) on the Digitakt.
+    fn reload_showing(&mut self, dir: &Path, device: bool) {
         let mut todo = Vec::new();
         for role in [Role::Source, Role::Dest] {
             for (i, tab) in self.pane(role).tabs.iter().enumerate() {
-                if tab.cwd == dir || dir.starts_with(&tab.cwd) {
+                if tab.device == device && (tab.cwd == dir || dir.starts_with(&tab.cwd)) {
                     todo.push((role, i));
                 }
             }
@@ -332,6 +372,31 @@ impl App {
     /// pane": the panes have fixed roles here. To get the Commander behaviour,
     /// swap the two role arguments for `(self.focused, self.focused.other())`.
     fn commit(&mut self, kind: Kind) {
+        let (src_tab, dst_tab) = (self.pane(Role::Source).active_tab(), self.pane(Role::Dest).active_tab());
+        if src_tab.device || dst_tab.device {
+            let (from_dev, to_dev) = (src_tab.device, dst_tab.device);
+            let sources = src_tab.effective_selection();
+            let dest_dir = dst_tab.cwd.clone();
+            // The editor's file as you hear it, like a local commit.
+            let editor_file = !from_dev && kind == Kind::Copy && self.editor.current.is_some();
+            let as_heard = match sources.as_slice() {
+                [] => editor_file,
+                [only] => {
+                    editor_file
+                        && self.editor.path() == Some(only.as_path())
+                        && (self.editor.is_edited() || self.editor.exports_mono())
+                }
+                _ => false,
+            };
+            if as_heard {
+                self.export();
+            } else if sources.is_empty() {
+                self.status = "Nothing selected in the source pane".to_owned();
+            } else {
+                self.transfer(kind, from_dev, sources, to_dev, dest_dir);
+            }
+            return;
+        }
         let sources = self.pane(Role::Source).active_tab().effective_selection();
         // Nothing selected (e.g. right after launch, with a file restored in
         // the editor): commit the editor's file as you hear it.
@@ -393,6 +458,86 @@ impl App {
         self.offer(plan, PlanKind::Transfer);
     }
 
+    /// Copy or move between any two places, either of which may be the
+    /// device.
+    fn transfer(&mut self, kind: Kind, from_dev: bool, sources: Vec<PathBuf>, to_dev: bool, dest_dir: PathBuf) {
+        let dir = match (from_dev, to_dev) {
+            (false, false) => return self.start_transfer(kind, sources, dest_dir),
+            (true, true) if kind == Kind::Move => device::Dir::Move,
+            (true, true) => device::Dir::Copy,
+            (false, true) => device::Dir::Upload,
+            (true, false) => device::Dir::Download,
+        };
+        let mut plan = Plan { kind, ops: Vec::new(), rejected: Vec::new() };
+        for src in sources {
+            let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let (is_dir, bytes) = if from_dev {
+                self.device_entry(&src).map_or((false, 0), |e| (e.is_dir, e.len))
+            } else {
+                let dir = src.is_dir();
+                let bytes = if dir {
+                    self.sizes.bytes_of(&src).unwrap_or(0)
+                } else {
+                    std::fs::metadata(&src).map_or(0, |m| m.len())
+                };
+                (dir, bytes)
+            };
+            if from_dev == to_dev && is_dir && dest_dir.starts_with(&src) {
+                plan.rejected.push((src, "cannot put a folder inside itself".to_owned()));
+                continue;
+            }
+            // Also catches a drag let go over its own list.
+            if from_dev == to_dev && src.parent() == Some(dest_dir.as_path()) {
+                plan.rejected.push((src, "already in that folder".to_owned()));
+                continue;
+            }
+            if dir == device::Dir::Upload && !is_dir && !fs_model::is_audio_path(&src) {
+                plan.rejected.push((src, "not an audio file".to_owned()));
+                continue;
+            }
+            let dst = match dir {
+                device::Dir::Upload if !is_dir => device::upload_target(&src, &dest_dir),
+                device::Dir::Download if !is_dir => dest_dir.join(device::wav_name(&name)),
+                _ => dest_dir.join(&name),
+            };
+            let conflict = if to_dev { self.device_has(&dst) } else { dst.exists() };
+            plan.ops.push(ops::Op { src, dst, approx_bytes: bytes, is_dir, conflict });
+        }
+        if kind == Kind::Move && dir != device::Dir::Move {
+            self.status = "Between the computer and the Digitakt, Move copies; originals are kept".to_owned();
+        }
+        let mono = dir == device::Dir::Upload && self.editor.prefs.save_mono;
+        self.offer(plan, PlanKind::Device { dir, mono });
+    }
+
+    /// A device item as last listed by any device tab.
+    fn device_entry(&self, path: &Path) -> Option<fs_model::Entry> {
+        let parent = path.parent()?;
+        [&self.source, &self.dest]
+            .into_iter()
+            .flat_map(|p| p.tabs.iter())
+            .filter(|t| t.device)
+            .find_map(|t| t.listing_of(parent)?.iter().find(|e| e.path == path).cloned())
+    }
+
+    fn device_has(&self, path: &Path) -> bool {
+        self.device_entry(path).is_some()
+    }
+
+    /// Hand `task` to the device worker as a job with a progress bar.
+    fn run_device(&mut self, task: device::Task, label: &str, total_items: usize, total_bytes: u64) {
+        let (id, cancel) = self.jobs.register();
+        self.device.run(id, cancel, task);
+        self.active_job = Some(ActiveJob {
+            id,
+            label: label.to_owned(),
+            done_bytes: 0,
+            total_bytes,
+            done_items: 0,
+            total_items,
+        });
+    }
+
     /// Run `plan` now, or hold it and ask first if anything already exists.
     fn offer(&mut self, plan: Plan, what: PlanKind) {
 
@@ -412,13 +557,54 @@ impl App {
     }
 
     fn launch(&mut self, plan: &Plan, what: PlanKind, policy: Policy) {
+        match what {
+            PlanKind::Device { dir, mono } => {
+                let items: Vec<(PathBuf, PathBuf)> = plan
+                    .ops
+                    .iter()
+                    .filter(|o| !(o.conflict && policy == Policy::Skip))
+                    .filter_map(|o| Some((o.src.clone(), o.dst.parent()?.to_path_buf())))
+                    .collect();
+                if items.is_empty() {
+                    self.status = "All items skipped".to_owned();
+                    return;
+                }
+                if dir == device::Dir::Upload {
+                    self.mark_committed(items.iter().map(|(s, _)| s.clone()));
+                }
+                let total_bytes = plan.total_bytes();
+                let n = items.len();
+                self.run_device(device::Task::Transfer { dir, items, policy, mono, total_bytes }, "", n, total_bytes);
+                return;
+            }
+            PlanKind::DeviceExport { mono } => {
+                if policy == Policy::Skip && plan.conflicts() > 0 {
+                    self.status = "Export skipped".to_owned();
+                    return;
+                }
+                let (Some(op), Some(src)) = (plan.ops.first(), self.editor.path().map(Path::to_path_buf)) else { return };
+                let Some(dest_dir) = op.dst.parent().map(Path::to_path_buf) else { return };
+                let tmp = std::env::temp_dir().join("sample_manager_upload");
+                if let Err(e) = std::fs::create_dir_all(&tmp) {
+                    self.errors.push(format!("{}: {e}", tmp.display()));
+                    return;
+                }
+                let staged = crate::audio::export::target_for(&src, &tmp);
+                self.mark_committed([src]);
+                self.status = "Rendering for the Digitakt…".to_owned();
+                self.staged_upload = Some(StagedUpload { staged: staged.clone(), dest_dir, policy });
+                self.editor.export(staged, mono);
+                return;
+            }
+            _ => {}
+        }
         let mut resolved = ops::resolve(plan, policy);
         if resolved.is_empty() {
             self.status = "All items skipped".to_owned();
             return;
         }
         match what {
-            PlanKind::Transfer => {}
+            PlanKind::Transfer | PlanKind::Device { .. } | PlanKind::DeviceExport { .. } => {}
             PlanKind::Export { mono } => {
                 let op = resolved.remove(0);
                 if let Some(p) = self.editor.path().map(Path::to_path_buf) {
@@ -462,9 +648,9 @@ impl App {
     fn absorb(&mut self, events: Vec<Ev>) {
         for ev in events {
             match ev {
-                Ev::Listed { generation, path, result } => {
+                Ev::Listed { device, generation, path, result } => {
                     for role in [Role::Source, Role::Dest] {
-                        for tab in self.pane_mut(role).tabs.iter_mut() {
+                        for tab in self.pane_mut(role).tabs.iter_mut().filter(|t| t.device == device) {
                             if tab.cwd == path {
                                 tab.accept_listing(generation, result.clone());
                             } else if tab.expanded.contains(&path) {
@@ -482,6 +668,7 @@ impl App {
                         self.dupes_pending = Some(groups);
                     }
                 }
+                Ev::DeviceStatus(s) => self.device_status = Some(s),
                 Ev::DirSize { path, bytes, files } => {
                     self.sizes.set(path, bytes, files);
                 }
@@ -508,6 +695,7 @@ impl App {
                 Ev::Finished {
                     job,
                     touched,
+                    device_touched,
                     errors,
                     cancelled,
                 } => {
@@ -531,7 +719,10 @@ impl App {
                             self.sizes.invalidate_subtree(anc);
                             break;
                         }
-                        self.reload_showing(&dir);
+                        self.reload_showing(&dir, false);
+                    }
+                    for dir in device_touched {
+                        self.reload_showing(&dir, true);
                     }
                 }
             }
@@ -575,8 +766,8 @@ impl App {
         let role = self.focused;
         for e in clip {
             match e {
-                egui::Event::Cut => self.set_clipboard(Kind::Move, self.pane(role).active_tab().effective_selection()),
-                egui::Event::Copy => self.set_clipboard(Kind::Copy, self.pane(role).active_tab().effective_selection()),
+                egui::Event::Cut => self.set_clipboard(Kind::Move, role, self.pane(role).active_tab().effective_selection()),
+                egui::Event::Copy => self.set_clipboard(Kind::Copy, role, self.pane(role).active_tab().effective_selection()),
                 egui::Event::Paste(_) => self.paste(role, None),
                 _ => {}
             }
@@ -585,25 +776,28 @@ impl App {
 
     // ---- clipboard --------------------------------------------------------
 
-    fn set_clipboard(&mut self, kind: Kind, paths: Vec<PathBuf>) {
+    fn set_clipboard(&mut self, kind: Kind, role: Role, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
+        let device = self.pane(role).active_tab().device;
         let n = paths.len();
         let verb = if kind == Kind::Move { "Cut" } else { "Copied" };
         self.status = format!("{verb} {n} item(s) — paste into a folder");
-        self.clipboard = Some(Clipboard { kind, paths });
+        self.clipboard = Some(Clipboard { kind, device, paths });
     }
 
     /// Paste into `target`, or the pane's current folder when `None`.
     fn paste(&mut self, role: Role, target: Option<PathBuf>) {
         let Some(clip) = self.clipboard.clone() else { return };
-        let dest = target.unwrap_or_else(|| self.pane(role).active_tab().cwd.clone());
+        let tab = self.pane(role).active_tab();
+        let to_dev = tab.device;
+        let dest = target.unwrap_or_else(|| tab.cwd.clone());
         // A cut is used up by its paste, like Finder; a copy can be pasted again.
         if clip.kind == Kind::Move {
             self.clipboard = None;
         }
-        self.start_transfer(clip.kind, clip.paths, dest);
+        self.transfer(clip.kind, clip.device, clip.paths, to_dev, dest);
     }
 
     // ---- playback ---------------------------------------------------------
@@ -725,18 +919,25 @@ impl App {
         if self.editor.current.is_none() {
             return;
         }
-        let dest = self.pane(Role::Dest).active_tab().cwd.clone();
+        let tab = self.pane(Role::Dest).active_tab();
+        let (dest, to_dev) = (tab.cwd.clone(), tab.device);
         // Folding to mono without having listened to the fold: ask first.
         if self.editor.exports_mono() && !self.editor.mono_active() {
-            self.mono_pending = Some(dest);
+            self.mono_pending = Some((dest, to_dev));
             return;
         }
         let mono = self.editor.exports_mono();
-        self.export_to(dest, mono);
+        self.export_to(dest, to_dev, mono);
     }
 
-    fn export_to(&mut self, dest: PathBuf, mono: bool) {
+    fn export_to(&mut self, dest: PathBuf, to_dev: bool, mono: bool) {
         let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        if to_dev {
+            let dst = device::upload_target(&src, &dest);
+            let op = ops::Op { conflict: self.device_has(&dst), approx_bytes: 0, src, dst, is_dir: false };
+            let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
+            return self.offer(plan, PlanKind::DeviceExport { mono });
+        }
         let dst = crate::audio::export::target_for(&src, &dest);
         let op = ops::Op {
             conflict: dst.exists(),
@@ -850,7 +1051,8 @@ impl App {
         match action {
             Action::Commit => self.commit(Kind::Copy),
             Action::Preview => {
-                if let Some(e) = self.pane(role).active_tab().cursor_entry() {
+                let tab = self.pane(role).active_tab();
+                if let Some(e) = tab.cursor_entry().filter(|_| !tab.device) {
                     if e.is_dir {
                         // Space on a folder has no sample to audition; treat it
                         // as "tell me how big this is" instead of doing nothing.
@@ -913,13 +1115,16 @@ impl App {
                 }
             }
             Action::ComputeSize => {
-                let sel = self.pane(role).active_tab().effective_selection();
-                self.request_sizes(sel);
+                if !self.pane(role).active_tab().device {
+                    let sel = self.pane(role).active_tab().effective_selection();
+                    self.request_sizes(sel);
+                }
             }
             Action::Trash => {
-                let sel = self.pane(role).active_tab().effective_selection();
+                let tab = self.pane(role).active_tab();
+                let sel = tab.effective_selection();
                 if !sel.is_empty() {
-                    self.trash_pending = Some(sel);
+                    self.trash_pending = Some((tab.device, sel));
                 }
             }
             Action::SelectAll => self.pane_mut(role).active_tab_mut().select_all(),
@@ -938,9 +1143,11 @@ impl App {
             Action::ExtendUp => self.pane_mut(role).active_tab_mut().move_cursor(-1, true),
             Action::ExtendDown => self.pane_mut(role).active_tab_mut().move_cursor(1, true),
             Action::NewTab => {
-                let cwd = self.pane(role).active_tab().cwd.clone();
+                let tab = self.pane(role).active_tab();
+                let (cwd, device) = (tab.cwd.clone(), tab.device);
                 let id = self.new_tab_id();
-                self.pane_mut(role).add_tab(DirTab::new(id, cwd));
+                let tab = if device { DirTab::new_device(id, cwd) } else { DirTab::new(id, cwd) };
+                self.pane_mut(role).add_tab(tab);
                 let i = self.pane(role).active;
                 self.reload(role, i);
             }
@@ -977,9 +1184,9 @@ impl App {
         self.reload(role, i);
     }
 
-    fn do_rename(&mut self, from: &Path, to: &str) {
+    fn do_rename(&mut self, from: &Path, to: &str, device: bool) {
         let to = to.trim();
-        if to.is_empty() || to.contains(std::path::MAIN_SEPARATOR) {
+        if to.is_empty() || to.contains(std::path::MAIN_SEPARATOR) || to.contains('/') {
             self.errors.push(format!("invalid name: {to:?}"));
             return;
         }
@@ -987,6 +1194,10 @@ impl App {
         let target = parent.join(to);
         if target == from {
             return;
+        }
+        if device {
+            let task = device::Task::Rename { from: from.to_path_buf(), to: target };
+            return self.run_device(task, "Renaming", 1, 0);
         }
         if target.exists() {
             // Rename is not a transfer, so there's no plan to resolve -- just
@@ -998,7 +1209,7 @@ impl App {
         match std::fs::rename(from, &target) {
             Ok(()) => {
                 self.sizes.invalidate_subtree(parent);
-                self.reload_showing(parent);
+                self.reload_showing(parent, false);
             }
             Err(e) => self.errors.push(format!("rename failed: {e}")),
         }
@@ -1103,10 +1314,10 @@ impl eframe::App for App {
         if self.mono_pending.is_some() {
             let ph = self.editor.region_phase();
             if let Some(c) = dialogs::mono_export(ui.ctx(), &ph) {
-                let dest = self.mono_pending.take().expect("checked above");
+                let (dest, to_dev) = self.mono_pending.take().expect("checked above");
                 match c {
-                    MonoChoice::SaveMono => self.export_to(dest, true),
-                    MonoChoice::SaveStereo => self.export_to(dest, false),
+                    MonoChoice::SaveMono => self.export_to(dest, to_dev, true),
+                    MonoChoice::SaveStereo => self.export_to(dest, to_dev, false),
                     MonoChoice::Listen => {
                         self.editor.prefs.mono_preview = true;
                         self.status = "Mono preview on — export again when it sounds right".to_owned();
@@ -1129,10 +1340,13 @@ impl eframe::App for App {
             }
         }
 
-        if let Some(paths) = &self.trash_pending {
-            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths) {
-                let paths = self.trash_pending.take().expect("checked above");
-                if yes {
+        if let Some((on_dev, paths)) = &self.trash_pending {
+            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, *on_dev) {
+                let (on_dev, paths) = self.trash_pending.take().expect("checked above");
+                if yes && on_dev {
+                    let n = paths.len();
+                    self.run_device(device::Task::Trash { paths }, "Moving to /trash", n, 0);
+                } else if yes {
                     self.jobs.trash(paths);
                 } else {
                     self.status = "Delete cancelled".to_owned();
@@ -1171,6 +1385,18 @@ impl App {
                         self.start_play();
                     }
                 }
+                Outcome::Exported(p) if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) => {
+                    let s = self.staged_upload.take().expect("checked above");
+                    let task = device::Task::Transfer {
+                        dir: device::Dir::Upload,
+                        items: vec![(s.staged, s.dest_dir)],
+                        policy: s.policy,
+                        mono: false,
+                        total_bytes: std::fs::metadata(&p).map_or(0, |m| m.len()),
+                    };
+                    self.status = "Sending to the Digitakt…".to_owned();
+                    self.run_device(task, "", 1, 0);
+                }
                 Outcome::Exported(p) => {
                     self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
                     // Replaced the file that's open: show what's on disk now.
@@ -1182,15 +1408,19 @@ impl App {
                     }
                     if let Some(dir) = p.parent() {
                         self.sizes.invalidate_subtree(dir);
-                        self.reload_showing(dir);
+                        self.reload_showing(dir, false);
                     }
                 }
                 Outcome::BatchExported(dir, n) => {
                     self.status = format!("Folded {n} file(s) to mono");
                     self.sizes.invalidate_subtree(&dir);
-                    self.reload_showing(&dir);
+                    self.reload_showing(&dir, false);
                 }
-                Outcome::Error(e) => self.errors.push(e),
+                Outcome::Error(e) => {
+                    // A failed render never reaches the upload.
+                    self.staged_upload = None;
+                    self.errors.push(e);
+                }
             }
         }
     }
@@ -1379,7 +1609,12 @@ impl App {
                 self.focused = role;
                 self.editor_focused = false;
             }
-            self.favourites_menu(ui, role);
+            let on_dev = self.pane(role).active_tab().device;
+            if on_dev {
+                self.device_badge(ui);
+            } else {
+                self.favourites_menu(ui, role);
+            }
             ui.separator();
             let cwd = self.pane(role).active_tab().cwd.display().to_string();
             ui.add(egui::Label::new(egui::RichText::new(cwd).weak().small()).truncate());
@@ -1421,8 +1656,17 @@ impl App {
                     self.editor_focused = false;
                 }
                 Intent::Open(p) => {
-                    if p.is_dir() {
+                    let tab = self.pane(role).active_tab();
+                    let on_dev = tab.device;
+                    let is_dir = tab
+                        .entries
+                        .iter()
+                        .find(|e| e.path == p)
+                        .map_or_else(|| !on_dev && p.is_dir(), |e| e.is_dir);
+                    if is_dir {
                         self.open_in(role, p);
+                    } else if on_dev {
+                        self.status = "Drag samples to a local folder to listen to them".to_owned();
                     } else {
                         self.preview_toggle(&p);
                     }
@@ -1435,27 +1679,35 @@ impl App {
                     self.pane_mut(role).active_tab_mut().renaming = Some((p, name));
                 }
                 Intent::CommitRename { from, to } => {
-                    self.pane_mut(role).active_tab_mut().renaming = None;
-                    self.do_rename(&from, &to);
+                    let tab = self.pane_mut(role).active_tab_mut();
+                    tab.renaming = None;
+                    let on_dev = tab.device;
+                    self.do_rename(&from, &to, on_dev);
                 }
                 Intent::CancelRename => {
                     self.pane_mut(role).active_tab_mut().renaming = None;
                 }
-                Intent::WantSize(paths) => self.request_sizes(paths),
+                Intent::WantSize(paths) => {
+                    if !self.pane(role).active_tab().device {
+                        self.request_sizes(paths);
+                    }
+                }
                 Intent::GoUp => self.go_up(role),
                 Intent::Expand(p) => self.expand(role, p),
                 Intent::AddFavourite(p) => self.add_favourite(p),
                 Intent::Trash(paths) => {
                     if !paths.is_empty() {
-                        self.trash_pending = Some(paths);
+                        let on_dev = self.pane(role).active_tab().device;
+                        self.trash_pending = Some((on_dev, paths));
                     }
                 }
-                Intent::Dropped(paths) => {
-                    let dest = self.pane(role).active_tab().cwd.clone();
-                    self.start_transfer(Kind::Copy, paths, dest);
+                Intent::Dropped(payload) => {
+                    let tab = self.pane(role).active_tab();
+                    let (dest, to_dev) = (tab.cwd.clone(), tab.device);
+                    self.transfer(Kind::Copy, payload.device, payload.paths, to_dev, dest);
                 }
-                Intent::Cut(paths) => self.set_clipboard(Kind::Move, paths),
-                Intent::Copy(paths) => self.set_clipboard(Kind::Copy, paths),
+                Intent::Cut(paths) => self.set_clipboard(Kind::Move, role, paths),
+                Intent::Copy(paths) => self.set_clipboard(Kind::Copy, role, paths),
                 Intent::Paste(target) => self.paste(role, target),
                 Intent::Reveal(p) => reveal(&p),
                 Intent::RemoveDuplicates(paths) => {
@@ -1464,6 +1716,16 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Connection state of the device, shown in a device tab's header.
+    fn device_badge(&mut self, ui: &mut egui::Ui) {
+        let (text, color, tip) = match &self.device_status {
+            Some(Ok(name)) => (format!("● {name}"), egui::Color32::from_rgb(90, 210, 110), "Connected over USB MIDI".to_owned()),
+            Some(Err(e)) => ("● offline".to_owned(), ui.visuals().error_fg_color, e.clone()),
+            None => ("● connecting…".to_owned(), ui.visuals().weak_text_color(), String::new()),
+        };
+        ui.label(egui::RichText::new(text).color(color).small()).on_hover_text(tip);
     }
 
     fn add_favourite(&mut self, dir: PathBuf) {
@@ -1541,7 +1803,8 @@ impl App {
         let mut switch_to = None;
         let mut close = None;
         let mut new_tab = false;
-        let mut drop_on: Option<(usize, Vec<PathBuf>)> = None;
+        let mut drop_on: Option<(usize, DragPayload)> = None;
+        let mut new_device_tab = false;
 
         egui::ScrollArea::horizontal()
             .id_salt(("tabs", role.label()))
@@ -1573,12 +1836,19 @@ impl App {
                             close = Some(i);
                         }
                         if let Some(p) = payload {
-                            drop_on = Some((i, p.paths.clone()));
+                            drop_on = Some((i, (*p).clone()));
                         }
                     }
 
                     if ui.small_button("+").on_hover_text("New tab").clicked() {
                         new_tab = true;
+                    }
+                    if ui
+                        .small_button("🎹")
+                        .on_hover_text("Open the Digitakt's +Drive in a new tab (USB MIDI)")
+                        .clicked()
+                    {
+                        new_device_tab = true;
                     }
                     if self.pane(role).tabs.len() > 1
                         && ui.small_button("×").on_hover_text("Close tab").clicked()
@@ -1593,16 +1863,26 @@ impl App {
             self.focused = role;
             self.editor_focused = false;
         }
-        if let Some((i, paths)) = drop_on {
+        if let Some((i, p)) = drop_on {
             if let Some(tab) = self.pane(role).tabs.get(i) {
-                let dest = tab.cwd.clone();
-                self.start_transfer(Kind::Copy, paths, dest);
+                let (dest, to_dev) = (tab.cwd.clone(), tab.device);
+                self.transfer(Kind::Copy, p.device, p.paths, to_dev, dest);
             }
         }
-        if new_tab {
-            let cwd = self.pane(role).active_tab().cwd.clone();
+        if new_tab || new_device_tab {
+            let cur = self.pane(role).active_tab();
+            let (cwd, device) = (cur.cwd.clone(), cur.device);
             let id = self.new_tab_id();
-            self.pane_mut(role).add_tab(DirTab::new(id, cwd));
+            let tab = if new_device_tab {
+                DirTab::new_device(id, PathBuf::from("/"))
+            } else if device {
+                DirTab::new_device(id, cwd)
+            } else {
+                DirTab::new(id, cwd)
+            };
+            self.pane_mut(role).add_tab(tab);
+            self.focused = role;
+            self.editor_focused = false;
             let i = self.pane(role).active;
             self.reload(role, i);
         }

@@ -18,6 +18,8 @@ pub const ROW_HEIGHT: f32 = 22.0;
 #[derive(Clone, Debug)]
 pub struct DragPayload {
     pub paths: Vec<PathBuf>,
+    /// The paths are on the Digitakt.
+    pub device: bool,
 }
 
 /// Things the table can't do itself because they need app-wide state
@@ -31,7 +33,7 @@ pub enum Intent {
     CommitRename { from: PathBuf, to: String },
     CancelRename,
     /// Something was dropped onto this tab's list.
-    Dropped(Vec<PathBuf>),
+    Dropped(DragPayload),
     /// User wants the recursive size of these directories.
     WantSize(Vec<PathBuf>),
     /// The ".." row was activated.
@@ -66,9 +68,10 @@ pub struct TableCtx<'a> {
 }
 
 impl TableCtx<'_> {
-    fn is_cut(&self, p: &std::path::Path) -> bool {
-        self.clipboard
-            .is_some_and(|c| c.kind == crate::ops::Kind::Move && c.paths.iter().any(|x| x == p))
+    fn is_cut(&self, p: &std::path::Path, device: bool) -> bool {
+        self.clipboard.is_some_and(|c| {
+            c.kind == crate::ops::Kind::Move && c.device == device && c.paths.iter().any(|x| x == p)
+        })
     }
 
     fn paste_label(&self) -> Option<String> {
@@ -99,7 +102,7 @@ pub fn show(ui: &mut Ui, tab: &mut DirTab, cx: TableCtx<'_>) -> Vec<Intent> {
     let _ = inner;
 
     if let Some(payload) = dropped {
-        intents.push(Intent::Dropped(payload.paths.clone()));
+        intents.push(Intent::Dropped((*payload).clone()));
     }
 
     intents
@@ -193,7 +196,9 @@ fn rows(
     }
     bg.context_menu(|ui| {
         paste_button(ui, cx, None, intents);
-        reveal_button(ui, tab.cwd.clone(), intents);
+        if !tab.device {
+            reveal_button(ui, tab.cwd.clone(), intents);
+        }
     });
 
     area.show_rows(ui, ROW_HEIGHT, total, |ui, range| {
@@ -304,7 +309,7 @@ fn row(
         inner.min.x += ARROW_W + 2.0;
     }
     let shown = tab.display_name(idx).map(str::to_owned);
-    draw_cells(ui, inner, cx, &entry, shown.as_deref());
+    draw_cells(ui, inner, cx, &entry, shown.as_deref(), tab.device);
 
     // One interaction region covering the whole row, sensing both so a click
     // selects and a press-and-move starts a drag.
@@ -350,6 +355,7 @@ fn row(
         }
         resp.dnd_set_drag_payload(DragPayload {
             paths: tab.effective_selection(),
+            device: tab.device,
         });
     }
 
@@ -395,11 +401,12 @@ fn row(
             intents.push(Intent::BeginRename(entry.path.clone()));
             ui.close();
         }
-        if entry.is_dir && ui.button("Calculate size").clicked() {
+        let local = !tab.device;
+        if local && entry.is_dir && ui.button("Calculate size").clicked() {
             intents.push(Intent::WantSize(vec![entry.path.clone()]));
             ui.close();
         }
-        if entry.is_dir && ui.button("Add to favourites").clicked() {
+        if local && entry.is_dir && ui.button("Add to favourites").clicked() {
             intents.push(Intent::AddFavourite(entry.path.clone()));
             ui.close();
         }
@@ -422,7 +429,8 @@ fn row(
         paste_button(ui, cx, target, intents);
         ui.separator();
         // Only meaningful with several files selected.
-        let files: Vec<PathBuf> = sel.iter().filter(|p| !p.is_dir()).cloned().collect();
+        let files: Vec<PathBuf> =
+            if local { sel.iter().filter(|p| !p.is_dir()).cloned().collect() } else { Vec::new() };
         if files.len() > 1 {
             if ui
                 .button("Remove duplicates…")
@@ -434,12 +442,15 @@ fn row(
             }
             ui.separator();
         }
-        reveal_button(ui, entry.path.clone(), intents);
-        ui.separator();
+        if local {
+            reveal_button(ui, entry.path.clone(), intents);
+            ui.separator();
+        }
+        let bin = if local { "Trash" } else { "/trash" };
         let label = if sel.len() > 1 {
-            format!("Move {} items to Trash", sel.len())
+            format!("Move {} items to {bin}", sel.len())
         } else {
-            "Move to Trash".to_owned()
+            format!("Move to {bin}")
         };
         if ui
             .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
@@ -460,12 +471,13 @@ fn draw_cells(
     cx: &TableCtx<'_>,
     entry: &fs_model::Entry,
     shown: Option<&str>,
+    device: bool,
 ) {
     let icon = if entry.is_dir {
         "📁"
-    } else if cx.preview.is_playing(&entry.path) {
+    } else if !device && cx.preview.is_playing(&entry.path) {
         "🔊"
-    } else if entry.is_audio {
+    } else if entry.is_audio || device {
         "🎵"
     } else {
         "·"
@@ -473,7 +485,9 @@ fn draw_cells(
     let gap = ui.spacing().item_spacing.x;
 
     // Right-aligned size first, so the name knows how much room it has.
-    let size_text = if entry.is_dir {
+    let size_text = if entry.is_dir && device {
+        String::new()
+    } else if entry.is_dir {
         match cx.sizes.get(&entry.path) {
             Some(Size::Known { bytes, files }) => {
                 format!("{} · {files} files", fs_model::human_bytes(bytes))
@@ -505,7 +519,7 @@ fn draw_cells(
 
     // Committed badge: a green check painted right after the icon. Drawn as
     // lines rather than a glyph so it never depends on font coverage.
-    if cx.committed.contains(&entry.path) {
+    if !device && cx.committed.contains(&entry.path) {
         let h = 9.0;
         let left = x + gap;
         let cy = inner.center().y;
@@ -526,13 +540,13 @@ fn draw_cells(
     let mut name_rect = inner;
     name_rect.min.x = x + gap;
     name_rect.max.x = (size_left - gap).max(name_rect.min.x);
-    let name_color = if cx.opened.contains(&entry.path) {
+    let name_color = if !device && cx.opened.contains(&entry.path) {
         egui::Color32::GRAY
     } else {
         egui::Color32::WHITE
     };
     // Cut items fade until they're pasted, like Explorer.
-    let name_color = if cx.is_cut(&entry.path) { name_color.gamma_multiply(0.4) } else { name_color };
+    let name_color = if cx.is_cut(&entry.path, device) { name_color.gamma_multiply(0.4) } else { name_color };
     paint_text(ui, name_rect, shown.unwrap_or(&entry.name), body_font(ui, 1.0), name_color);
 }
 

@@ -17,6 +17,8 @@ pub enum Kind {
 #[derive(Clone, Debug)]
 pub struct Clipboard {
     pub kind: Kind,
+    /// The paths are on the Digitakt.
+    pub device: bool,
     pub paths: Vec<PathBuf>,
 }
 

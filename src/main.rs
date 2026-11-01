@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod device;
 mod editor;
 mod fs_model;
 mod jobs;

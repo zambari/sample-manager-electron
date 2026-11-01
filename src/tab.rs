@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 pub struct DirTab {
     pub id: u64,
     pub cwd: PathBuf,
+    /// Browsing the Digitakt's +Drive rather than the local disk. `cwd` and
+    /// every entry path are then device paths.
+    pub device: bool,
     /// The rows on screen, in order. In tree mode this includes the contents
     /// of expanded folders, each followed by its children.
     pub entries: Vec<Entry>,
@@ -62,6 +65,7 @@ impl DirTab {
         Self {
             id,
             cwd,
+            device: false,
             entries: Vec::new(),
             depths: Vec::new(),
             short_names: Vec::new(),
@@ -86,7 +90,15 @@ impl DirTab {
         }
     }
 
+    pub fn new_device(id: u64, cwd: PathBuf) -> Self {
+        Self { device: true, ..Self::new(id, cwd) }
+    }
+
     pub fn title(&self) -> String {
+        if self.device {
+            let name = self.cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+            return format!("🎹 {}", name.as_deref().unwrap_or("+Drive"));
+        }
         self.cwd
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -249,7 +261,8 @@ impl DirTab {
     ) -> bool {
         let mut sorted: Vec<Entry> = list
             .iter()
-            .filter(|e| e.is_dir || e.is_audio || self.show_all)
+            // Everything on the device is a sample.
+            .filter(|e| e.is_dir || e.is_audio || self.show_all || self.device)
             .cloned()
             .collect();
         sort_entries(&mut sorted, self.sort_key, self.sort_asc);
@@ -281,6 +294,15 @@ impl DirTab {
             }
         }
         out.len() > start
+    }
+
+    /// The raw listing of `dir`, if this tab has one.
+    pub fn listing_of(&self, dir: &Path) -> Option<&[Entry]> {
+        if dir == self.cwd && !self.loading {
+            Some(&self.listing)
+        } else {
+            self.children.get(dir).map(Vec::as_slice)
+        }
     }
 
     pub fn cursor_entry(&self) -> Option<&Entry> {
