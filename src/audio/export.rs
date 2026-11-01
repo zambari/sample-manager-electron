@@ -12,15 +12,14 @@ pub struct Render {
     pub mono: bool,
 }
 
-/// Where an export of `src` into `dest_dir` lands by default: `<stem>.wav`.
-/// Never the source itself: if that name is the source, a ` 2` suffix is used.
+/// Where an export of `src` into `dest_dir` lands: `<stem>.wav`. This can be
+/// the source itself; the caller asks before replacing anything.
 pub fn target_for(src: &Path, dest_dir: &Path) -> PathBuf {
     let stem = src
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "sample".to_owned());
-    let t = dest_dir.join(format!("{stem}.wav"));
-    if t == src { crate::fs_model::unique_sibling(&t) } else { t }
+    dest_dir.join(format!("{stem}.wav"))
 }
 
 /// Write the rendered region to `target`, replacing it if it exists (conflicts

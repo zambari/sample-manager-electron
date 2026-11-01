@@ -413,25 +413,28 @@ fn draw_cells(ui: &Ui, inner: egui::Rect, cx: &TableCtx<'_>, entry: &fs_model::E
         inner.right() - size_galley.size().x,
         inner.center().y - size_galley.size().y / 2.0,
     );
-    let mut size_left = size_pos.x;
+    let size_left = size_pos.x;
     ui.painter().galley(size_pos, size_galley, egui::Color32::PLACEHOLDER);
 
-    // Committed badge: a green check just left of the size column.
-    if cx.committed.contains(&entry.path) {
-        let badge = ui.painter().layout_no_wrap(
-            "✔".to_owned(),
-            body_font(ui, 0.0),
-            egui::Color32::from_rgb(110, 200, 120),
-        );
-        let pos = egui::pos2(
-            size_left - gap - badge.size().x,
-            inner.center().y - badge.size().y / 2.0,
-        );
-        size_left = pos.x;
-        ui.painter().galley(pos, badge, egui::Color32::PLACEHOLDER);
-    }
+    let mut x = paint_text(ui, inner, icon, body_font(ui, 0.0), ui.visuals().text_color());
 
-    let x = paint_text(ui, inner, icon, body_font(ui, 0.0), ui.visuals().text_color());
+    // Committed badge: a green check painted right after the icon. Drawn as
+    // lines rather than a glyph so it never depends on font coverage.
+    if cx.committed.contains(&entry.path) {
+        let h = 9.0;
+        let left = x + gap;
+        let cy = inner.center().y;
+        let stroke = Stroke::new(2.0, egui::Color32::from_rgb(90, 210, 110));
+        ui.painter().line_segment(
+            [egui::pos2(left, cy), egui::pos2(left + h * 0.35, cy + h * 0.4)],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [egui::pos2(left + h * 0.35, cy + h * 0.4), egui::pos2(left + h, cy - h * 0.5)],
+            stroke,
+        );
+        x = left + h;
+    }
 
     // Name: white (gray once opened in the editor), one point larger than
     // body text, cut off with "…" if it would run into the size column.

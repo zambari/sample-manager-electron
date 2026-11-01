@@ -1096,6 +1096,13 @@ impl App {
                 }
                 Outcome::Exported(p) => {
                     self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
+                    // Replaced the file that's open: show what's on disk now.
+                    if self.editor.path() == Some(p.as_path()) {
+                        if self.voice_path.as_deref() == Some(p.as_path()) {
+                            self.engine.stop();
+                        }
+                        self.editor.reload();
+                    }
                     if let Some(dir) = p.parent() {
                         self.sizes.invalidate_subtree(dir);
                         self.reload_showing(dir);

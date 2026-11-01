@@ -35,6 +35,32 @@ pub struct Prefs {
     pub mono_preview: bool,
     /// Export multichannel files as a single mono channel.
     pub save_mono: bool,
+    /// Which editor panels are shown.
+    pub panels: Panels,
+}
+
+/// Visibility of each editor panel, toggled from the header row.
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct Panels {
+    /// Play / loop / snap toggles plus the in / out / len / playhead readout.
+    pub transport: bool,
+    pub gain: bool,
+    /// Undo, crop, loop scaling, export.
+    pub tools: bool,
+    /// The main zoomable waveform.
+    pub wave: bool,
+    /// The fixed 40 ms extreme-zoom strip.
+    pub scalpel: bool,
+    pub minimap: bool,
+    /// Stats table and phase meter.
+    pub stats: bool,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Self { transport: true, gain: true, tools: true, wave: true, scalpel: true, minimap: true, stats: true }
+    }
 }
 
 impl Default for Prefs {
@@ -49,6 +75,7 @@ impl Default for Prefs {
             follow_playback: true,
             mono_preview: false,
             save_mono: false,
+            panels: Panels::default(),
         }
     }
 }
@@ -157,13 +184,16 @@ pub enum Outcome {
     Error(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Drag {
     In,
     Out,
     /// Rubber-band a new region from this frame.
     Select(usize),
     Pan,
+    /// Scope strip: move the playhead by dragging the wave. Holds the
+    /// playhead and pointer x at the start of the drag.
+    Scrub(usize, f32),
 }
 
 /// Visible window: first frame at the left edge and frames per pixel.
@@ -274,6 +304,17 @@ impl Editor {
         if self.path() == Some(path) || self.loading.as_deref() == Some(path) {
             return;
         }
+        self.load(path);
+    }
+
+    /// Re-read the open file from disk, e.g. after an export replaced it.
+    pub fn reload(&mut self) {
+        if let Some(p) = self.path().map(Path::to_path_buf) {
+            self.load(&p);
+        }
+    }
+
+    fn load(&mut self, path: &Path) {
         self.generation += 1;
         let generation = self.generation;
         self.loading = Some(path.to_path_buf());
