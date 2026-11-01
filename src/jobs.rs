@@ -38,6 +38,11 @@ pub enum Ev {
         total_items: usize,
         label: String,
     },
+    /// Result of [`Jobs::find_duplicates`].
+    Duplicates {
+        groups: Vec<DupGroup>,
+        errors: Vec<String>,
+    },
     Finished {
         job: u64,
         /// Directories that changed and should be re-listed.
@@ -45,6 +50,14 @@ pub enum Ev {
         errors: Vec<String>,
         cancelled: bool,
     },
+}
+
+/// Files with identical contents: `keep` has the shortest name.
+#[derive(Clone, Debug)]
+pub struct DupGroup {
+    pub keep: PathBuf,
+    pub remove: Vec<PathBuf>,
+    pub bytes: u64,
 }
 
 pub struct Jobs {
@@ -131,6 +144,15 @@ impl Jobs {
         job
     }
 
+    /// Find files in `paths` with identical contents. Only same-size files
+    /// can match, so contents are only read inside a size group.
+    pub fn find_duplicates(&self, paths: Vec<PathBuf>) {
+        self.spawn("dupes", move |em| {
+            let (groups, errors) = find_duplicates(&paths);
+            em.send(Ev::Duplicates { groups, errors });
+        });
+    }
+
     pub fn trash(&mut self, paths: Vec<PathBuf>) -> u64 {
         let job = self.next_job.fetch_add(1, Ordering::Relaxed);
         self.cancels.insert(job, Arc::new(AtomicBool::new(false)));
@@ -183,6 +205,89 @@ impl Emitter {
             self.ctx.request_repaint();
         }
     }
+}
+
+fn find_duplicates(paths: &[PathBuf]) -> (Vec<DupGroup>, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut by_size: std::collections::BTreeMap<u64, Vec<PathBuf>> = Default::default();
+    for p in paths {
+        match std::fs::symlink_metadata(p) {
+            Ok(md) if md.is_file() => by_size.entry(md.len()).or_default().push(p.clone()),
+            Ok(_) => {}
+            Err(e) => errors.push(format!("{}: {e}", p.display())),
+        }
+    }
+
+    let mut groups = Vec::new();
+    for (bytes, mut same_size) in by_size {
+        if same_size.len() < 2 {
+            continue;
+        }
+        // Shortest name first (ties alphabetical), so each cluster's first
+        // member is the one to keep.
+        same_size.sort_by_key(|p| {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            (name.chars().count(), name)
+        });
+        // Cluster by exact contents: each file joins the first cluster whose
+        // keeper it matches byte for byte.
+        let mut clusters: Vec<Vec<PathBuf>> = Vec::new();
+        for p in same_size {
+            let mut placed = false;
+            for c in clusters.iter_mut() {
+                match same_contents(&c[0], &p) {
+                    Ok(true) => {
+                        c.push(p.clone());
+                        placed = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        errors.push(format!("{}: {e}", p.display()));
+                        placed = true; // unreadable: never delete it
+                        break;
+                    }
+                }
+            }
+            if !placed {
+                clusters.push(vec![p]);
+            }
+        }
+        for mut c in clusters {
+            if c.len() > 1 {
+                let keep = c.remove(0);
+                groups.push(DupGroup { keep, remove: c, bytes });
+            }
+        }
+    }
+    (groups, errors)
+}
+
+/// Byte-for-byte comparison of two files already known to be the same size.
+fn same_contents(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let (mut fa, mut fb) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let (mut ba, mut bb) = (vec![0u8; CHUNK], vec![0u8; CHUNK]);
+    loop {
+        let na = read_full(&mut fa, &mut ba)?;
+        let nb = read_full(&mut fb, &mut bb)?;
+        if na != nb || ba[..na] != bb[..nb] {
+            return Ok(false);
+        }
+        if na == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..])? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    Ok(n)
 }
 
 const CHUNK: usize = 256 * 1024;

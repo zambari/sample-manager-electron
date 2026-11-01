@@ -12,6 +12,14 @@ pub enum Kind {
     Move,
 }
 
+/// Paths put on the in-app clipboard by Cut or Copy, waiting for a Paste.
+/// `Kind::Move` means they were cut.
+#[derive(Clone, Debug)]
+pub struct Clipboard {
+    pub kind: Kind,
+    pub paths: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Op {
     pub src: PathBuf,

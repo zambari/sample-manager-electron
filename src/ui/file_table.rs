@@ -41,6 +41,16 @@ pub enum Intent {
     AddFavourite(PathBuf),
     /// Move these to the Trash (after confirmation).
     Trash(Vec<PathBuf>),
+    /// Put these on the clipboard to be moved on the next Paste.
+    Cut(Vec<PathBuf>),
+    /// Put these on the clipboard to be copied on the next Paste.
+    Copy(Vec<PathBuf>),
+    /// Paste the clipboard into this folder (`None`: the tab's current folder).
+    Paste(Option<PathBuf>),
+    /// Show this item in Finder / Explorer.
+    Reveal(PathBuf),
+    /// Find identical files among these and offer to trash the extras.
+    RemoveDuplicates(Vec<PathBuf>),
 }
 
 pub struct TableCtx<'a> {
@@ -51,6 +61,25 @@ pub struct TableCtx<'a> {
     /// Files already committed to a destination; drawn with a check badge.
     pub committed: &'a std::collections::HashSet<PathBuf>,
     pub pane_focused: bool,
+    /// The clipboard, for dimming cut items and enabling Paste.
+    pub clipboard: Option<&'a crate::ops::Clipboard>,
+}
+
+impl TableCtx<'_> {
+    fn is_cut(&self, p: &std::path::Path) -> bool {
+        self.clipboard
+            .is_some_and(|c| c.kind == crate::ops::Kind::Move && c.paths.iter().any(|x| x == p))
+    }
+
+    fn paste_label(&self) -> Option<String> {
+        let c = self.clipboard?;
+        let n = c.paths.len();
+        let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
+        Some(match c.kind {
+            crate::ops::Kind::Move => format!("Move {what} here"),
+            crate::ops::Kind::Copy => format!("Paste {what}"),
+        })
+    }
 }
 
 pub fn show(ui: &mut Ui, tab: &mut DirTab, cx: TableCtx<'_>) -> Vec<Intent> {
@@ -124,6 +153,13 @@ fn header(ui: &mut Ui, tab: &mut DirTab) {
         {
             tab.rebuild();
         }
+        if ui
+            .checkbox(&mut tab.shorten, "Shorten")
+            .on_hover_text("When 10+ files share a long prefix, show it as X(...) — hover a row for the full name")
+            .changed()
+        {
+            tab.rebuild();
+        }
     });
 }
 
@@ -147,6 +183,18 @@ fn rows(
         let y = c as f32 * (ROW_HEIGHT + ui.spacing().item_spacing.y);
         area = area.vertical_scroll_offset(y - ROW_HEIGHT * 4.0);
     }
+
+    // Empty space below (and behind) the rows: right-click to paste into the
+    // folder being shown. Registered before the rows, so rows win the hit.
+    let bg_id = ui.scope_id().with("table_bg");
+    let bg = ui.interact(ui.available_rect_before_wrap(), bg_id, Sense::click());
+    if bg.secondary_clicked() {
+        intents.push(Intent::TookFocus);
+    }
+    bg.context_menu(|ui| {
+        paste_button(ui, cx, None, intents);
+        reveal_button(ui, tab.cwd.clone(), intents);
+    });
 
     area.show_rows(ui, ROW_HEIGHT, total, |ui, range| {
         ui.set_min_width(ui.available_width());
@@ -255,12 +303,16 @@ fn row(
         }
         inner.min.x += ARROW_W + 2.0;
     }
-    draw_cells(ui, inner, cx, &entry);
+    let shown = tab.display_name(idx).map(str::to_owned);
+    draw_cells(ui, inner, cx, &entry, shown.as_deref());
 
     // One interaction region covering the whole row, sensing both so a click
     // selects and a press-and-move starts a drag.
     let id = ui.scope_id().with(("row", idx));
-    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let mut resp = ui.interact(rect, id, Sense::click_and_drag());
+    if shown.is_some() {
+        resp = resp.on_hover_text(&entry.name);
+    }
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -357,6 +409,33 @@ fn row(
         }
         ui.separator();
         let sel = tab.effective_selection();
+        if ui.button("Cut").clicked() {
+            intents.push(Intent::Cut(sel.clone()));
+            ui.close();
+        }
+        if ui.button("Copy").clicked() {
+            intents.push(Intent::Copy(sel.clone()));
+            ui.close();
+        }
+        // On a folder row, paste goes into that folder; on a file, alongside it.
+        let target = entry.is_dir.then(|| entry.path.clone());
+        paste_button(ui, cx, target, intents);
+        ui.separator();
+        // Only meaningful with several files selected.
+        let files: Vec<PathBuf> = sel.iter().filter(|p| !p.is_dir()).cloned().collect();
+        if files.len() > 1 {
+            if ui
+                .button("Remove duplicates…")
+                .on_hover_text("Find identical files in the selection, keep the shortest name of each, trash the rest")
+                .clicked()
+            {
+                intents.push(Intent::RemoveDuplicates(files));
+                ui.close();
+            }
+            ui.separator();
+        }
+        reveal_button(ui, entry.path.clone(), intents);
+        ui.separator();
         let label = if sel.len() > 1 {
             format!("Move {} items to Trash", sel.len())
         } else {
@@ -375,7 +454,13 @@ fn row(
 /// Draws a row's icon, name and size straight onto the painter. These are
 /// deliberately not widgets: a label would sit on top of the row's
 /// interaction area and swallow clicks meant for the row.
-fn draw_cells(ui: &Ui, inner: egui::Rect, cx: &TableCtx<'_>, entry: &fs_model::Entry) {
+fn draw_cells(
+    ui: &Ui,
+    inner: egui::Rect,
+    cx: &TableCtx<'_>,
+    entry: &fs_model::Entry,
+    shown: Option<&str>,
+) {
     let icon = if entry.is_dir {
         "📁"
     } else if cx.preview.is_playing(&entry.path) {
@@ -446,7 +531,32 @@ fn draw_cells(ui: &Ui, inner: egui::Rect, cx: &TableCtx<'_>, entry: &fs_model::E
     } else {
         egui::Color32::WHITE
     };
-    paint_text(ui, name_rect, &entry.name, body_font(ui, 1.0), name_color);
+    // Cut items fade until they're pasted, like Explorer.
+    let name_color = if cx.is_cut(&entry.path) { name_color.gamma_multiply(0.4) } else { name_color };
+    paint_text(ui, name_rect, shown.unwrap_or(&entry.name), body_font(ui, 1.0), name_color);
+}
+
+fn paste_button(ui: &mut Ui, cx: &TableCtx<'_>, target: Option<PathBuf>, intents: &mut Vec<Intent>) {
+    let label = match (cx.paste_label(), &target) {
+        (Some(l), Some(dir)) => {
+            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            format!("{l} → {name}")
+        }
+        (Some(l), None) => l,
+        (None, _) => "Paste".to_owned(),
+    };
+    if ui.add_enabled(cx.clipboard.is_some(), egui::Button::new(label)).clicked() {
+        intents.push(Intent::Paste(target));
+        ui.close();
+    }
+}
+
+fn reveal_button(ui: &mut Ui, path: PathBuf, intents: &mut Vec<Intent>) {
+    let label = if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in Explorer" };
+    if ui.button(label).clicked() {
+        intents.push(Intent::Reveal(path));
+        ui.close();
+    }
 }
 
 /// The body font, `extra` points larger.
@@ -560,7 +670,7 @@ mod tests {
         };
         let mut out = ctx.run_ui(input, |ui| {
             egui::Panel::left("col").default_size(320.0).show(ui, |ui| {
-                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), pane_focused: true });
+                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), pane_focused: true, clipboard: None });
             });
             egui::CentralPanel::default().show(ui, |_| {});
         });

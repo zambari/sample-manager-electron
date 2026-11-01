@@ -14,7 +14,7 @@ use crate::fs_model::{self, SortKey};
 use crate::jobs::{Ev, Jobs};
 use crate::keymap::{self, Action, EdAction, Keymap, Nudge};
 use crate::ui::editor_view::{self, EdIntent, PlayView};
-use crate::ops::{self, Kind, Plan, Policy};
+use crate::ops::{self, Clipboard, Kind, Plan, Policy};
 use crate::pane::{Pane, Role};
 use crate::preview::Preview;
 use crate::sizes::SizeCache;
@@ -65,6 +65,10 @@ pub struct App {
     mono_pending: Option<PathBuf>,
     /// Paths waiting on the "move to Trash?" confirmation.
     trash_pending: Option<Vec<PathBuf>>,
+    /// Duplicate groups waiting on the "trash duplicates?" confirmation.
+    dupes_pending: Option<Vec<crate::jobs::DupGroup>>,
+    /// Paths cut or copied in a file pane, waiting for Paste.
+    clipboard: Option<Clipboard>,
     active_job: Option<ActiveJob>,
     status: String,
     errors: Vec<String>,
@@ -123,6 +127,7 @@ impl App {
                     tab.sort_asc = t.sort_asc;
                     tab.tree = t.tree;
                     tab.show_all = t.show_all;
+                    tab.shorten = t.shorten;
                     Some(tab)
                 })
                 .collect();
@@ -176,6 +181,8 @@ impl App {
             pending: None,
             mono_pending: None,
             trash_pending: None,
+            clipboard: None,
+            dupes_pending: None,
             active_job: None,
             status: String::new(),
             errors,
@@ -198,6 +205,7 @@ impl App {
                     sort_asc: t.sort_asc,
                     tree: t.tree,
                     show_all: t.show_all,
+                    shorten: t.shorten,
                 })
                 .collect(),
             active: p.active,
@@ -462,6 +470,15 @@ impl App {
                         }
                     }
                 }
+                Ev::Duplicates { groups, errors } => {
+                    self.errors.extend(errors);
+                    if groups.is_empty() {
+                        self.status = "No duplicates found".to_owned();
+                    } else {
+                        self.status = String::new();
+                        self.dupes_pending = Some(groups);
+                    }
+                }
                 Ev::DirSize { path, bytes, files } => {
                     self.sizes.set(path, bytes, files);
                 }
@@ -523,7 +540,7 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
         let renaming = self.pane(self.focused).active_tab().renaming.is_some();
-        if renaming || self.pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() {
+        if renaming || self.pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -543,6 +560,47 @@ impl App {
         for action in actions {
             self.perform(action);
         }
+
+        // ⌘X / ⌘C / ⌘V arrive as clipboard events, not key presses.
+        let clip: Vec<egui::Event> = ui.input(|i| {
+            i.events
+                .iter()
+                .filter(|e| matches!(e, egui::Event::Cut | egui::Event::Copy | egui::Event::Paste(_)))
+                .cloned()
+                .collect()
+        });
+        let role = self.focused;
+        for e in clip {
+            match e {
+                egui::Event::Cut => self.set_clipboard(Kind::Move, self.pane(role).active_tab().effective_selection()),
+                egui::Event::Copy => self.set_clipboard(Kind::Copy, self.pane(role).active_tab().effective_selection()),
+                egui::Event::Paste(_) => self.paste(role, None),
+                _ => {}
+            }
+        }
+    }
+
+    // ---- clipboard --------------------------------------------------------
+
+    fn set_clipboard(&mut self, kind: Kind, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        let verb = if kind == Kind::Move { "Cut" } else { "Copied" };
+        self.status = format!("{verb} {n} item(s) — paste into a folder");
+        self.clipboard = Some(Clipboard { kind, paths });
+    }
+
+    /// Paste into `target`, or the pane's current folder when `None`.
+    fn paste(&mut self, role: Role, target: Option<PathBuf>) {
+        let Some(clip) = self.clipboard.clone() else { return };
+        let dest = target.unwrap_or_else(|| self.pane(role).active_tab().cwd.clone());
+        // A cut is used up by its paste, like Finder; a copy can be pasted again.
+        if clip.kind == Kind::Move {
+            self.clipboard = None;
+        }
+        self.start_transfer(clip.kind, clip.paths, dest);
     }
 
     // ---- playback ---------------------------------------------------------
@@ -1052,6 +1110,19 @@ impl eframe::App for App {
             }
         }
 
+        if let Some(groups) = &self.dupes_pending {
+            if let Some(yes) = dialogs::confirm_duplicates(ui.ctx(), groups) {
+                let groups = self.dupes_pending.take().expect("checked above");
+                if yes {
+                    let paths: Vec<PathBuf> = groups.into_iter().flat_map(|g| g.remove).collect();
+                    self.status = format!("Moving {} duplicate(s) to Trash…", paths.len());
+                    self.jobs.trash(paths);
+                } else {
+                    self.status = "Duplicate removal cancelled".to_owned();
+                }
+            }
+        }
+
         if let Some(paths) = &self.trash_pending {
             if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths) {
                 let paths = self.trash_pending.take().expect("checked above");
@@ -1332,6 +1403,7 @@ impl App {
                     opened,
                     committed,
                     pane_focused: focused,
+                    clipboard: self.clipboard.as_ref(),
                 },
             )
         };
@@ -1375,6 +1447,14 @@ impl App {
                 Intent::Dropped(paths) => {
                     let dest = self.pane(role).active_tab().cwd.clone();
                     self.start_transfer(Kind::Copy, paths, dest);
+                }
+                Intent::Cut(paths) => self.set_clipboard(Kind::Move, paths),
+                Intent::Copy(paths) => self.set_clipboard(Kind::Copy, paths),
+                Intent::Paste(target) => self.paste(role, target),
+                Intent::Reveal(p) => reveal(&p),
+                Intent::RemoveDuplicates(paths) => {
+                    self.status = format!("Checking {} files for duplicates…", paths.len());
+                    self.jobs.find_duplicates(paths);
                 }
             }
         }
@@ -1524,6 +1604,25 @@ impl App {
             self.pane_mut(role).close_tab(i);
         }
     }
+}
+
+/// Show `path` selected in the OS file manager.
+fn reveal(path: &Path) {
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    } else {
+        // No portable "select this file"; open the folder that holds it.
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    let _ = cmd.spawn();
 }
 
 fn truncate(s: &str, n: usize) -> String {

@@ -204,3 +204,66 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf]) -> Option<bool
     });
     answer
 }
+
+/// Confirm trashing duplicate files. `Some(true)` = go ahead,
+/// `Some(false)` = cancelled, `None` = still open.
+pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Option<bool> {
+    let mut answer = None;
+    let n: usize = groups.iter().map(|g| g.remove.len()).sum();
+    let freed: u64 = groups.iter().map(|g| g.bytes * g.remove.len() as u64).sum();
+    let name = |p: &std::path::Path| {
+        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    };
+    Modal::new(Id::unique("dupes_modal")).show(ctx, |ui| {
+        ui.set_width(480.0);
+        ui.heading(format!("Move {n} duplicate(s) to Trash?"));
+        ui.label(format!(
+            "{} group(s) of identical files · frees {}",
+            groups.len(),
+            human_bytes(freed)
+        ));
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+            for g in groups {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("keep").color(egui::Color32::from_rgb(90, 210, 110)));
+                    ui.label(RichText::new(name(&g.keep)).monospace().strong());
+                    ui.label(RichText::new(human_bytes(g.bytes)).weak());
+                });
+                for r in &g.remove {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("trash").color(ui.visuals().error_fg_color));
+                        ui.label(RichText::new(name(r)).monospace().strikethrough());
+                    });
+                }
+                ui.add_space(4.0);
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new("Contents were compared byte for byte. You can restore them from the Trash.").weak());
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(RichText::new("Move to Trash").color(ui.visuals().error_fg_color))
+                    .on_hover_text("↩")
+                    .clicked()
+                {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            answer = Some(false);
+        } else if i.key_pressed(egui::Key::Enter) {
+            answer = Some(true);
+        }
+    });
+    answer
+}
