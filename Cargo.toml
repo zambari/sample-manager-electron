@@ -1,0 +1,11 @@
+[package]
+name = "sample_manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.37.0", features = ["persistence"] }
+egui = "0.37"
+serde = { version = "1.0.229", features = ["derive"] }
+trash = "5.2.9"
+walkdir = "2.5.0"

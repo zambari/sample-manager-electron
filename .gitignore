@@ -1,0 +1,31 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Debug / profiling artifacts
+*.pdb
+*.profraw
+*.profdata
+flamegraph.svg
+perf.data*
+
+# Coverage
+/coverage/
+lcov.info
+tarpaulin-report.html
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
