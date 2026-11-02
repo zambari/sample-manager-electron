@@ -339,16 +339,46 @@ fn row(
     }
 
     // Folder rows take drops themselves; the list behind them only gets what
-    // lands elsewhere (the row claims the payload first).
+    // lands elsewhere (the row claims the payload first). The right third of
+    // a folder row means "drop here" -- into the folder the row sits in, not
+    // into the folder itself -- since a list full of folders otherwise leaves
+    // nowhere to aim at.
     if entry.is_dir {
-        let onto_self = |p: &DragPayload| p.device == tab.device && p.paths.contains(&entry.path);
+        let here_zone = egui::Rect::from_min_max(
+            egui::pos2(rect.right() - rect.width() / 3.0, rect.top()),
+            rect.max,
+        );
+        let in_here_zone = ui
+            .ctx()
+            .pointer_interact_pos()
+            .is_some_and(|p| here_zone.contains(p));
+        let target = if in_here_zone {
+            entry.path.parent().map(PathBuf::from)
+        } else {
+            Some(entry.path.clone())
+        };
+        let onto_self = |p: &DragPayload| {
+            !in_here_zone && p.device == tab.device && p.paths.contains(&entry.path)
+        };
         if resp.dnd_hover_payload::<DragPayload>().is_some_and(|p| !onto_self(&p)) {
-            let stroke = Stroke::new(2.0, ui.visuals().selection.stroke.color);
-            ui.painter().rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+            let color = ui.visuals().selection.stroke.color;
+            if in_here_zone {
+                ui.painter().rect_filled(here_zone, 3.0, color.gamma_multiply(0.15));
+                ui.painter().rect_stroke(here_zone, 3.0, Stroke::new(2.0, color), StrokeKind::Inside);
+                ui.painter().text(
+                    here_zone.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "drop here",
+                    egui::FontId::proportional(11.0),
+                    color,
+                );
+            } else {
+                ui.painter().rect_stroke(rect, 3.0, Stroke::new(2.0, color), StrokeKind::Inside);
+            }
         }
         if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
-            if !onto_self(&p) {
-                intents.push(Intent::DroppedOn { dir: entry.path.clone(), payload: (*p).clone() });
+            if let Some(dir) = target.filter(|_| !onto_self(&p)) {
+                intents.push(Intent::DroppedOn { dir, payload: (*p).clone() });
             }
             return;
         }

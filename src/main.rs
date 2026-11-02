@@ -5,6 +5,7 @@ mod editor;
 mod fs_model;
 mod jobs;
 mod keymap;
+mod log;
 mod ops;
 mod pane;
 mod preview;

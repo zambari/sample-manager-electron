@@ -714,7 +714,12 @@ impl App {
                         self.dupes_pending = Some(groups);
                     }
                 }
-                Ev::DeviceStatus(s) => self.device_status = Some(s),
+                Ev::DeviceStatus(s) => {
+                    if let Err(e) = &s {
+                        crate::log::line(format!("device status: {e}"));
+                    }
+                    self.device_status = Some(s)
+                }
                 Ev::DirSize { path, bytes, files } => {
                     self.sizes.set(path, bytes, files);
                 }
@@ -758,6 +763,9 @@ impl App {
                     } else {
                         format!("Finished with {} error(s)", errors.len())
                     };
+                    for e in &errors {
+                        crate::log::line(format!("job {job} error: {e}"));
+                    }
                     self.errors.extend(errors);
                     for dir in touched {
                         // A transfer changes sizes up the whole chain, so the

@@ -190,7 +190,10 @@ impl Conn {
             let msg = self
                 .rx
                 .recv_timeout(left)
-                .map_err(|_| Fail::Link("The device stopped answering (timed out)".into()))?;
+                .map_err(|_| {
+                    crate::log::line(format!("device: cmd 0x{cmd:02x} id {id} timed out"));
+                    Fail::Link("The device stopped answering (timed out)".into())
+                })?;
             if let Some((c, a)) = proto::unframe(&msg, id) {
                 if c == cmd | 0x80 {
                     return Ok(a);
@@ -202,7 +205,12 @@ impl Conn {
     /// For calls answering a single "ok" byte.
     fn ok(&mut self, cmd: u8, args: Args, what: String) -> R<()> {
         let r = self.request(cmd, args)?;
-        if Reader::new(&r).bool().unwrap_or(false) { Ok(()) } else { refused(what) }
+        if Reader::new(&r).bool().unwrap_or(false) {
+            Ok(())
+        } else {
+            crate::log::line(format!("device: cmd 0x{cmd:02x} refused ({what}), reply {r:02x?}"));
+            refused(what)
+        }
     }
 
     fn list(&mut self, p: &Path) -> R<Vec<DirEntry>> {
@@ -495,6 +503,10 @@ impl Worker {
             }
             Task::Transfer { dir, items, policy, mono, total_bytes } => {
                 let n = items.len();
+                crate::log::line(format!("job {job}: {dir:?} {n} item(s), policy {policy:?}"));
+                for (src, dst) in &items {
+                    crate::log::line(format!("  {} -> {}", src.display(), dst.display()));
+                }
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: total_bytes, item: 0, items: n });
                 for (i, (src, dst_dir)) in items.into_iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) {
