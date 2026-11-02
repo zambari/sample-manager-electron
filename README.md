@@ -13,7 +13,7 @@ Elektron Digitakt.
 
 Built in Rust with [egui](https://github.com/emilk/egui).
 
-![Sample Manager: source browser, sample editor and destination browser](docs/screenshot.webp)
+![Sample Manager: source browser, sample editor and destination browser](docs/screenshot1.png)
 
 ## How it works
 
