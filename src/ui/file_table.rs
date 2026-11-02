@@ -245,6 +245,11 @@ fn rows(
         for i in range {
             if i < up {
                 parent_row(ui, tab, intents);
+            } else if i - up >= tab.entries.len() {
+                // A row can collapse a folder mid-loop, shrinking the list
+                // under `range`. The next frame lays it out afresh.
+                ui.ctx().request_repaint();
+                break;
             } else {
                 row(ui, tab, cx, i - up, intents);
             }
