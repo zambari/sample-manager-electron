@@ -176,12 +176,14 @@ impl Jobs {
     }
 
     /// Execute an already-conflict-resolved op list. Returns the job id so the
-    /// UI can show progress and offer cancellation.
-    pub fn execute(&mut self, kind: Kind, ops: Vec<Op>) -> u64 {
+    /// UI can show progress and offer cancellation. With `tidy` (the second
+    /// half of a merge-move) and unless cancelled, it then sends `tidy.dupes`
+    /// to the Trash and removes folders under `tidy.roots` left empty.
+    pub fn execute_then(&mut self, kind: Kind, ops: Vec<Op>, tidy: Option<Tidy>) -> u64 {
         let job = self.next_job.fetch_add(1, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.insert(job, cancel.clone());
-        self.spawn("execute", move |em| execute(em, job, kind, ops, cancel));
+        self.spawn("execute", move |em| execute(em, job, kind, ops, tidy, cancel));
         job
     }
 
@@ -351,7 +353,13 @@ const CHUNK: usize = 256 * 1024;
 /// the UI thousands of times a second for no visible benefit.
 const PROGRESS_INTERVAL_BYTES: u64 = 4 * 1024 * 1024;
 
-fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBool>) {
+/// Clean-up after a merge-move; see [`Jobs::execute_then`].
+pub struct Tidy {
+    pub dupes: Vec<PathBuf>,
+    pub roots: Vec<PathBuf>,
+}
+
+fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, tidy: Option<Tidy>, cancel: Arc<AtomicBool>) {
     let total_bytes: u64 = ops.iter().map(|o| o.approx_bytes).sum();
     // Files, not top-level items, so a folder visibly moves along.
     let counts: Vec<usize> = ops
@@ -432,6 +440,28 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
                 }
             }
             Err(e) => errors.push(format!("{}: {e}", op.src.display())),
+        }
+    }
+
+    if let Some(t) = tidy.filter(|_| !cancel.load(Ordering::Relaxed)) {
+        for p in &t.dupes {
+            if let Err(e) = trash_one(p) {
+                errors.push(format!("{}: {e}", p.display()));
+            }
+        }
+        for root in &t.roots {
+            // Deepest first, so a folder whose subfolders all emptied goes too.
+            // remove_dir refuses non-empty folders: collisions keep theirs.
+            for de in walkdir::WalkDir::new(root).contents_first(true).into_iter().flatten() {
+                if de.file_type().is_dir() {
+                    let _ = std::fs::remove_dir(de.path());
+                }
+            }
+            if let Some(p) = root.parent() {
+                if !touched.iter().any(|t| t == p) {
+                    touched.push(p.to_path_buf());
+                }
+            }
         }
     }
 

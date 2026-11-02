@@ -58,6 +58,9 @@ pub struct DirTab {
     pub renaming: Option<(PathBuf, String)>,
     /// Find-and-replace over several items; takes over the pane while open.
     pub multi_rename: Option<crate::rename::MultiRename>,
+    /// A click on the already-selected row arms a rename that fires once the
+    /// double-click window passes: `(path, time it fires)`.
+    pub slow_click_rename: Option<(PathBuf, f64)>,
     /// Set when the cursor moves by keyboard, so the table scrolls to follow.
     pub scroll_to_cursor: bool,
 }
@@ -89,6 +92,7 @@ impl DirTab {
             shorten: false,
             renaming: None,
             multi_rename: None,
+            slow_click_rename: None,
             scroll_to_cursor: false,
         }
     }

@@ -42,8 +42,9 @@ impl App {
         }
     }
 
-    /// Master volume slider, L/R level meter and, while a stereo sample
-    /// plays, a phase scope hanging under the meter.
+    /// Master volume slider, then a black strip running to the right-hand
+    /// controls. The L/R level meter sits on the strip; while a stereo sample
+    /// plays, the strip shows a wide, flat slice of a phase scope.
     fn volume_and_meter(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().slider_width = 80.0;
         let slider = egui::Slider::new(&mut self.volume, 0.0..=1.25)
@@ -56,6 +57,11 @@ impl App {
             self.volume = 1.0;
         }
         self.engine.set_volume(self.volume);
+
+        // Filled in once the meter is placed and the strip's width is known,
+        // but painted beneath the meter.
+        let strip_left = ui.cursor().left();
+        let strip_bg = ui.painter().add(egui::Shape::Noop);
 
         // Fast attack, ~24 dB/s fall; the hold mark falls slower.
         let dt = ui.input(|i| i.stable_dt).min(0.1);
@@ -119,60 +125,65 @@ impl App {
             ui.ctx().request_repaint();
         }
 
-        if self.engine.is_stereo() {
-            self.phase_scope(ui.ctx(), rect.left_bottom() + egui::vec2(0.0, 6.0));
+        // From the slider to the right-hand controls, full bar height.
+        // Bar's clip rect gives its edges; capped near the row in case the
+        // clip is wider than the panel.
+        let ys = ui.clip_rect().intersect(ui.max_rect().expand2(egui::vec2(0.0, 8.0))).y_range();
+        let strip = egui::Rect::from_x_y_ranges(strip_left..=ui.max_rect().right(), ys);
+        if strip.width() > 4.0 {
+            let mut shapes = vec![egui::Shape::rect_filled(strip, 0.0, egui::Color32::BLACK)];
+            if self.engine.is_stereo() {
+                self.phase_strip(strip, &mut shapes);
+            }
+            ui.painter().set(strip_bg, egui::Shape::Vec(shapes));
         }
     }
 
-    /// Goniometer (mid up, side across) plus an L/R correlation bar.
-    fn phase_scope(&self, ctx: &egui::Context, at: egui::Pos2) {
+    /// Goniometer (mid up, side across) scaled so side spans the strip's
+    /// width; only a thin slice around the centre fits the height. Mono shows
+    /// as a vertical line, wide stereo spreads out sideways. A thin L/R
+    /// correlation bar runs along the bottom edge.
+    fn phase_strip(&self, strip: egui::Rect, shapes: &mut Vec<egui::Shape>) {
         let frames = self.engine.scope(1024);
-        egui::Area::new(egui::Id::new("phase_scope"))
-            .fixed_pos(at)
-            .order(egui::Order::Foreground)
-            .interactable(false)
-            .show(ctx, |ui| {
-                let size = 112.0;
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size + 10.0), egui::Sense::hover());
-                let sq = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
-                let p = ui.painter();
-                p.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(215));
-                p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)), egui::StrokeKind::Inside);
-                let c = sq.center();
-                let r = size * 0.46;
-                let guide = egui::Stroke::new(1.0, egui::Color32::from_gray(48));
-                p.line_segment([c - egui::vec2(0.0, r), c + egui::vec2(0.0, r)], guide);
-                p.line_segment([c - egui::vec2(r, 0.0), c + egui::vec2(r, 0.0)], guide);
-                let d = r * std::f32::consts::FRAC_1_SQRT_2;
-                p.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], guide);
-                p.line_segment([c + egui::vec2(d, -d), c + egui::vec2(-d, d)], guide);
-                for (label, pos) in [("L", c + egui::vec2(-d - 6.0, -d - 6.0)), ("R", c + egui::vec2(d + 6.0, -d - 6.0))] {
-                    p.text(pos, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(9.0), egui::Color32::from_gray(110));
-                }
+        let c = strip.center();
+        let r = strip.width() / 2.0;
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        let guide = egui::Stroke::new(1.0, egui::Color32::from_gray(28));
+        shapes.push(egui::Shape::line_segment([egui::pos2(c.x, strip.top()), egui::pos2(c.x, strip.bottom())], guide));
 
-                let s = std::f32::consts::FRAC_1_SQRT_2;
-                let pts: Vec<egui::Pos2> = frames
-                    .iter()
-                    .map(|&(l, rr)| c + egui::vec2((rr - l) * s, -(l + rr) * s) * r)
-                    .collect();
-                p.add(egui::Shape::line(pts, egui::Stroke::new(1.0, theme::WAVE.gamma_multiply(0.45))));
-
-                // Correlation: +1 mono, 0 wide, -1 out of phase.
-                let (mut lr, mut ll, mut rr2) = (0.0f32, 0.0f32, 0.0f32);
-                for &(l, rr) in &frames {
-                    lr += l * rr;
-                    ll += l * l;
-                    rr2 += rr * rr;
+        // Cut the trace into runs that stay inside the strip, so lines don't
+        // get drawn across the clipped-away parts.
+        let stroke = egui::Stroke::new(1.0, theme::WAVE.gamma_multiply(0.45));
+        let mut run: Vec<egui::Pos2> = Vec::new();
+        for &(l, rr) in &frames {
+            let pt = c + egui::vec2((rr - l) * s, -(l + rr) * s) * r;
+            if strip.contains(pt) {
+                run.push(pt);
+            } else if !run.is_empty() {
+                if run.len() > 1 {
+                    shapes.push(egui::Shape::line(std::mem::take(&mut run), stroke));
                 }
-                let corr = if ll * rr2 > 1e-12 { lr / (ll * rr2).sqrt() } else { 1.0 };
-                let bar = egui::Rect::from_x_y_ranges(sq.left() + 8.0..=sq.right() - 8.0, sq.bottom() + 2.0..=sq.bottom() + 6.0);
-                p.rect_filled(bar, 1.0, egui::Color32::from_gray(36));
-                let mid = bar.center().x;
-                let x = mid + corr.clamp(-1.0, 1.0) * bar.width() / 2.0;
-                let col = if corr < 0.0 { egui::Color32::from_rgb(222, 60, 50) } else { theme::ACCENT_BRIGHT };
-                p.rect_filled(egui::Rect::from_x_y_ranges(mid.min(x)..=mid.max(x), bar.y_range()), 0.0, col);
-                p.line_segment([egui::pos2(mid, bar.top() - 1.0), egui::pos2(mid, bar.bottom() + 1.0)], egui::Stroke::new(1.0, egui::Color32::from_gray(120)));
-            });
+                run.clear();
+            }
+        }
+        if run.len() > 1 {
+            shapes.push(egui::Shape::line(run, stroke));
+        }
+
+        // Correlation: +1 mono, 0 wide, -1 out of phase.
+        let (mut lr, mut ll, mut rr2) = (0.0f32, 0.0f32, 0.0f32);
+        for &(l, rr) in &frames {
+            lr += l * rr;
+            ll += l * l;
+            rr2 += rr * rr;
+        }
+        if ll * rr2 > 1e-12 {
+            let corr = (lr / (ll * rr2).sqrt()).clamp(-1.0, 1.0);
+            let x = c.x + corr * strip.width() / 2.0;
+            let col = if corr < 0.0 { egui::Color32::from_rgb(222, 60, 50) } else { theme::ACCENT_BRIGHT };
+            let bar = egui::Rect::from_x_y_ranges(c.x.min(x)..=c.x.max(x), strip.bottom() - 2.0..=strip.bottom());
+            shapes.push(egui::Shape::rect_filled(bar, 0.0, col.gamma_multiply(0.6)));
+        }
     }
 
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -733,6 +744,8 @@ impl App {
         let mut switch_to = None;
         let mut close = None;
         let mut close_others = None;
+        let mut to_other: Option<(usize, bool)> = None; // (tab, is_move)
+        let other_label = role.other().label();
         let mut new_tab = false;
         let mut drop_on: Option<(usize, DragPayload)> = None;
         let mut new_device_tab = false;
@@ -807,6 +820,21 @@ impl App {
                                         close_others = Some(i);
                                         ui.close();
                                     }
+                                    ui.separator();
+                                    if ui
+                                        .add_enabled(
+                                            n_tabs > 1,
+                                            egui::Button::new(format!("Move to {other_label}")),
+                                        )
+                                        .clicked()
+                                    {
+                                        to_other = Some((i, true));
+                                        ui.close();
+                                    }
+                                    if ui.button(format!("Copy to {other_label}")).clicked() {
+                                        to_other = Some((i, false));
+                                        ui.close();
+                                    }
                                 });
                                 if let Some(p) = payload {
                                     drop_on = Some((i, (*p).clone()));
@@ -851,6 +879,21 @@ impl App {
         }
         if let Some(i) = close_others {
             self.pane_mut(role).close_other_tabs(i);
+        }
+        if let Some((i, is_move)) = to_other {
+            let other = role.other();
+            if is_move {
+                if let Some(tab) = self.pane_mut(role).take_tab(i) {
+                    self.pane_mut(other).add_tab(tab);
+                }
+            } else if let Some(src) = self.pane(role).tabs.get(i) {
+                let (cwd, device) = (src.cwd.clone(), src.device);
+                let id = self.new_tab_id();
+                let tab = if device { DirTab::new_device(id, cwd) } else { DirTab::new(id, cwd) };
+                self.pane_mut(other).add_tab(tab);
+                let j = self.pane(other).active;
+                self.reload(other, j);
+            }
         }
     }
 }

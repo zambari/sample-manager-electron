@@ -149,6 +149,72 @@ pub fn resolve(plan: &Plan, policy: Policy) -> Vec<Op> {
         .collect()
 }
 
+/// A folder merge worked out up front: what to transfer, and what to leave.
+#[derive(Default, Debug)]
+pub struct Merge {
+    /// Items with nothing in their way at the destination. A subfolder that
+    /// doesn't exist there yet goes as one op.
+    pub ops: Vec<Op>,
+    /// Source files whose name and size already sit at the destination.
+    /// Skipped on a copy; sent to the Trash on a move.
+    pub dupes: Vec<PathBuf>,
+    /// Same name, different size (or a file/folder mismatch): left alone.
+    pub collisions: Vec<PathBuf>,
+    /// Source folders merged into existing ones; on a move, emptied
+    /// folders under them are removed afterwards.
+    pub roots: Vec<PathBuf>,
+}
+
+/// Resolve `plan` by merging: conflicting folders are walked and combined,
+/// conflicting files follow the same rule as files inside them (same size =
+/// duplicate, otherwise left in place). `keep` filters which ops take part
+/// at all (the rest are dropped).
+pub fn merge(plan: &Plan, keep: impl Fn(&Op) -> bool) -> Merge {
+    let mut m = Merge::default();
+    for op in plan.ops.iter().filter(|o| keep(o)) {
+        if op.conflict {
+            if op.is_dir {
+                m.roots.push(op.src.clone());
+            }
+            merge_item(&op.src, &op.dst, op.is_dir, &mut m);
+        } else {
+            m.ops.push(op.clone());
+        }
+    }
+    m
+}
+
+fn merge_item(src: &Path, dst: &Path, is_dir: bool, m: &mut Merge) {
+    let src_len = || std::fs::symlink_metadata(src).map_or(0, |md| md.len());
+    let Ok(there) = std::fs::symlink_metadata(dst) else {
+        let approx_bytes = if is_dir { 0 } else { src_len() };
+        m.ops.push(Op { src: src.to_path_buf(), dst: dst.to_path_buf(), approx_bytes, is_dir, conflict: false });
+        return;
+    };
+    if is_dir && there.is_dir() {
+        let Ok(rd) = std::fs::read_dir(src) else {
+            m.collisions.push(src.to_path_buf());
+            return;
+        };
+        for de in rd.flatten() {
+            let Ok(ft) = de.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            merge_item(&de.path(), &dst.join(de.file_name()), ft.is_dir(), m);
+        }
+        return;
+    }
+    // Finder's folder metadata differs between any two folders and means
+    // nothing; treating it as a duplicate lets the source folder empty out.
+    let finder_junk = src.file_name().is_some_and(|n| n == ".DS_Store");
+    if !is_dir && there.is_file() && (finder_junk || there.len() == src_len()) {
+        m.dupes.push(src.to_path_buf());
+    } else {
+        m.collisions.push(src.to_path_buf());
+    }
+}
+
 /// `dst` already holds exactly what copying `src` would put there: the same
 /// bytes for a file, or for a folder every file inside it present and
 /// identical (extra files at the destination don't matter). Read errors count

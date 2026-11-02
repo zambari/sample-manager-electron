@@ -144,10 +144,14 @@ impl Keymap {
     ///
     /// Matches modifiers exactly, so ⌘↩ doesn't also fire plain ↩. More
     /// specific chords are checked first for the same reason.
+    ///
+    /// Not `==`: egui reports ⌘ as `mac_cmd + command` and Windows Ctrl as
+    /// `ctrl + command`, so a plain comparison against `Modifiers::COMMAND`
+    /// never matches. `matches_exact` knows about that.
     pub fn actions(&self, i: &InputState) -> Vec<Action> {
         let mut hits: Vec<(usize, Action)> = Vec::new();
         for (chord, action) in &self.bindings {
-            if i.key_pressed(chord.key) && i.modifiers == chord.mods {
+            if i.key_pressed(chord.key) && i.modifiers.matches_exact(chord.mods) {
                 let specificity = usize::from(chord.mods.any());
                 hits.push((specificity, *action));
             }

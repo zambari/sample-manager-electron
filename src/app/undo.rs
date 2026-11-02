@@ -69,9 +69,14 @@ impl App {
 
     /// Start a local copy / move job with a progress bar.
     pub(super) fn run_local(&mut self, kind: Kind, ops: Vec<ops::Op>) -> u64 {
+        self.run_local_then(kind, ops, None)
+    }
+
+    /// `run_local`, with a merge-move's clean-up afterwards.
+    pub(super) fn run_local_then(&mut self, kind: Kind, ops: Vec<ops::Op>, tidy: Option<crate::jobs::Tidy>) -> u64 {
         let total_items = ops.len();
         let total_bytes = ops.iter().map(|o| o.approx_bytes).sum();
-        let id = self.jobs.execute(kind, ops);
+        let id = self.jobs.execute_then(kind, ops, tidy);
         self.active_jobs.push(ActiveJob {
             id,
             label: String::new(),

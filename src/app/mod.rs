@@ -119,6 +119,11 @@ pub struct App {
     next_tab_id: u64,
     show_hidden: bool,
     pending: Option<PendingPlan>,
+    /// A local job that made "Keep both" copies: once it finishes, select
+    /// them and (for just one) open the inline rename on it.
+    rename_after: Option<(u64, Vec<PathBuf>)>,
+    /// A local job's summary to show instead of a plain "Done".
+    finish_note: Option<(u64, String)>,
     /// Digitakt paths waiting on the "delete now?" confirmation.
     delete_pending: Option<Vec<PathBuf>>,
     /// Duplicate groups waiting on the "trash duplicates?" confirmation.
@@ -291,6 +296,8 @@ impl App {
             clipboard: None,
             undo: Vec::new(),
             undo_jobs: Default::default(),
+            rename_after: None,
+            finish_note: None,
             path_edit: None,
             volumes: None,
             dupes_pending: None,
@@ -466,10 +473,13 @@ impl eframe::App for App {
 
         // Modal last, so it paints over both panes.
         if let Some(p) = &self.pending {
-            if let Some(decision) = dialogs::conflicts(ui.ctx(), &p.plan) {
+            let can_merge = matches!(p.what, PlanKind::Transfer | PlanKind::Commit { .. })
+                && p.plan.ops.iter().any(|o| o.conflict && o.is_dir);
+            if let Some(decision) = dialogs::conflicts(ui.ctx(), &p.plan, can_merge) {
                 let pending = self.pending.take().expect("checked above");
                 match decision {
                     Decision::Proceed(policy) => self.launch(&pending.plan, pending.what, policy),
+                    Decision::Merge => self.launch_merge(&pending.plan, pending.what),
                     Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
                 }
             }

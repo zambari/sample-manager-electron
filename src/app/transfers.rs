@@ -369,6 +369,12 @@ impl App {
             _ => {}
         }
         let mut resolved = ops::resolve(plan, policy);
+        // "Keep both" copies get their name picked by the user once they exist.
+        let mut kept: Vec<PathBuf> = if policy == Policy::KeepBoth {
+            plan.ops.iter().zip(&resolved).filter(|(o, _)| o.conflict).map(|(_, r)| r.dst.clone()).collect()
+        } else {
+            Vec::new()
+        };
         if resolved.is_empty() {
             self.status = "All items skipped".to_owned();
             return;
@@ -400,9 +406,81 @@ impl App {
         if plan.kind == Kind::Copy {
             self.mark_committed(resolved.iter().map(|o| o.src.clone()));
         }
+        kept.retain(|p| resolved.iter().any(|o| &o.dst == p));
         let id = self.run_local(plan.kind, resolved);
         let undo = if plan.kind == Kind::Move { undo::UndoJob::Move } else { undo::UndoJob::Copy };
         self.undo_jobs.insert(id, undo);
+        if !kept.is_empty() {
+            self.rename_after = Some((id, kept));
+        }
+    }
+
+    /// Merge conflicting folders into the existing ones: add what's new,
+    /// treat same name + size as a duplicate, leave other clashes in place.
+    pub(super) fn launch_merge(&mut self, plan: &Plan, what: PlanKind) {
+        let mut plan = plan.clone();
+        // Mono folds are rendered rather than copied, so they can't be
+        // compared: they go the normal way, skipping any that exist.
+        if let PlanKind::Commit { fold, dest_dir } = what {
+            let (folds, rest): (Vec<_>, Vec<_>) = plan.ops.into_iter().partition(|o| fold.contains(&o.src));
+            plan.ops = rest;
+            if !folds.is_empty() {
+                let fp = Plan { kind: plan.kind, ops: folds, rejected: Vec::new() };
+                self.launch(&fp, PlanKind::Commit { fold, dest_dir }, Policy::Skip);
+            }
+        }
+        let m = ops::merge(&plan, |_| true);
+        let moving = plan.kind == Kind::Move;
+        for c in &m.collisions {
+            crate::log::line(format!("merge: left in place (same name, different size): {}", c.display()));
+        }
+        let mut note = format!("Merged: {} added", m.ops.len());
+        if !m.dupes.is_empty() {
+            let fate = if moving { "moved to the Trash" } else { "skipped" };
+            note += &format!(", {} duplicate(s) {fate}", m.dupes.len());
+        }
+        if !m.collisions.is_empty() {
+            let place = if moving { "left in the source folder" } else { "not copied" };
+            note += &format!(", {} with the same name but a different size {place}", m.collisions.len());
+        }
+        if !moving {
+            self.mark_committed(m.ops.iter().map(|o| o.src.clone()).chain(m.dupes.iter().cloned()));
+        }
+        if m.ops.is_empty() && (!moving || m.dupes.is_empty()) {
+            self.status = note;
+            return;
+        }
+        let tidy = moving.then(|| crate::jobs::Tidy { dupes: m.dupes, roots: m.roots });
+        let id = self.run_local_then(plan.kind, m.ops, tidy);
+        let undo = if moving { undo::UndoJob::Move } else { undo::UndoJob::Copy };
+        self.undo_jobs.insert(id, undo);
+        self.finish_note = Some((id, note));
+    }
+
+    /// Select the "Keep both" copies a finished job made and, for a single
+    /// one, open the inline rename on it, in a pane showing its folder.
+    fn rename_kept(&mut self, paths: Vec<PathBuf>) {
+        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok()).collect();
+        let Some(first) = paths.first() else { return };
+        let Some(dir) = first.parent().map(Path::to_path_buf) else { return };
+        let Some(role) = [self.focused, self.focused.other()].into_iter().find(|&r| {
+            let t = self.pane(r).active_tab();
+            !t.device && (t.cwd == dir || t.expanded.contains(&dir))
+        }) else {
+            return;
+        };
+        self.focused = role;
+        self.editor_focused = false;
+        let tab = self.pane_mut(role).active_tab_mut();
+        tab.multi_rename = None;
+        tab.selected = paths.iter().cloned().collect();
+        tab.cursor = None;
+        if let [only] = paths.as_slice() {
+            let name = only.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            tab.renaming = Some((only.clone(), name));
+        } else {
+            self.status += " · new copies selected — ⇧F2 renames them together";
+        }
     }
 
     // ---- worker results ---------------------------------------------------
@@ -524,6 +602,16 @@ impl App {
                     }
                     if let Some(p) = load {
                         self.load_into_editor(&p);
+                    }
+                    if let Some((_, note)) = self.finish_note.take_if(|(id, _)| *id == job) {
+                        if !cancelled && self.status.starts_with("Done") {
+                            self.status = self.status.replacen("Done", &note, 1);
+                        }
+                    }
+                    if let Some((_, kept)) = self.rename_after.take_if(|(id, _)| *id == job) {
+                        if !cancelled {
+                            self.rename_kept(kept);
+                        }
                     }
                 }
             }

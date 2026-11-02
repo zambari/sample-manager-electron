@@ -7,6 +7,8 @@ use egui::{Context, Id, Modal, RichText};
 
 pub enum Decision {
     Proceed(Policy),
+    /// Merge conflicting folders into the existing ones.
+    Merge,
     Cancel,
 }
 
@@ -14,7 +16,9 @@ pub enum Decision {
 ///
 /// Asking per-file mid-transfer is the thing that makes other file managers
 /// miserable, so the plan is built first and the whole question posed once.
-pub fn conflicts(ctx: &Context, plan: &Plan) -> Option<Decision> {
+/// `can_merge`: offer "Merge" (some conflicts are folders, and this kind of
+/// transfer supports it).
+pub fn conflicts(ctx: &Context, plan: &Plan, can_merge: bool) -> Option<Decision> {
     let mut decision = None;
 
     Modal::new(Id::unique("conflict_modal")).show(ctx, |ui| {
@@ -63,8 +67,21 @@ pub fn conflicts(ctx: &Context, plan: &Plan) -> Option<Decision> {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // "Keep both" first and default: it is the only
                 // non-destructive answer, so it should be the easy one to hit.
-                if ui.button(Policy::KeepBoth.label()).clicked() {
+                let keep_tip = if n == 1 { "Keep both, then rename the new one" } else { "Keep both; the new ones get a number" };
+                if ui.button(Policy::KeepBoth.label()).on_hover_text(keep_tip).clicked() {
                     decision = Some(Decision::Proceed(Policy::KeepBoth));
+                }
+                if can_merge
+                    && ui
+                        .button("Merge")
+                        .on_hover_text(
+                            "Combine folders: new files are added, files with the same name and size \
+                             count as duplicates (skipped, or on a move sent to the Trash), \
+                             same name but different size is left where it is",
+                        )
+                        .clicked()
+                {
+                    decision = Some(Decision::Merge);
                 }
                 if ui.button(Policy::Skip.label()).clicked() {
                     decision = Some(Decision::Proceed(Policy::Skip));

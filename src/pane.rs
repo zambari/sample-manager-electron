@@ -64,6 +64,22 @@ impl Pane {
         }
     }
 
+    /// Remove a tab and hand it back (to move it to the other pane). Like
+    /// `close_tab`, refuses to take the last one.
+    pub fn take_tab(&mut self, idx: usize) -> Option<DirTab> {
+        if self.tabs.len() <= 1 || idx >= self.tabs.len() {
+            return None;
+        }
+        let tab = self.tabs.remove(idx);
+        if idx < self.active {
+            self.active -= 1;
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        Some(tab)
+    }
+
     /// Close every tab except `idx`, which becomes the active one.
     pub fn close_other_tabs(&mut self, idx: usize) {
         if idx >= self.tabs.len() {

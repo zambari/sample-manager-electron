@@ -244,6 +244,21 @@ fn rows(
             }
         }
     });
+
+    // Fire an armed slow-click rename once its double-click window is over,
+    // provided that row is still the only thing selected.
+    if let Some((path, at)) = tab.slow_click_rename.clone() {
+        let now = ui.input(|i| i.time);
+        let still = tab.selected.len() == 1 && tab.selected.contains(&path);
+        if !still || tab.renaming.is_some() {
+            tab.slow_click_rename = None;
+        } else if now >= at {
+            tab.slow_click_rename = None;
+            intents.push(Intent::BeginRename(path));
+        } else {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+        }
+    }
 }
 
 fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
@@ -432,6 +447,7 @@ fn row(
     }
 
     if resp.drag_started() {
+        tab.slow_click_rename = None;
         // If the row isn't part of the selection, dragging it selects it first
         // -- otherwise you'd drag something you can't see highlighted.
         if !is_selected {
@@ -458,6 +474,14 @@ fn row(
             tab.select_range(anchor, vis_i);
             tab.cursor = Some(vis_i);
         } else {
+            // Clicking the row that is already the only selection (in the
+            // focused pane) renames it, Finder-style -- but only after the
+            // double-click window, so a double-click still opens.
+            let sole = is_selected && tab.selected.len() == 1;
+            tab.slow_click_rename = (sole && cx.pane_focused).then(|| {
+                let wait = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+                (entry.path.clone(), ui.input(|i| i.time) + wait)
+            });
             tab.selected.clear();
             tab.selected.insert(entry.path.clone());
             tab.cursor = Some(vis_i);
@@ -466,6 +490,7 @@ fn row(
     }
 
     if resp.double_clicked() {
+        tab.slow_click_rename = None;
         intents.push(Intent::Open(entry.path.clone()));
     }
 
@@ -631,7 +656,12 @@ fn draw_cells(
     let size_left = size_pos.x;
     ui.painter().galley(size_pos, size_galley, egui::Color32::PLACEHOLDER);
 
-    let mut x = paint_text(ui, inner, icon, body_font(ui, 0.0), ui.visuals().text_color());
+    let icon_color = if entry.empty {
+        ui.visuals().text_color().gamma_multiply(0.5)
+    } else {
+        ui.visuals().text_color()
+    };
+    let mut x = paint_text(ui, inner, icon, body_font(ui, 0.0), icon_color);
 
     // Committed badge: a green check painted right after the icon. Drawn as
     // lines rather than a glyph so it never depends on font coverage.
@@ -657,8 +687,8 @@ fn draw_cells(
     name_rect.min.x = x + gap;
     name_rect.max.x = (size_left - gap).max(name_rect.min.x);
     let name_color = if entry.empty {
-        // Empty folder: nothing to see inside, so it recedes.
-        ui.visuals().weak_text_color()
+        // Empty folder: nothing to see inside, so it recedes a little.
+        egui::Color32::from_gray(185)
     } else if !device && cx.opened.contains(&entry.path) {
         egui::Color32::GRAY
     } else {
