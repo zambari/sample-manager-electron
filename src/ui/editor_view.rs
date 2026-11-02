@@ -158,9 +158,7 @@ fn phase_meter(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
 
 fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) {
     ui.horizontal(|ui| {
-        let title = RichText::new("Sample Editor");
-        let title = if focused { title.strong() } else { title.weak() };
-        if ui.selectable_label(focused, title).clicked() {
+        if ui.add(crate::ui::theme::pane_title("Sample Editor", focused)).clicked() {
             out.push(EdIntent::TookFocus);
         }
         ui.separator();
@@ -574,7 +572,7 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     // Region background.
     let reg = Rect::from_x_y_ranges(x_in.max(rect.left())..=x_out.min(rect.right()), lanes.y_range());
     if reg.width() > 0.0 {
-        painter.rect_filled(reg, 0.0, vis.selection.bg_fill.gamma_multiply(0.18));
+        painter.rect_filled(reg, 0.0, vis.selection.bg_fill.gamma_multiply(0.12));
     }
 
     draw_ruler(&painter, &m, ruler, ed.sample().map_or(1, |s| s.rate), &vis);
@@ -612,7 +610,7 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     }
 
     if focused {
-        painter.rect_stroke(rect, 2.0, Stroke::new(1.0, vis.selection.stroke.color.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        painter.rect_stroke(rect, 2.0, Stroke::new(1.0, crate::ui::theme::ACCENT_BRIGHT.gamma_multiply(0.6)), egui::StrokeKind::Inside);
     }
 }
 
@@ -624,7 +622,7 @@ fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: Rect, vis: &
     let n_ch = cur.sample.channels.len().max(1);
     let lane_h = lanes.height() / n_ch as f32;
     let gain = ed.gain();
-    let wave_in = vis.selection.stroke.color;
+    let wave_in = crate::ui::theme::WAVE;
     let wave_out = vis.weak_text_color();
 
     for (c, (data, peaks)) in cur.sample.channels.iter().zip(cur.peaks.iter()).enumerate() {
@@ -840,7 +838,7 @@ fn scope(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, out: &mut Vec<
 
     let reg = Rect::from_x_y_ranges(x_in.max(rect.left())..=x_out.min(rect.right()), lanes.y_range());
     if reg.width() > 0.0 {
-        painter.rect_filled(reg, 0.0, vis.selection.bg_fill.gamma_multiply(0.18));
+        painter.rect_filled(reg, 0.0, vis.selection.bg_fill.gamma_multiply(0.12));
     }
     draw_ruler(&painter, &m, ruler, rate, &vis);
     draw_lanes(&painter, ed, &m, lanes, &vis);

@@ -228,7 +228,7 @@ fn parent_row(ui: &mut Ui, intents: &mut Vec<Intent>) {
         Sense::click(),
     );
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     // Painted, not label widgets, so the text can't swallow clicks.
@@ -279,12 +279,12 @@ fn row(
             // on even while the destination pane has focus.
             ui.visuals().selection.bg_fill.gamma_multiply(0.45)
         };
-        ui.painter().rect_filled(rect, 3.0, fill);
+        ui.painter().rect_filled(rect, 2.0, fill);
     }
     if is_cursor && cx.pane_focused {
         ui.painter().rect_stroke(
             rect,
-            3.0,
+            2.0,
             Stroke::new(1.0, ui.visuals().strong_text_color()),
             StrokeKind::Inside,
         );
@@ -334,7 +334,7 @@ fn row(
         // Painted behind the text (which was laid out before we knew).
         if !is_selected {
             let hover = ui.visuals().widgets.hovered.weak_bg_fill;
-            ui.painter().set(bg, egui::Shape::rect_filled(rect, 3.0, hover));
+            ui.painter().set(bg, egui::Shape::rect_filled(rect, 2.0, hover));
         }
     }
 
@@ -361,10 +361,10 @@ fn row(
             !in_here_zone && p.device == tab.device && p.paths.contains(&entry.path)
         };
         if resp.dnd_hover_payload::<DragPayload>().is_some_and(|p| !onto_self(&p)) {
-            let color = ui.visuals().selection.stroke.color;
+            let color = crate::ui::theme::ACCENT_BRIGHT;
             if in_here_zone {
-                ui.painter().rect_filled(here_zone, 3.0, color.gamma_multiply(0.15));
-                ui.painter().rect_stroke(here_zone, 3.0, Stroke::new(2.0, color), StrokeKind::Inside);
+                ui.painter().rect_filled(here_zone, 2.0, color.gamma_multiply(0.15));
+                ui.painter().rect_stroke(here_zone, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
                 ui.painter().text(
                     here_zone.center(),
                     egui::Align2::CENTER_CENTER,
@@ -373,7 +373,7 @@ fn row(
                     color,
                 );
             } else {
-                ui.painter().rect_stroke(rect, 3.0, Stroke::new(2.0, color), StrokeKind::Inside);
+                ui.painter().rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
             }
         }
         if let Some(p) = resp.dnd_release_payload::<DragPayload>() {

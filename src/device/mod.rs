@@ -223,6 +223,12 @@ impl Conn {
         self.ok(proto::DIR_CREATE, Args::default().str(&s), format!("could not create folder {s}"))
     }
 
+    /// Remove an empty folder.
+    fn rmdir(&mut self, p: &Path) -> R<()> {
+        let s = dev_str(p);
+        self.ok(proto::DIR_DELETE, Args::default().str(&s), format!("could not remove folder {s}"))
+    }
+
     fn delete_file(&mut self, p: &Path) -> R<()> {
         let s = dev_str(p);
         self.ok(proto::FILE_DELETE, Args::default().str(&s), format!("could not delete {s}"))
@@ -484,17 +490,21 @@ impl Worker {
                         errors.push(format!("{} is already in {TRASH}", dev_str(&p)));
                         continue;
                     }
-                    let res = self.with_conn(|c| {
+                    let target = self.with_conn(|c| {
                         if !c.list(Path::new("/"))?.iter().any(|e| e.is_dir && e.name == "trash") {
                             c.mkdir(&trash)?;
                         }
                         let taken: HashSet<String> = c.list(&trash)?.into_iter().map(|e| e.name).collect();
                         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         let name = if taken.contains(&name) { unique_name(&taken, &name) } else { name };
-                        c.rename(&p, &trash.join(name))
+                        Ok(trash.join(name))
+                    });
+                    let res = target.and_then(|t| {
+                        let is_dir = self.stat(&p)?.is_dir;
+                        self.relocate(&p, &t, is_dir, cancel)
                     });
                     match res {
-                        Ok(()) => touch(&mut touched_dev, p.parent().unwrap_or(Path::new("/"))),
+                        Ok(_) => touch(&mut touched_dev, p.parent().unwrap_or(Path::new("/"))),
                         Err(e) => errors.push(e),
                     }
                 }
@@ -516,7 +526,7 @@ impl Worker {
                         p.item = i;
                     }
                     let res = match dir {
-                        Dir::Move => self.move_item(&src, &dst_dir, policy),
+                        Dir::Move => self.move_item(&src, &dst_dir, policy, cancel),
                         Dir::Upload => self.upload(&src, &dst_dir, policy, mono, cancel, &mut errors),
                         Dir::Download => self.download(&src, &dst_dir, policy, cancel, &mut errors),
                         Dir::Copy => self.copy(&src, &dst_dir, policy, cancel, &mut errors),
@@ -577,7 +587,7 @@ impl Worker {
         }
     }
 
-    fn move_item(&mut self, src: &Path, dst_dir: &Path, policy: Policy) -> Result<(), String> {
+    fn move_item(&mut self, src: &Path, dst_dir: &Path, policy: Policy, cancel: &AtomicBool) -> Result<(), String> {
         if dst_dir.starts_with(src) {
             return Err(format!("{}: cannot move a folder into itself", dev_str(src)));
         }
@@ -590,9 +600,44 @@ impl Worker {
         // A rename can't merge folders: an existing folder is in the way.
         let policy = if entry.is_dir && policy == Policy::Replace { Policy::KeepBoth } else { policy };
         let Some((target, _)) = self.place_on_device(dst_dir, &name, entry.is_dir, policy)? else { return Ok(()) };
-        self.with_conn(|c| c.rename(src, &target))?;
-        self.progress("", entry.size as u64);
+        if self.relocate(src, &target, entry.is_dir, cancel)? {
+            self.progress("", entry.size as u64);
+        }
         Ok(())
+    }
+
+    /// Move `src` to `target` (a free path). The device refuses to rename a
+    /// folder into another folder, so when a rename is refused, rebuild the
+    /// item at `target` piece by piece and remove the source. Returns whether
+    /// the plain rename worked (the fallback reports its own progress).
+    fn relocate(&mut self, src: &Path, target: &Path, is_dir: bool, cancel: &AtomicBool) -> Result<bool, String> {
+        let renamed = self.with_conn(|c| match c.rename(src, target) {
+            Ok(()) => Ok(true),
+            Err(Fail::Refused(_)) => Ok(false),
+            Err(e) => Err(e),
+        })?;
+        if renamed {
+            return Ok(true);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        crate::log::line(format!("device: rename refused, moving {} piece by piece", dev_str(src)));
+        if is_dir {
+            self.with_conn(|c| c.mkdir(target))?;
+            let kids = self.with_conn(|c| c.list(src))?;
+            for k in kids {
+                // Stop at the first failure so the source keeps what didn't move.
+                self.relocate(&src.join(&k.name), &target.join(&k.name), k.is_dir, cancel)?;
+            }
+            self.with_conn(|c| c.rmdir(src))?;
+        } else {
+            self.progress(&src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 0);
+            let raw = self.read_raw(src, cancel)?;
+            self.write_raw(target, &raw, cancel)?;
+            self.with_conn(|c| c.delete_file(src))?;
+        }
+        Ok(false)
     }
 
     fn upload(&mut self, src: &Path, dst_dir: &Path, policy: Policy, mono: bool, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {

@@ -22,6 +22,7 @@ use crate::sizes::SizeCache;
 use crate::state;
 use crate::tab::DirTab;
 use crate::ui::dialogs::{self, Decision, MonoChoice};
+use crate::ui::theme;
 use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
 use std::path::{Path, PathBuf};
 
@@ -134,6 +135,7 @@ pub struct App {
 
 impl App {
     pub fn new(ctx: egui::Context, storage: Option<&dyn eframe::Storage>) -> Self {
+        theme::apply(&ctx);
         let home = dirs_home();
         let saved = state::load(storage);
         let mut next_tab_id = 0;
@@ -1646,7 +1648,7 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Sample Manager");
+            ui.label(egui::RichText::new("SAMPLE MANAGER").size(13.0).strong().color(theme::ACCENT_BRIGHT));
             ui.separator();
 
             if ui.checkbox(&mut self.show_hidden, "Hidden").changed() {
@@ -1656,8 +1658,12 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right to left: the first widget lands at the far right.
                 let commit_key = self.keymap.describe(Action::Commit);
+                let commit_btn = egui::Button::new(
+                    egui::RichText::new(format!("Commit to destination  {commit_key}")).color(theme::ON_ACCENT),
+                )
+                .fill(theme::ACCENT);
                 if ui
-                    .button(format!("Commit to destination  {commit_key}"))
+                    .add(commit_btn)
                     .on_hover_text(
                         "Copy the source selection into the active destination tab.\n\
                          A single file open in the editor is written with its trim, gain and mono settings.",
@@ -1759,12 +1765,15 @@ impl App {
 
     fn show_pane(&mut self, ui: &mut egui::Ui, role: Role) {
         let focused = self.focused == role && !self.editor_focused;
+        let on_device = self.pane(role).active_tab().device;
+        let area = ui.max_rect().expand(4.0);
+        if on_device {
+            ui.painter().rect_filled(area, 0.0, theme::device_wash());
+        }
 
         // Pane header: role, path, and the sub-tab strip.
         ui.horizontal(|ui| {
-            let title = egui::RichText::new(role.label());
-            let title = if focused { title.strong() } else { title.weak() };
-            if ui.selectable_label(focused, title).clicked() {
+            if ui.add(theme::pane_title(role.label(), focused)).clicked() {
                 self.focused = role;
                 self.editor_focused = false;
             }
@@ -1807,6 +1816,10 @@ impl App {
                 },
             )
         };
+
+        if on_device {
+            ui.painter().rect_stroke(area.shrink(1.0), 0.0, theme::device_frame(), egui::StrokeKind::Inside);
+        }
 
         for intent in intents {
             match intent {

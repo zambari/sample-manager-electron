@@ -16,6 +16,7 @@ pub const HEADER: [u8; 6] = [0xF0, 0x00, 0x20, 0x3C, 0x10, 0x00];
 pub const DEVICE: u8 = 0x01;
 pub const DIR_LIST: u8 = 0x10;
 pub const DIR_CREATE: u8 = 0x11;
+pub const DIR_DELETE: u8 = 0x12;
 pub const FILE_DELETE: u8 = 0x20;
 pub const ITEM_RENAME: u8 = 0x21;
 pub const READ_OPEN: u8 = 0x30;
