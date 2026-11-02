@@ -12,6 +12,7 @@ mod log;
 mod ops;
 mod pane;
 mod preview;
+mod rename;
 mod sizes;
 mod state;
 mod tab;

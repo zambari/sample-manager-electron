@@ -32,6 +32,8 @@ pub enum Intent {
     /// This pane's rows were clicked, so it should take keyboard focus.
     TookFocus,
     BeginRename(PathBuf),
+    /// Open find-and-replace renaming over the selection.
+    BeginMultiRename,
     CommitRename { from: PathBuf, to: String },
     CancelRename,
     /// Something was dropped onto this tab's list.
@@ -473,6 +475,10 @@ fn row(
         let single = tab.selected.len() <= 1;
         if single && ui.button("Rename").clicked() {
             intents.push(Intent::BeginRename(entry.path.clone()));
+            ui.close();
+        }
+        if !single && ui.button(format!("Rename {} items…", tab.selected.len())).on_hover_text("Find and replace in all their names (F2)").clicked() {
+            intents.push(Intent::BeginMultiRename);
             ui.close();
         }
         let local = !tab.device;

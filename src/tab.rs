@@ -56,6 +56,8 @@ pub struct DirTab {
     pub shorten: bool,
     /// `Some((path, edited_name))` while an inline rename is open.
     pub renaming: Option<(PathBuf, String)>,
+    /// Find-and-replace over several items; takes over the pane while open.
+    pub multi_rename: Option<crate::rename::MultiRename>,
     /// Set when the cursor moves by keyboard, so the table scrolls to follow.
     pub scroll_to_cursor: bool,
 }
@@ -86,6 +88,7 @@ impl DirTab {
             show_all: false,
             shorten: false,
             renaming: None,
+            multi_rename: None,
             scroll_to_cursor: false,
         }
     }
@@ -320,6 +323,26 @@ impl DirTab {
 
     /// The paths an action should apply to: the selection if there is one,
     /// otherwise just the cursor row.
+    /// Every selected row, in display order, with whether it is a folder.
+    pub fn selected_rows(&self) -> Vec<(PathBuf, bool)> {
+        self.entries.iter().filter(|e| self.selected.contains(&e.path)).map(|e| (e.path.clone(), e.is_dir)).collect()
+    }
+
+    /// Names listed in `dir` (the tab's folder or an expanded one).
+    pub fn listed_names(&self, dir: &Path) -> Vec<String> {
+        let list = if dir == self.cwd { Some(&self.listing) } else { self.children.get(dir) };
+        list.map(|l| l.iter().map(|e| e.name.clone()).collect()).unwrap_or_default()
+    }
+
+    /// Open the multi-rename panel over the selection.
+    pub fn begin_multi_rename(&mut self) {
+        let items = self.selected_rows();
+        if items.len() > 1 {
+            self.renaming = None;
+            self.multi_rename = Some(crate::rename::MultiRename::new(items, self.device, |d| self.listed_names(d)));
+        }
+    }
+
     pub fn effective_selection(&self) -> Vec<PathBuf> {
         if !self.selected.is_empty() {
             // Return in display order rather than HashSet order, so progress

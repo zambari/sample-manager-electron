@@ -284,6 +284,26 @@ impl App {
             };
             other.active_tab().cwd.file_name().map(|n| n.to_string_lossy().into_owned())
         };
+        if let Some(mr) = self.pane_mut(role).active_tab_mut().multi_rename.as_mut() {
+            let outcome = crate::ui::rename_view::show(ui, mr, focused);
+            if ui.ui_contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
+                self.focused = role;
+                self.editor_focused = false;
+            }
+            if on_device {
+                ui.painter().rect_stroke(area.shrink(1.0), 0.0, theme::device_frame(), egui::StrokeKind::Inside);
+            }
+            match outcome {
+                Some(crate::ui::rename_view::Outcome::Apply(rows)) => self.apply_multi_rename(role, &rows),
+                Some(crate::ui::rename_view::Outcome::Cancel) => {
+                    self.pane_mut(role).active_tab_mut().multi_rename = None;
+                    self.status = "Rename cancelled".to_owned();
+                }
+                None => {}
+            }
+            return;
+        }
+
         let intents = {
             let sizes = &self.sizes;
             let preview = &self.preview;
@@ -350,6 +370,7 @@ impl App {
                     let on_dev = tab.device;
                     self.do_rename(&from, &to, on_dev);
                 }
+                Intent::BeginMultiRename => self.pane_mut(role).active_tab_mut().begin_multi_rename(),
                 Intent::CancelRename => {
                     self.pane_mut(role).active_tab_mut().renaming = None;
                 }

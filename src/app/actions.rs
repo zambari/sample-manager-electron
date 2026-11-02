@@ -7,7 +7,8 @@ impl App {
 
     pub(super) fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
-        let renaming = self.pane(self.focused).active_tab().renaming.is_some();
+        let tab = self.pane(self.focused).active_tab();
+        let renaming = tab.renaming.is_some() || tab.multi_rename.is_some();
         if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.trash_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
@@ -127,7 +128,9 @@ impl App {
             }
             Action::Rename => {
                 let tab = self.pane_mut(role).active_tab_mut();
-                if let Some(e) = tab.cursor_entry() {
+                if tab.selected.len() > 1 {
+                    tab.begin_multi_rename();
+                } else if let Some(e) = tab.cursor_entry() {
                     tab.renaming = Some((e.path.clone(), e.name.clone()));
                 }
             }
@@ -322,6 +325,67 @@ impl App {
         tab.selected.insert(path.clone());
         tab.cursor = None;
         tab.renaming = Some((path, name));
+    }
+
+    /// Run the renames the multi-rename panel settled on, then close it.
+    pub(super) fn apply_multi_rename(&mut self, role: Role, rows: &[crate::rename::Row]) {
+        let tab = self.pane_mut(role).active_tab_mut();
+        let device = tab.device;
+        tab.multi_rename = None;
+        let (steps, finals) = crate::rename::plan(rows);
+        if finals.is_empty() {
+            return;
+        }
+        // Keep the renamed items selected under their new names.
+        tab.selected = finals.iter().map(|(_, to)| to.clone()).collect();
+
+        if device {
+            // Device plans never chain (the preview refuses that), so each
+            // step is a final rename. The jobs run one after another.
+            let n = steps.len();
+            for (from, to) in steps {
+                self.run_device(device::Task::Rename { from, to }, "Renaming", 1, 0);
+            }
+            self.status = format!("Renaming {n} item(s) on the device…");
+            return;
+        }
+
+        let mut parents: Vec<PathBuf> = Vec::new();
+        for (from, to) in &steps {
+            // The preview checked against names seen when it opened; check
+            // again, since something may have appeared since.
+            let case_only = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+            if !case_only && to.exists() {
+                self.errors.push(format!("{} already exists, left {} as it was", to.display(), from.display()));
+                continue;
+            }
+            match std::fs::rename(from, to) {
+                Ok(()) => {}
+                Err(e) => self.errors.push(format!("rename {} failed: {e}", from.display())),
+            }
+            if let Some(p) = to.parent() {
+                if !parents.iter().any(|x| x == p) {
+                    parents.push(p.to_path_buf());
+                }
+            }
+        }
+        // Paths the app remembers follow the files.
+        for (from, to) in &finals {
+            if self.opened.remove(from) {
+                self.opened.insert(to.clone());
+                self.opened_dirty = true;
+            }
+            if self.committed.remove(from) {
+                self.committed.insert(to.clone());
+                self.committed_dirty = true;
+            }
+        }
+        let renamed = finals.iter().filter(|(_, to)| to.exists()).count();
+        self.status = format!("Renamed {renamed} of {} item(s)", finals.len());
+        for p in parents {
+            self.sizes.invalidate_subtree(&p);
+            self.reload_showing(&p, false);
+        }
     }
 
     pub(super) fn do_rename(&mut self, from: &Path, to: &str, device: bool) {

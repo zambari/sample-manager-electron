@@ -87,6 +87,15 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
     if pn.stats {
         reserved += 150.0;
     }
+    // Measure the wrapped help text so the waveform leaves room for it.
+    let help_font = egui::TextStyle::Small.resolve(ui.style());
+    let help_h = if pn.help {
+        let g = ui.fonts_mut(|f| f.layout(crate::keymap::EDITOR_HELP.to_owned(), help_font.clone(), egui::Color32::WHITE, avail.x));
+        g.size().y + 8.0
+    } else {
+        0.0
+    };
+    reserved += help_h;
 
     if pn.wave {
         let wave_h = (avail.y - reserved - 12.0).max(80.0);
@@ -114,6 +123,11 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
     if pn.stats {
         ui.add_space(6.0);
         stats_table(ui, ed);
+    }
+
+    if pn.help {
+        ui.add_space(8.0);
+        ui.label(RichText::new(crate::keymap::EDITOR_HELP).weak().small());
     }
     out
 }
@@ -197,7 +211,7 @@ fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
         ui.label(RichText::new("Show").weak().small());
-        let items: [(&mut bool, &str, &str); 7] = [
+        let items: [(&mut bool, &str, &str); 8] = [
             (&mut p.transport, "Transport", "Play controls and the in / out / len / playhead readout"),
             (&mut p.gain, "Gain", "Gain and normalize"),
             (&mut p.tools, "Tools", "Undo, crop, loop scaling, export"),
@@ -205,6 +219,7 @@ fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
             (&mut p.scalpel, "Scalpel", "40 ms extreme-zoom strip around the playhead"),
             (&mut p.minimap, "Map", "Minimap: the whole file, click to jump"),
             (&mut p.stats, "Stats", "Stats table and phase meter"),
+            (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
         for (v, label, hover) in items {
             ui.toggle_value(v, RichText::new(label).small()).on_hover_text(format!("Show / hide: {hover}"));

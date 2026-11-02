@@ -424,8 +424,5 @@ impl App {
                 EdIntent::SaveInPlace => self.save_in_place(),
             }
         }
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.label(egui::RichText::new(keymap::EDITOR_HELP).weak().small());
-        });
     }
 }

@@ -55,11 +55,13 @@ pub struct Panels {
     pub minimap: bool,
     /// Stats table and phase meter.
     pub stats: bool,
+    /// Keyboard shortcut cheat sheet at the bottom.
+    pub help: bool,
 }
 
 impl Default for Panels {
     fn default() -> Self {
-        Self { transport: true, gain: true, tools: true, wave: true, scalpel: true, minimap: true, stats: true }
+        Self { transport: true, gain: true, tools: true, wave: true, scalpel: true, minimap: true, stats: true, help: true }
     }
 }
 
