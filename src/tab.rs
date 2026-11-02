@@ -465,6 +465,7 @@ mod tests {
         Entry {
             name: p.file_name().unwrap().to_string_lossy().into_owned(),
             is_audio: !is_dir && path.ends_with(".wav"),
+            empty: false,
             path: p,
             is_dir,
             len: 0,

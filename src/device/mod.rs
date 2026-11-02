@@ -493,6 +493,7 @@ fn entries(path: &Path, v: Vec<DirEntry>) -> Vec<crate::fs_model::Entry> {
             len: if d.is_dir { 0 } else { d.size as u64 },
             modified: None,
             is_audio: false,
+            empty: false,
         })
         .collect()
 }

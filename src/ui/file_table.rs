@@ -268,10 +268,7 @@ fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
     }
     // Painted, not label widgets, so the text can't swallow clicks.
     let inner = rect.shrink2(egui::vec2(6.0, 0.0));
-    let x = paint_text(ui, inner, "⬆", body_font(ui, 0.0), ui.visuals().text_color());
-    let mut name_rect = inner;
-    name_rect.min.x = x + ui.spacing().item_spacing.x;
-    paint_text(ui, name_rect, "..", body_font(ui, 1.0), egui::Color32::WHITE);
+    paint_text(ui, inner, "..", body_font(ui, 1.0), egui::Color32::WHITE);
     // Double click, like any other folder row.
     if resp.on_hover_text("Parent folder").double_clicked() {
         intents.push(Intent::GoUp);
@@ -659,7 +656,10 @@ fn draw_cells(
     let mut name_rect = inner;
     name_rect.min.x = x + gap;
     name_rect.max.x = (size_left - gap).max(name_rect.min.x);
-    let name_color = if !device && cx.opened.contains(&entry.path) {
+    let name_color = if entry.empty {
+        // Empty folder: nothing to see inside, so it recedes.
+        ui.visuals().weak_text_color()
+    } else if !device && cx.opened.contains(&entry.path) {
         egui::Color32::GRAY
     } else {
         egui::Color32::WHITE
@@ -807,6 +807,7 @@ mod tests {
             len: 1234,
             modified: None,
             is_audio: !d,
+            empty: false,
         };
         t.accept_listing(g, Ok(vec![e("folder", true), e("kick.wav", false)]));
         t.selected.clear();

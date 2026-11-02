@@ -83,6 +83,8 @@ pub struct Entry {
     pub len: u64,
     pub modified: Option<SystemTime>,
     pub is_audio: bool,
+    /// A folder with nothing in it (dotfiles like .DS_Store don't count).
+    pub empty: bool,
 }
 
 impl Entry {
@@ -96,6 +98,7 @@ impl Entry {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
+        let empty = is_dir && dir_is_empty(&path);
         Some(Self {
             name,
             path,
@@ -103,7 +106,17 @@ impl Entry {
             len: if is_dir { 0 } else { md.len() },
             modified: md.modified().ok(),
             is_audio: !is_dir && AUDIO_EXTS.contains(&ext.as_str()),
+            empty,
         })
+    }
+}
+
+/// True when the folder has no visible children. Stops at the first one, so
+/// it stays cheap even for huge folders. Unreadable folders aren't "empty".
+fn dir_is_empty(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(rd) => !rd.flatten().any(|de| !de.file_name().to_string_lossy().starts_with('.')),
+        Err(_) => false,
     }
 }
 
@@ -279,6 +292,7 @@ mod tests {
             len: 0,
             modified: None,
             is_audio: false,
+            empty: false,
         };
         let mut v = vec![mk("zed.wav", false), mk("alpha", true), mk("abc.wav", false)];
         sort_entries(&mut v, SortKey::Name, true);
