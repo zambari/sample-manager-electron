@@ -867,8 +867,22 @@ impl App {
             let cur = self.pane(role).active_tab();
             let (cwd, device) = (cur.cwd.clone(), cur.device);
             let id = self.new_tab_id();
+            // When this pane holds only device tabs, "+" brings back a
+            // computer folder: the other pane's (active, else any) local tab.
+            let only_device = self.pane(role).tabs.iter().all(|t| t.device);
+            let local_from_other = || {
+                let other = self.pane(role.other());
+                let act = other.active_tab();
+                if !act.device {
+                    Some(act.cwd.clone())
+                } else {
+                    other.tabs.iter().find(|t| !t.device).map(|t| t.cwd.clone())
+                }
+            };
             let tab = if new_device_tab {
                 DirTab::new_device(id, PathBuf::from("/"))
+            } else if only_device {
+                DirTab::new(id, local_from_other().unwrap_or_else(dirs_home))
             } else if device {
                 DirTab::new_device(id, cwd)
             } else {

@@ -413,21 +413,13 @@ fn row(
         let onto_self = |p: &DragPayload| {
             !in_here_zone && p.device == tab.device && p.paths.contains(&entry.path)
         };
-        if resp.dnd_hover_payload::<DragPayload>().is_some_and(|p| !onto_self(&p)) {
+        // Only outline the folder itself; the "here" zone gets no box, since a
+        // box on one row reads as "into this row" rather than "into the parent".
+        if !in_here_zone
+            && resp.dnd_hover_payload::<DragPayload>().is_some_and(|p| !onto_self(&p))
+        {
             let color = crate::ui::theme::ACCENT_BRIGHT;
-            if in_here_zone {
-                ui.painter().rect_filled(here_zone, 2.0, color.gamma_multiply(0.15));
-                ui.painter().rect_stroke(here_zone, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
-                ui.painter().text(
-                    here_zone.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "drop here",
-                    egui::FontId::proportional(11.0),
-                    color,
-                );
-            } else {
-                ui.painter().rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
-            }
+            ui.painter().rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
         }
         if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
             if let Some(dir) = target.filter(|_| !onto_self(&p)) {
