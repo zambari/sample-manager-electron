@@ -91,3 +91,117 @@ pub fn pane_title(label: &str, focused: bool) -> impl egui::Widget + '_ {
         resp
     }
 }
+
+/// Corner radius of a pane tab's top corners (the bottom is flat).
+const TAB_RADIUS: f32 = 4.0;
+
+/// A pane sub-tab header. Inactive tabs are a soft grey block; the active
+/// one has no fill and an orange frame on top and sides, open at the bottom
+/// so it reads as joined to the file list below.
+pub fn pane_tab(label: &str, active: bool) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let pad = egui::vec2(10.0, 3.0);
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let color = if active { ACCENT_BRIGHT } else { ui.visuals().text_color() };
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
+        let size = galley.size() + pad * 2.0;
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        if !ui.is_rect_visible(rect) {
+            return resp;
+        }
+
+        let p = ui.painter();
+        let rad = TAB_RADIUS as u8;
+        let corners = CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 };
+        let w = &ui.visuals().widgets;
+        if active {
+            if resp.hovered() {
+                p.rect_filled(rect, corners, w.inactive.weak_bg_fill.gamma_multiply(0.5));
+            }
+            let stroke = Stroke::new(1.0, ACCENT_BRIGHT.gamma_multiply(0.8));
+            p.add(egui::Shape::line(open_tab_outline(rect.shrink(0.5)), stroke));
+        } else {
+            let fill = if resp.hovered() { w.hovered.weak_bg_fill } else { w.inactive.weak_bg_fill };
+            p.rect_filled(rect, corners, fill);
+        }
+        p.galley(rect.min + pad, galley, color);
+        resp
+    }
+}
+
+/// Left side, rounded top, right side — no bottom edge.
+fn open_tab_outline(r: egui::Rect) -> Vec<egui::Pos2> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let rad = TAB_RADIUS.min(r.width() / 2.0).min(r.height());
+    let arc = |c: egui::Pos2, from: f32, to: f32, out: &mut Vec<egui::Pos2>| {
+        const STEPS: usize = 6;
+        for i in 0..=STEPS {
+            let a = from + (to - from) * i as f32 / STEPS as f32;
+            out.push(c + rad * egui::vec2(a.cos(), a.sin()));
+        }
+    };
+    let mut pts = vec![r.left_bottom()];
+    arc(egui::pos2(r.left() + rad, r.top() + rad), PI, PI + FRAC_PI_2, &mut pts);
+    arc(egui::pos2(r.right() - rad, r.top() + rad), -FRAC_PI_2, 0.0, &mut pts);
+    pts.push(r.right_bottom());
+    pts
+}
+
+/// Height of a `section_header` row.
+pub const SECTION_H: f32 = 13.0;
+
+/// Tiny caps label with a hairline running to the right edge. Sits above
+/// each editor section (Show / Transport / Gain …) to separate them.
+pub fn section_header(ui: &mut egui::Ui, label: &str) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, SECTION_H), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let p = ui.painter();
+    let color = ui.visuals().weak_text_color().gamma_multiply(0.8);
+    let galley = p.layout_no_wrap(label.to_uppercase(), egui::FontId::proportional(8.5), color);
+    let y = rect.center().y;
+    let text_pos = egui::pos2(rect.left(), y - galley.size().y / 2.0);
+    let line_x = rect.left() + galley.size().x + 5.0;
+    p.galley(text_pos, galley, color);
+    if line_x < rect.right() {
+        p.hline(line_x..=rect.right(), y + 0.5, Stroke::new(1.0, Color32::from_gray(44)));
+    }
+}
+
+/// Show / hide switch for a panel: no button fill, just a small dot and the
+/// label. On: filled orange dot, normal text. Off: hollow dot, dim text.
+/// Deliberately unlike the filled-chip toggles used for Loop / Snap etc.
+pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + 'a {
+    move |ui: &mut egui::Ui| {
+        let font = egui::TextStyle::Small.resolve(ui.style());
+        let dot_r = 3.0;
+        let gap = 4.0;
+        let pad = egui::vec2(3.0, 1.0);
+        let text_color = if *on { ui.visuals().text_color() } else { ui.visuals().weak_text_color().gamma_multiply(0.7) };
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), font, text_color);
+        let size = egui::vec2(dot_r * 2.0 + gap + galley.size().x, galley.size().y.max(dot_r * 2.0)) + pad * 2.0;
+        let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        if resp.clicked() {
+            *on = !*on;
+            resp.mark_changed();
+        }
+        if !ui.is_rect_visible(rect) {
+            return resp;
+        }
+        let p = ui.painter();
+        if resp.hovered() {
+            p.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
+        }
+        let c = egui::pos2(rect.left() + pad.x + dot_r, rect.center().y);
+        if *on {
+            p.circle_filled(c, dot_r, ACCENT_BRIGHT);
+        } else {
+            p.circle_stroke(c, dot_r - 0.5, Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.7)));
+        }
+        let tp = egui::pos2(c.x + dot_r + gap, rect.center().y - galley.size().y / 2.0);
+        p.galley(tp, galley, text_color);
+        resp
+    }
+}

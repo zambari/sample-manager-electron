@@ -43,8 +43,10 @@ pub struct Prefs {
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct Panels {
-    /// Play / loop / snap toggles plus the in / out / len / playhead readout.
+    /// Play / loop / snap toggles.
     pub transport: bool,
+    /// In / out / len / playhead readout, under the waveform.
+    pub nums: bool,
     pub gain: bool,
     /// Undo, crop, loop scaling, export.
     pub tools: bool,
@@ -61,7 +63,7 @@ pub struct Panels {
 
 impl Default for Panels {
     fn default() -> Self {
-        Self { transport: true, gain: true, tools: true, wave: true, scalpel: true, minimap: true, stats: true, help: true }
+        Self { transport: true, nums: true, gain: true, tools: true, wave: true, scalpel: true, minimap: true, stats: true, help: true }
     }
 }
 
@@ -256,6 +258,9 @@ pub enum Drag {
     /// Rubber-band a new region from this frame.
     Select(usize),
     Pan,
+    /// Slide the whole region. Holds the region and the pointer frame at
+    /// the start of the drag.
+    Move((usize, usize), usize),
     /// Scope strip: move the playhead by dragging the wave. Holds the
     /// playhead and pointer x at the start of the drag.
     Scrub(usize, f32),
@@ -683,6 +688,20 @@ impl Editor {
         let lo = self.snap(lo);
         let hi = self.snap(hi).min(self.frames());
         self.sel = (lo, hi.max(lo + 1).min(self.frames().max(1)));
+    }
+
+    /// Slide region `orig` by `delta` frames, keeping its length and
+    /// staying inside the clip. Snaps the in point when snapping is on.
+    pub fn move_region(&mut self, orig: (usize, usize), delta: i64) {
+        let n = self.frames();
+        let len = orig.1.saturating_sub(orig.0).min(n);
+        let max_in = (n - len) as i64;
+        let a = (orig.0 as i64 + delta).clamp(0, max_in) as usize;
+        let mut a2 = self.snap(a);
+        if a2 + len > n {
+            a2 = a;
+        }
+        self.sel = (a2, a2 + len);
     }
 
     /// Where a keyboard step of a marker at `frame` lands: the next zero

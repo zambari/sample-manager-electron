@@ -20,8 +20,6 @@ pub struct DragPayload {
     pub paths: Vec<PathBuf>,
     /// The paths are on the device.
     pub device: bool,
-    /// The tab the drag started in.
-    pub tab_id: u64,
 }
 
 /// Things the table can't do itself because they need app-wide state
@@ -47,7 +45,7 @@ pub enum Intent {
     /// Expand this folder in tree mode (needs a listing request).
     Expand(PathBuf),
     AddFavourite(PathBuf),
-    /// Move these to the Trash (after confirmation).
+    /// Move these to the Trash (no confirmation; it can be undone).
     Trash(Vec<PathBuf>),
     /// Delete these from the device right away, skipping /trash (after
     /// confirmation).
@@ -129,26 +127,43 @@ fn header(ui: &mut Ui, tab: &mut DirTab) {
     // Wraps rather than forcing a minimum width, so the column can be
     // dragged narrower than a full row of controls.
     ui.horizontal_wrapped(|ui| {
-        for key in [SortKey::Name, SortKey::Size, SortKey::Modified, SortKey::Kind] {
-            let active = tab.sort_key == key;
-            let arrow = if !active {
-                ""
-            } else if tab.sort_asc {
-                " ▲"
-            } else {
-                " ▼"
-            };
-            let text = format!("{}{arrow}", key.label());
-            if ui.selectable_label(active, text).clicked() {
-                if active {
-                    tab.sort_asc = !tab.sort_asc;
-                } else {
-                    tab.sort_key = key;
-                    tab.sort_asc = true;
-                }
-                tab.resort();
-            }
+        // One discreet label that cycles the sort key; the arrow flips direction.
+        const KEYS: [SortKey; 4] = [SortKey::Name, SortKey::Size, SortKey::Modified, SortKey::Kind];
+        let gap = ui.spacing().item_spacing.x;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let label = egui::RichText::new(format!("Sort by {}", tab.sort_key.label()))
+            .small()
+            .weak();
+        let r = ui
+            .add(egui::Label::new(label).sense(egui::Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Click to change sort (right-click to go back)");
+        let step = if r.clicked() {
+            1
+        } else if r.secondary_clicked() {
+            KEYS.len() - 1
+        } else {
+            0
+        };
+        if step != 0 {
+            let i = KEYS.iter().position(|k| *k == tab.sort_key).unwrap_or(0);
+            tab.sort_key = KEYS[(i + step) % KEYS.len()];
+            tab.sort_asc = true;
+            tab.resort();
         }
+        let arrow = egui::RichText::new(if tab.sort_asc { "▲" } else { "▼" })
+            .small()
+            .weak();
+        if ui
+            .add(egui::Label::new(arrow).sense(egui::Sense::click()))
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Toggle ascending / descending")
+            .clicked()
+        {
+            tab.sort_asc = !tab.sort_asc;
+            tab.resort();
+        }
+        ui.spacing_mut().item_spacing.x = gap;
         ui.separator();
         let filter = ui.add(
             egui::TextEdit::singleline(&mut tab.filter)
@@ -431,7 +446,6 @@ fn row(
         resp.dnd_set_drag_payload(DragPayload {
             paths: tab.effective_selection(),
             device: tab.device,
-            tab_id: tab.id,
         });
     }
 
@@ -473,11 +487,17 @@ fn row(
     resp.context_menu(|ui| {
         // Rename and Open only make sense for one item.
         let single = tab.selected.len() <= 1;
-        if single && ui.button("Rename").clicked() {
+        let rename = ui.add_enabled(single, egui::Button::new("Rename"));
+        let rename = if single {
+            rename.on_hover_text("Rename in place (F2)")
+        } else {
+            rename.on_disabled_hover_text("Several items selected -- use the Multi-Rename Tool")
+        };
+        if rename.clicked() {
             intents.push(Intent::BeginRename(entry.path.clone()));
             ui.close();
         }
-        if !single && ui.button(format!("Rename {} items…", tab.selected.len())).on_hover_text("Find and replace in all their names (F2)").clicked() {
+        if ui.button("Multi-Rename Tool…").on_hover_text("Find and replace across the selected names (⇧F2)").clicked() {
             intents.push(Intent::BeginMultiRename);
             ui.close();
         }
@@ -750,8 +770,12 @@ fn rename_editor(
         }
     }
 
-    let enter = child.input(|i| i.key_pressed(Key::Enter));
-    let esc = child.input(|i| i.key_pressed(Key::Escape));
+    // Consumed, so the app's own Enter (commit) doesn't also fire once the
+    // rename has closed later this frame.
+    let (enter, esc) = child.input_mut(|i| {
+        let m = egui::Modifiers::NONE;
+        (i.consume_key(m, Key::Enter), i.consume_key(m, Key::Escape))
+    });
 
     if esc {
         intents.push(Intent::CancelRename);

@@ -334,10 +334,15 @@ impl DirTab {
         list.map(|l| l.iter().map(|e| e.name.clone()).collect()).unwrap_or_default()
     }
 
-    /// Open the multi-rename panel over the selection.
+    /// Open the Multi-Rename Tool over the selection (or the cursor row).
     pub fn begin_multi_rename(&mut self) {
-        let items = self.selected_rows();
-        if items.len() > 1 {
+        let mut items = self.selected_rows();
+        if items.is_empty() {
+            if let Some(e) = self.cursor_entry() {
+                items.push((e.path.clone(), e.is_dir));
+            }
+        }
+        if !items.is_empty() {
             self.renaming = None;
             self.multi_rename = Some(crate::rename::MultiRename::new(items, self.device, |d| self.listed_names(d)));
         }

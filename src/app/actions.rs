@@ -9,7 +9,7 @@ impl App {
         // An open rename editor or modal owns the keyboard.
         let tab = self.pane(self.focused).active_tab();
         let renaming = tab.renaming.is_some() || tab.multi_rename.is_some();
-        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.trash_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() {
+        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -35,6 +35,22 @@ impl App {
                 self.editor_clipboard(&e);
             }
             return;
+        }
+
+        // Space always drives the editor's playhead, whichever pane has focus,
+        // so a playing loop can be stopped without clicking into the editor.
+        let (space, shift_space) = ui.input(|i| {
+            let m = i.modifiers;
+            let hit = i.key_pressed(egui::Key::Space);
+            (hit && !m.any(), hit && m.shift_only())
+        });
+        if space || shift_space {
+            if self.engine.is_playing() {
+                self.engine.stop();
+            } else {
+                let a = if shift_space { EdAction::TogglePlayAlt } else { EdAction::TogglePlay };
+                self.perform_editor(a, self.editor.wave_rect);
+            }
         }
 
         let actions = ui.input(|i| self.keymap.actions(i));
@@ -112,28 +128,15 @@ impl App {
         let role = self.focused;
         match action {
             Action::Commit => self.commit(Kind::Copy),
-            Action::Preview => {
-                let tab = self.pane(role).active_tab();
-                if let Some(e) = tab.cursor_entry().filter(|_| !tab.device) {
-                    if e.is_dir {
-                        // Space on a folder has no sample to audition; treat it
-                        // as "tell me how big this is" instead of doing nothing.
-                        let p = e.path.clone();
-                        self.request_sizes(vec![p]);
-                    } else if e.is_audio {
-                        let p = e.path.clone();
-                        self.preview_toggle(&p);
-                    }
-                }
-            }
             Action::Rename => {
                 let tab = self.pane_mut(role).active_tab_mut();
                 if tab.selected.len() > 1 {
-                    tab.begin_multi_rename();
+                    self.status = "Rename works on one item -- use the Multi-Rename Tool (⇧F2) for several".to_owned();
                 } else if let Some(e) = tab.cursor_entry() {
                     tab.renaming = Some((e.path.clone(), e.name.clone()));
                 }
             }
+            Action::MultiRename => self.pane_mut(role).active_tab_mut().begin_multi_rename(),
             Action::OpenDir => {
                 if let Some(e) = self.pane(role).active_tab().cursor_entry() {
                     if e.is_dir {
@@ -187,9 +190,8 @@ impl App {
             Action::Trash => {
                 let tab = self.pane(role).active_tab();
                 let sel = tab.effective_selection();
-                if !sel.is_empty() {
-                    self.trash_pending = Some((tab.device, sel));
-                }
+                let on_dev = tab.device;
+                self.trash_now(on_dev, sel);
             }
             Action::DeleteNow => {
                 let tab = self.pane(role).active_tab();
@@ -201,6 +203,7 @@ impl App {
                 }
             }
             Action::SelectAll => self.pane_mut(role).active_tab_mut().select_all(),
+            Action::Undo => self.undo_file(),
             Action::ToggleSelect => {
                 let tab = self.pane_mut(role).active_tab_mut();
                 if let Some(c) = tab.cursor {
@@ -281,6 +284,7 @@ impl App {
                     self.errors.push(format!("{}: {e}", path.display()));
                     return;
                 }
+                self.push_undo(undo::FileUndo::NewFolder(path.clone()));
                 self.reload_showing(&dir, false);
             }
             self.focused = role;
@@ -313,6 +317,7 @@ impl App {
                 self.errors.push(format!("{}: {e}", path.display()));
                 return;
             }
+            self.push_undo(undo::FileUndo::NewFolder(path.clone()));
             self.reload_showing(&dir, false);
             path
         };
@@ -380,7 +385,11 @@ impl App {
                 self.committed_dirty = true;
             }
         }
-        let renamed = finals.iter().filter(|(_, to)| to.exists()).count();
+        let done: Vec<(PathBuf, PathBuf)> = finals.iter().filter(|(_, to)| to.exists()).cloned().collect();
+        let renamed = done.len();
+        if !done.is_empty() {
+            self.push_undo(undo::FileUndo::Moved { pairs: done, what: "rename", replaced: false });
+        }
         self.status = format!("Renamed {renamed} of {} item(s)", finals.len());
         for p in parents {
             self.sizes.invalidate_subtree(&p);
@@ -413,6 +422,7 @@ impl App {
         }
         match std::fs::rename(from, &target) {
             Ok(()) => {
+                self.push_undo(undo::FileUndo::Moved { pairs: vec![(from.to_path_buf(), target)], what: "rename", replaced: false });
                 self.sizes.invalidate_subtree(parent);
                 self.reload_showing(parent, false);
             }

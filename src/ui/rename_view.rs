@@ -21,7 +21,11 @@ pub fn show(ui: &mut Ui, mr: &mut MultiRename, pane_focused: bool) -> Option<Out
     let can_apply = n_change > 0 && n_bad == 0;
 
     ui.add_space(4.0);
-    ui.label(RichText::new(format!("Rename {} items", mr.items.len())).strong());
+    let n = mr.items.len();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Multi-Rename Tool").strong());
+        ui.label(RichText::new(format!("{n} item{}", if n == 1 { "" } else { "s" })).weak());
+    });
     ui.add_space(4.0);
 
     let mut field_focused = false;

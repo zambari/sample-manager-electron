@@ -400,20 +400,9 @@ impl App {
         if plan.kind == Kind::Copy {
             self.mark_committed(resolved.iter().map(|o| o.src.clone()));
         }
-        let total_items = resolved.len();
-        let total_bytes = resolved.iter().map(|o| o.approx_bytes).sum();
-        let id = self.jobs.execute(plan.kind, resolved);
-        self.active_jobs.push(ActiveJob {
-            id,
-            label: String::new(),
-            done_bytes: 0,
-            total_bytes,
-            done_items: 0,
-            total_items,
-            started: true,
-            file: None,
-            file_bar: false,
-        });
+        let id = self.run_local(plan.kind, resolved);
+        let undo = if plan.kind == Kind::Move { undo::UndoJob::Move } else { undo::UndoJob::Copy };
+        self.undo_jobs.insert(id, undo);
     }
 
     // ---- worker results ---------------------------------------------------
@@ -441,6 +430,7 @@ impl App {
                         self.dupes_pending = Some(groups);
                     }
                 }
+                Ev::Applied { job, done, replaced } => self.applied(job, done, replaced),
                 Ev::DeviceStatus(s) => {
                     if let Err(e) = &s {
                         crate::log::line(format!("device status: {e}"));
@@ -498,6 +488,7 @@ impl App {
                     cancelled,
                 } => {
                     self.jobs.forget(job);
+                    self.undo_jobs.remove(&job);
                     if let Some(a) = self.active_jobs.iter().find(|a| a.id == job) {
                         self.batch.absorb(a, cancelled);
                     }

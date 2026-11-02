@@ -1,13 +1,15 @@
 //! Drawing and mouse handling for the sample editor column.
 //!
 //! Mouse: click parks the playhead, drag on empty space selects a region,
-//! drag near the in/out lines moves them, double-click on an in/out line
+//! drag near the in/out lines moves them, drag the ruler bar between them
+//! slides the whole region, double-click on an in/out line
 //! parks the playhead there, double-click elsewhere selects all, wheel
 //! zooms around the pointer, horizontal scroll / middle-drag / ⌥-drag pans.
 //! Keys are handled in the app (see `App::perform_editor`).
 
 use crate::audio::stats::{self, Fold, Stats};
 use crate::editor::{Drag, Editor};
+use crate::ui::theme::{SECTION_H, section_header, vis_toggle};
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, vec2};
 
 pub struct PlayView {
@@ -46,8 +48,7 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
     let mut out = Vec::new();
 
     header(ui, ed, focused, &mut out);
-    toolbar(ui, ed, pv.playing, can_export, &mut out);
-    ui.separator();
+    toolbar(ui, ed, &pv, can_export, &mut out);
 
     if ed.current.is_none() {
         let msg = if let Some(p) = &ed.loading {
@@ -67,66 +68,77 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
     }
 
     let pn = ed.prefs.panels.clone();
-    if pn.transport {
-        positions(ui, ed, &pv);
-    }
 
     // The waveform takes whatever height the other shown panels leave.
     let avail = ui.available_size();
     let phase = pn.stats && ed.is_multichannel();
+    let sec = SECTION_H + ui.spacing().item_spacing.y;
     let mut reserved = 0.0;
+    if pn.wave {
+        reserved += sec;
+    }
+    if pn.nums {
+        reserved += ui.spacing().interact_size.y + sec;
+    }
     if pn.scalpel {
-        reserved += SCOPE_H + 4.0;
+        reserved += SCOPE_H + sec;
     }
     if pn.minimap {
-        reserved += OVERVIEW_H + 4.0;
+        reserved += OVERVIEW_H + sec;
     }
     if phase {
         reserved += 20.0;
     }
     if pn.stats {
-        reserved += 150.0;
+        reserved += 150.0 + sec;
     }
     // Measure the wrapped help text so the waveform leaves room for it.
     let help_font = egui::TextStyle::Small.resolve(ui.style());
     let help_h = if pn.help {
         let g = ui.fonts_mut(|f| f.layout(crate::keymap::EDITOR_HELP.to_owned(), help_font.clone(), egui::Color32::WHITE, avail.x));
-        g.size().y + 8.0
+        g.size().y + sec
     } else {
         0.0
     };
     reserved += help_h;
 
     if pn.wave {
+        section_header(ui, "Wave");
         let wave_h = (avail.y - reserved - 12.0).max(80.0);
         let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
         waveform(ui, ed, &pv, rect, focused, &mut out);
     }
 
+    if pn.nums {
+        section_header(ui, "Nums");
+        positions(ui, ed, &pv);
+    }
+
     if pn.scalpel {
-        ui.add_space(4.0);
+        section_header(ui, "Scalpel");
         let (srect, _) = ui.allocate_exact_size(vec2(avail.x, SCOPE_H), Sense::hover());
         scope(ui, ed, &pv, srect, &mut out);
     }
 
     if pn.minimap {
-        ui.add_space(4.0);
+        section_header(ui, "Map");
         let (orect, _) = ui.allocate_exact_size(vec2(avail.x, OVERVIEW_H), Sense::hover());
         overview(ui, ed, &pv, orect, &mut out);
     }
 
+    if pn.stats {
+        section_header(ui, "Stats");
+    }
     if phase {
-        ui.add_space(4.0);
         phase_meter(ui, ed, &pv);
     }
 
     if pn.stats {
-        ui.add_space(6.0);
         stats_table(ui, ed);
     }
 
     if pn.help {
-        ui.add_space(8.0);
+        section_header(ui, "Help");
         ui.label(RichText::new(crate::keymap::EDITOR_HELP).weak().small());
     }
     out
@@ -208,29 +220,32 @@ fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) 
 
 /// Right-aligned chips that show / hide each editor panel. Saved with the prefs.
 fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
+    section_header(ui, "Show");
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
-        ui.label(RichText::new("Show").weak().small());
-        let items: [(&mut bool, &str, &str); 8] = [
-            (&mut p.transport, "Transport", "Play controls and the in / out / len / playhead readout"),
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let items: [(&mut bool, &str, &str); 9] = [
+            (&mut p.transport, "Transport", "Play, loop, follow, snap and auto-load / auto-play"),
             (&mut p.gain, "Gain", "Gain and normalize"),
             (&mut p.tools, "Tools", "Undo, crop, loop scaling, export"),
             (&mut p.wave, "Wave", "Main waveform"),
+            (&mut p.nums, "Nums", "In / out / len / playhead readout, under the waveform"),
             (&mut p.scalpel, "Scalpel", "40 ms extreme-zoom strip around the playhead"),
             (&mut p.minimap, "Map", "Minimap: the whole file, click to jump"),
             (&mut p.stats, "Stats", "Stats table and phase meter"),
             (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
         for (v, label, hover) in items {
-            ui.toggle_value(v, RichText::new(label).small()).on_hover_text(format!("Show / hide: {hover}"));
+            ui.add(vis_toggle(v, label)).on_hover_text(format!("Show / hide: {hover}"));
         }
     });
 }
 
-fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &mut Vec<EdIntent>) {
+fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, out: &mut Vec<EdIntent>) {
+    let playing = pv.playing;
     let has = ed.current.is_some();
     let pn = ed.prefs.panels.clone();
     if pn.transport {
+    section_header(ui, "Transport");
     ui.horizontal_wrapped(|ui| {
         let icon = if playing { "⏹" } else { "▶" };
         let hover = if playing { "Stop (Space)" } else { "Play (Space)" };
@@ -266,6 +281,7 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
     });
     }
     if pn.gain {
+    section_header(ui, "Gain");
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(has, |ui| {
             ui.label("Gain");
@@ -293,6 +309,7 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
     });
     }
     if pn.tools {
+    section_header(ui, "Tools");
     ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(has, |ui| {
             if ui.add_enabled(ed.can_undo(), egui::Button::new("↶ Undo")).on_hover_text("⌘Z").clicked() {
@@ -539,10 +556,23 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
 
     // ---- mouse ----
     let near = |x: f32, p: Pos2| (p.x - x).abs() <= GRAB_PX;
+    // Range bar: the ruler strip between the markers drags the whole region.
+    let on_bar = |p: Pos2| {
+        p.y >= rect.top() && p.y <= rect.top() + RULER_H && p.x > x_in + GRAB_PX && p.x < x_out - GRAB_PX
+    };
+    let mut bar_hot = matches!(ed.drag, Some(Drag::Move(..)));
     if let Some(p) = resp.hover_pos() {
-        if ed.drag.is_none() && (near(x_in, p) || near(x_out, p)) {
-            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+        if ed.drag.is_none() {
+            if near(x_in, p) || near(x_out, p) {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            } else if on_bar(p) {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                bar_hot = true;
+            }
         }
+    }
+    if matches!(ed.drag, Some(Drag::Move(..))) {
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     }
     if resp.drag_started() {
         out.push(EdIntent::TookFocus);
@@ -555,6 +585,8 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
                 Drag::In
             } else if near(x_out, o) {
                 Drag::Out
+            } else if on_bar(o) {
+                Drag::Move(ed.sel, m.frame(o.x))
             } else {
                 Drag::Select(m.frame(o.x))
             }
@@ -567,6 +599,7 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
                 Drag::In => ed.set_in(f),
                 Drag::Out => ed.set_out(f),
                 Drag::Select(a) => ed.set_region(a, f),
+                Drag::Move(orig, grab) => ed.move_region(orig, f as i64 - grab as i64),
                 Drag::Pan => ed.view.start -= resp.drag_delta().x as f64 * ed.view.fpp,
                 Drag::Scrub(..) => {}
             }
@@ -636,6 +669,23 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     }
 
     draw_ruler(&painter, &m, ruler, ed.sample().map_or(1, |s| s.rate), &vis);
+
+    // Range bar across the ruler between the markers.
+    let bar = Rect::from_x_y_ranges(x_in.max(rect.left())..=x_out.min(rect.right()), ruler.y_range());
+    if bar.width() > 0.0 {
+        let a = if bar_hot { 0.45 } else { 0.25 };
+        painter.rect_filled(bar, 0.0, vis.selection.bg_fill.gamma_multiply(a));
+        // Grip dots in the middle hint that it can be dragged.
+        let c = bar.center();
+        if bar.width() > 30.0 {
+            let col = vis.strong_text_color().gamma_multiply(if bar_hot { 0.8 } else { 0.45 });
+            for dx in [-6.0, -2.0, 2.0, 6.0] {
+                for dy in [-2.5, 2.5] {
+                    painter.circle_filled(Pos2::new(c.x + dx, c.y + dy), 1.0, col);
+                }
+            }
+        }
+    }
 
     draw_lanes(&painter, ed, &m, lanes, &vis);
 

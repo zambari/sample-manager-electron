@@ -12,7 +12,7 @@ use super::decode::Sample;
 use super::stats::Fold;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -37,7 +37,21 @@ struct Shared {
     pos: AtomicU64,
     playing: AtomicBool,
     error: Mutex<Option<String>>,
+    /// Master volume (f32 bits), applied on top of the editor's gain.
+    volume: AtomicU32,
+    /// Output peak per side since the UI last read it (f32 bits; positive
+    /// floats sort like their bit patterns, so `fetch_max` works).
+    peak: [AtomicU32; 2],
+    /// Last few thousand output frames as (L, R) f32 bit pairs, for the
+    /// phase scope. `scope_at` is the next slot to write.
+    scope: Vec<AtomicU64>,
+    scope_at: AtomicUsize,
+    /// The voice is putting out two distinct channels.
+    stereo: AtomicBool,
 }
+
+/// Frames kept for the phase scope.
+pub const SCOPE_LEN: usize = 2048;
 
 #[derive(Clone, PartialEq)]
 pub struct DeviceInfo {
@@ -72,6 +86,11 @@ impl Engine {
             pos: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             error: Mutex::new(None),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+            peak: [AtomicU32::new(0), AtomicU32::new(0)],
+            scope: (0..SCOPE_LEN).map(|_| AtomicU64::new(0)).collect(),
+            scope_at: AtomicUsize::new(0),
+            stereo: AtomicBool::new(false),
         });
         let mut e = Self {
             shared,
@@ -180,6 +199,32 @@ impl Engine {
         self.shared.pos.load(Ordering::Relaxed) as usize
     }
 
+    pub fn set_volume(&self, v: f32) {
+        self.shared.volume.store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Output peaks (L, R) since the last call, then reset.
+    pub fn take_peaks(&self) -> [f32; 2] {
+        self.shared.peak.each_ref().map(|p| f32::from_bits(p.swap(0, Ordering::Relaxed)))
+    }
+
+    /// Whether the current voice is playing a stereo signal.
+    pub fn is_stereo(&self) -> bool {
+        self.is_playing() && self.shared.stereo.load(Ordering::Relaxed)
+    }
+
+    /// The most recent `n` output frames as (L, R), oldest first.
+    pub fn scope(&self, n: usize) -> Vec<(f32, f32)> {
+        let n = n.min(SCOPE_LEN);
+        let end = self.shared.scope_at.load(Ordering::Acquire);
+        (0..n)
+            .map(|k| {
+                let bits = self.shared.scope[(end + SCOPE_LEN - n + k) % SCOPE_LEN].load(Ordering::Relaxed);
+                (f32::from_bits(bits as u32), f32::from_bits((bits >> 32) as u32))
+            })
+            .collect()
+    }
+
     /// Runtime error from the stream (device unplugged, etc).
     pub fn stream_error(&self) -> Option<String> {
         self.shared.error.lock().ok()?.clone()
@@ -224,8 +269,12 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
     let src_ch = sample.channels.len();
     let frames = sample.frames();
     let end = v.end.min(frames).max(1);
-    let gain = v.gain;
+    let gain = v.gain * f32::from_bits(sh.volume.load(Ordering::Relaxed));
     let mono = v.mono.filter(|_| src_ch > 1);
+    let stereo = src_ch > 1 && mono.is_none() && out_ch > 1;
+    sh.stereo.store(stereo, Ordering::Relaxed);
+    let mut peak = [0.0f32; 2];
+    let mut at = sh.scope_at.load(Ordering::Relaxed);
 
     for frame in data.chunks_mut(out_ch) {
         if !v.playing {
@@ -252,11 +301,14 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
         if let Some(fold) = mono {
             let a = fold.at(&sample.channels, i);
             let b = fold.at(&sample.channels, j);
-            let s = T::from_sample(((a + (b - a) * t) * gain).clamp(-1.0, 1.0));
-            frame.fill(s);
+            let x = ((a + (b - a) * t) * gain).clamp(-1.0, 1.0);
+            peak[0] = peak[0].max(x.abs());
+            peak[1] = peak[0];
+            frame.fill(T::from_sample(x));
             v.pos += step;
             continue;
         }
+        let mut lr = [0.0f32; 2];
         for (k, out) in frame.iter_mut().enumerate() {
             let c = if src_ch == 1 { 0 } else if k < src_ch { k } else { usize::MAX };
             let s = if c == usize::MAX {
@@ -265,9 +317,28 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
                 let ch = &sample.channels[c];
                 ch[i] + (ch[j] - ch[i]) * t
             };
-            *out = T::from_sample((s * gain).clamp(-1.0, 1.0));
+            let x = (s * gain).clamp(-1.0, 1.0);
+            if k < 2 {
+                lr[k] = x;
+            }
+            *out = T::from_sample(x);
+        }
+        if out_ch == 1 {
+            lr[1] = lr[0];
+        }
+        peak[0] = peak[0].max(lr[0].abs());
+        peak[1] = peak[1].max(lr[1].abs());
+        if stereo {
+            let bits = lr[0].to_bits() as u64 | (lr[1].to_bits() as u64) << 32;
+            sh.scope[at].store(bits, Ordering::Relaxed);
+            at = (at + 1) % SCOPE_LEN;
         }
         v.pos += step;
+    }
+
+    sh.scope_at.store(at, Ordering::Release);
+    for (p, x) in sh.peak.iter().zip(peak) {
+        p.fetch_max(x.to_bits(), Ordering::Relaxed);
     }
 
     sh.pos.store(v.pos as u64, Ordering::Relaxed);

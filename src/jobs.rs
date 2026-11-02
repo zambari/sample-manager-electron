@@ -64,6 +64,16 @@ pub enum Ev {
         errors: Vec<String>,
         cancelled: bool,
     },
+    /// What a local copy / move / trash job actually did, for undo: each
+    /// item's `(from, to)`. For a trash, `to` is where it landed in the Trash
+    /// (macOS), or the original path again where the OS restores by name.
+    /// Sent just before that job's `Finished`.
+    Applied {
+        job: u64,
+        done: Vec<(PathBuf, PathBuf)>,
+        /// Some destination was replaced; what was there is gone for good.
+        replaced: bool,
+    },
     /// The device connection changed: its name, or why there is none.
     DeviceStatus(Result<String, String>),
     /// The device's MIDI port went away (unplugged or switched off).
@@ -194,24 +204,15 @@ impl Jobs {
                 .collect();
             // Move to the OS recycle bin, never unlink. Losing a one-off
             // recording to a stray keypress is not recoverable.
-            let ctx = {
-                #[allow(unused_mut)]
-                let mut ctx = trash::TrashContext::default();
-                // The default asks Finder over AppleScript, which can stall on
-                // an automation-permission prompt and finish after we've
-                // already re-listed the folder, leaving ghost rows. The
-                // file-manager call is synchronous and needs no permission.
-                #[cfg(target_os = "macos")]
-                {
-                    use trash::macos::{DeleteMethod, TrashContextExtMacos};
-                    ctx.set_delete_method(DeleteMethod::NsFileManager);
+            let mut errors = Vec::new();
+            let mut done = Vec::new();
+            for p in &paths {
+                match trash_one(p) {
+                    Ok(to) => done.push((p.clone(), to)),
+                    Err(e) => errors.push(format!("{}: {e}", p.display())),
                 }
-                ctx
-            };
-            let errors = match ctx.delete_all(&paths) {
-                Ok(()) => Vec::new(),
-                Err(e) => vec![e.to_string()],
-            };
+            }
+            em.send(Ev::Applied { job, done, replaced: false });
             em.send(Ev::Finished {
                 job,
                 touched,
@@ -222,6 +223,29 @@ impl Jobs {
         });
         job
     }
+}
+
+/// Move one item to the Trash and say where it went, so undo can bring it
+/// back. Uses the file-manager call directly: the trash crate's Finder route
+/// asks for automation permission over AppleScript and can stall, and
+/// neither route reports the item's new place.
+#[cfg(target_os = "macos")]
+fn trash_one(p: &Path) -> Result<PathBuf, String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let s = p.to_str().ok_or("path is not valid UTF-8")?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(s));
+    let mut landed = None;
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut landed))
+        .map_err(|e| e.localizedDescription().to_string())?;
+    Ok(landed.and_then(|u| u.path()).map_or_else(|| p.to_path_buf(), |s| PathBuf::from(s.to_string())))
+}
+
+/// Elsewhere the OS can restore by original path, so that's what's kept.
+#[cfg(not(target_os = "macos"))]
+fn trash_one(p: &Path) -> Result<PathBuf, String> {
+    trash::delete(p).map_err(|e| e.to_string())?;
+    Ok(p.to_path_buf())
 }
 
 /// Worker-side handle for sending events and waking the UI.
@@ -347,6 +371,8 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
     let mut last_reported = 0u64;
     let mut errors = Vec::new();
     let mut touched: Vec<PathBuf> = Vec::new();
+    let mut done = Vec::new();
+    let mut replaced = false;
 
     for (i, op) in ops.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -384,11 +410,14 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
             }
         };
 
+        let existed = op.dst.exists();
         let res = run_one(op, counts[i], kind, &cancel, &mut on_bytes);
         files_before += counts[i];
         done_items = done_items.max(files_before);
         match res {
             Ok(()) => {
+                done.push((op.src.clone(), op.dst.clone()));
+                replaced |= existed;
                 if let Some(p) = op.dst.parent() {
                     if !touched.iter().any(|t| t == p) {
                         touched.push(p.to_path_buf());
@@ -406,6 +435,7 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
         }
     }
 
+    em.send(Ev::Applied { job, done, replaced });
     em.send(Ev::Finished {
         job,
         touched,

@@ -79,7 +79,7 @@ pub fn conflicts(ctx: &Context, plan: &Plan) -> Option<Decision> {
         });
     });
 
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         decision = Some(Decision::Cancel);
     }
 
@@ -124,7 +124,7 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool, 
         } else if device {
             "They go to the /trash folder on the device; move them back from there."
         } else {
-            "You can restore them from the Trash."
+            "Undo (⌘Z / Ctrl+Z) puts them back."
         };
         ui.label(RichText::new(note).weak());
         ui.add_space(10.0);
@@ -143,10 +143,12 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool, 
             });
         });
     });
-    ctx.input(|i| {
-        if i.key_pressed(egui::Key::Escape) {
+    // Keys are consumed, so the app's own Enter (commit) doesn't also fire
+    // once the dialog has closed.
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
             answer = Some(false);
-        } else if !permanent && i.key_pressed(egui::Key::Enter) {
+        } else if !permanent && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
             answer = Some(true);
         }
     });
@@ -206,10 +208,12 @@ pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Op
             });
         });
     });
-    ctx.input(|i| {
-        if i.key_pressed(egui::Key::Escape) {
+    // Keys are consumed, so the app's own Enter (commit) doesn't also fire
+    // once the dialog has closed.
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
             answer = Some(false);
-        } else if i.key_pressed(egui::Key::Enter) {
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
             answer = Some(true);
         }
     });
@@ -243,10 +247,12 @@ pub fn confirm_device_load(ctx: &Context, path: &std::path::Path, bytes: u64) ->
             });
         });
     });
-    ctx.input(|i| {
-        if i.key_pressed(egui::Key::Escape) {
+    // Keys are consumed, so the app's own Enter (commit) doesn't also fire
+    // once the dialog has closed.
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
             answer = Some(false);
-        } else if i.key_pressed(egui::Key::Enter) {
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
             answer = Some(true);
         }
     });
@@ -306,7 +312,7 @@ pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str
             });
         });
     });
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         choice = Some(LeaveChoice::Cancel);
     }
     choice

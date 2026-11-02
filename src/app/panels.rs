@@ -30,6 +30,8 @@ impl App {
                     .small(),
             );
         }
+        ui.separator();
+        self.volume_and_meter(ui);
         if let Some(dev) = choice {
             self.engine.switch(dev.as_deref());
             self.output_device = dev;
@@ -38,6 +40,139 @@ impl App {
                 self.errors.push(format!("audio output: {e}"));
             }
         }
+    }
+
+    /// Master volume slider, L/R level meter and, while a stereo sample
+    /// plays, a phase scope hanging under the meter.
+    fn volume_and_meter(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().slider_width = 80.0;
+        let slider = egui::Slider::new(&mut self.volume, 0.0..=1.25)
+            .fixed_decimals(2)
+            .trailing_fill(true);
+        let r = ui
+            .add(slider)
+            .on_hover_text("Output volume (not saved). Double-click to reset to 1.0");
+        if r.double_clicked() {
+            self.volume = 1.0;
+        }
+        self.engine.set_volume(self.volume);
+
+        // Fast attack, ~24 dB/s fall; the hold mark falls slower.
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        let peaks = self.engine.take_peaks();
+        let fall = 10f32.powf(-24.0 * dt / 20.0);
+        let hold_fall = 10f32.powf(-8.0 * dt / 20.0);
+        for k in 0..2 {
+            self.meter[k] = peaks[k].max(self.meter[k] * fall);
+            self.meter_hold[k] = peaks[k].max(self.meter_hold[k] * hold_fall);
+        }
+
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(96.0, 12.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 1.0, ui.visuals().extreme_bg_color);
+        const FLOOR_DB: f32 = -48.0;
+        let x_of = |lin: f32| {
+            let db = crate::audio::stats::to_db(lin.max(1e-6));
+            rect.left() + rect.width() * ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
+        };
+        // Colour zones: green up to -9 dB, orange to -1 dB, red at the top.
+        let zones = [
+            (FLOOR_DB, -9.0, egui::Color32::from_rgb(96, 168, 104)),
+            (-9.0, -1.0, theme::ACCENT_BRIGHT),
+            (-1.0, 0.0, egui::Color32::from_rgb(222, 60, 50)),
+        ];
+        let bar_h = (rect.height() - 1.0) / 2.0;
+        for k in 0..2 {
+            let y0 = rect.top() + k as f32 * (bar_h + 1.0);
+            let lvl = x_of(self.meter[k]);
+            for (a, b, c) in zones {
+                let xa = x_of(crate::audio::stats::from_db(a));
+                let xb = x_of(crate::audio::stats::from_db(b)).min(lvl);
+                if xb > xa {
+                    p.rect_filled(egui::Rect::from_x_y_ranges(xa..=xb, y0..=y0 + bar_h), 0.0, c);
+                }
+            }
+            if self.meter_hold[k] > 1e-4 {
+                let x = x_of(self.meter_hold[k]);
+                p.line_segment(
+                    [egui::pos2(x, y0), egui::pos2(x, y0 + bar_h)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(220)),
+                );
+            }
+        }
+        // Tick marks at -24, -12, -6 and 0 dB.
+        for db in [-24.0, -12.0, -6.0] {
+            let x = x_of(crate::audio::stats::from_db(db));
+            p.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
+            );
+        }
+        let hold_db = crate::audio::stats::to_db(self.meter_hold[0].max(self.meter_hold[1]).max(1e-6));
+        resp.on_hover_text(format!(
+            "Output level, top L, bottom R (-48..0 dBFS)\nPeak {}",
+            if hold_db < -90.0 { "-inf dB".to_owned() } else { format!("{hold_db:.1} dB") }
+        ));
+
+        let active = self.engine.is_playing() || self.meter_hold.iter().any(|&h| h > 1e-4);
+        if active {
+            ui.ctx().request_repaint();
+        }
+
+        if self.engine.is_stereo() {
+            self.phase_scope(ui.ctx(), rect.left_bottom() + egui::vec2(0.0, 6.0));
+        }
+    }
+
+    /// Goniometer (mid up, side across) plus an L/R correlation bar.
+    fn phase_scope(&self, ctx: &egui::Context, at: egui::Pos2) {
+        let frames = self.engine.scope(1024);
+        egui::Area::new(egui::Id::new("phase_scope"))
+            .fixed_pos(at)
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                let size = 112.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size + 10.0), egui::Sense::hover());
+                let sq = egui::Rect::from_min_size(rect.min, egui::vec2(size, size));
+                let p = ui.painter();
+                p.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(215));
+                p.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(60)), egui::StrokeKind::Inside);
+                let c = sq.center();
+                let r = size * 0.46;
+                let guide = egui::Stroke::new(1.0, egui::Color32::from_gray(48));
+                p.line_segment([c - egui::vec2(0.0, r), c + egui::vec2(0.0, r)], guide);
+                p.line_segment([c - egui::vec2(r, 0.0), c + egui::vec2(r, 0.0)], guide);
+                let d = r * std::f32::consts::FRAC_1_SQRT_2;
+                p.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], guide);
+                p.line_segment([c + egui::vec2(d, -d), c + egui::vec2(-d, d)], guide);
+                for (label, pos) in [("L", c + egui::vec2(-d - 6.0, -d - 6.0)), ("R", c + egui::vec2(d + 6.0, -d - 6.0))] {
+                    p.text(pos, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(9.0), egui::Color32::from_gray(110));
+                }
+
+                let s = std::f32::consts::FRAC_1_SQRT_2;
+                let pts: Vec<egui::Pos2> = frames
+                    .iter()
+                    .map(|&(l, rr)| c + egui::vec2((rr - l) * s, -(l + rr) * s) * r)
+                    .collect();
+                p.add(egui::Shape::line(pts, egui::Stroke::new(1.0, theme::WAVE.gamma_multiply(0.45))));
+
+                // Correlation: +1 mono, 0 wide, -1 out of phase.
+                let (mut lr, mut ll, mut rr2) = (0.0f32, 0.0f32, 0.0f32);
+                for &(l, rr) in &frames {
+                    lr += l * rr;
+                    ll += l * l;
+                    rr2 += rr * rr;
+                }
+                let corr = if ll * rr2 > 1e-12 { lr / (ll * rr2).sqrt() } else { 1.0 };
+                let bar = egui::Rect::from_x_y_ranges(sq.left() + 8.0..=sq.right() - 8.0, sq.bottom() + 2.0..=sq.bottom() + 6.0);
+                p.rect_filled(bar, 1.0, egui::Color32::from_gray(36));
+                let mid = bar.center().x;
+                let x = mid + corr.clamp(-1.0, 1.0) * bar.width() / 2.0;
+                let col = if corr < 0.0 { egui::Color32::from_rgb(222, 60, 50) } else { theme::ACCENT_BRIGHT };
+                p.rect_filled(egui::Rect::from_x_y_ranges(mid.min(x)..=mid.max(x), bar.y_range()), 0.0, col);
+                p.line_segment([egui::pos2(mid, bar.top() - 1.0), egui::pos2(mid, bar.bottom() + 1.0)], egui::Stroke::new(1.0, egui::Color32::from_gray(120)));
+            });
     }
 
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -383,10 +518,8 @@ impl App {
                 Intent::Expand(p) => self.expand(role, p),
                 Intent::AddFavourite(p) => self.add_favourite(p),
                 Intent::Trash(paths) => {
-                    if !paths.is_empty() {
-                        let on_dev = self.pane(role).active_tab().device;
-                        self.trash_pending = Some((on_dev, paths));
-                    }
+                    let on_dev = self.pane(role).active_tab().device;
+                    self.trash_now(on_dev, paths);
                 }
                 Intent::DeleteNow(paths) => {
                     if !paths.is_empty() && self.pane(role).active_tab().device {
@@ -396,12 +529,12 @@ impl App {
                 Intent::Dropped(payload) => {
                     let tab = self.pane(role).active_tab();
                     let (dest, to_dev) = (tab.cwd.clone(), tab.device);
-                    let kind = self.drop_kind(ui, role, &payload, to_dev);
+                    let kind = self.drop_kind(ui, &payload, to_dev);
                     self.transfer(kind, payload.device, payload.paths, to_dev, dest);
                 }
                 Intent::DroppedOn { dir, payload } => {
                     let to_dev = self.pane(role).active_tab().device;
-                    let kind = self.drop_kind(ui, role, &payload, to_dev);
+                    let kind = self.drop_kind(ui, &payload, to_dev);
                     self.transfer(kind, payload.device, payload.paths, to_dev, dir);
                 }
                 Intent::Cut(paths) => self.set_clipboard(Kind::Move, role, paths),
@@ -562,7 +695,11 @@ impl App {
             }
             return;
         }
-        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // Consumed, so the app's own Enter (commit) doesn't also fire.
+        let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if resp.lost_focus() {
+            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        }
         if !resp.lost_focus() {
             return;
         }
@@ -583,16 +720,11 @@ impl App {
         }
     }
 
-    /// Whether a drag dropped into `role` moves or copies. Like Finder: on the
-    /// same storage it moves, so the device to the device always moves
-    /// (whichever pane), and so does the computer within one pane. Across
-    /// storage it copies. Holding ⌥ forces a copy.
-    pub(super) fn drop_kind(&self, ui: &egui::Ui, role: Role, payload: &DragPayload, to_dev: bool) -> Kind {
-        if ui.input(|i| i.modifiers.alt) || payload.device != to_dev {
-            return Kind::Copy;
-        }
-        let same_pane = self.pane(role).tabs.iter().any(|t| t.id == payload.tab_id);
-        if payload.device || same_pane { Kind::Move } else { Kind::Copy }
+    /// Whether a drop moves or copies. On the same storage (computer to
+    /// computer, device to device) it moves, whichever pane; holding ⌥ makes
+    /// it a copy. Between the computer and the device it always copies.
+    pub(super) fn drop_kind(&self, ui: &egui::Ui, payload: &DragPayload, to_dev: bool) -> Kind {
+        if ui.input(|i| i.modifiers.alt) || payload.device != to_dev { Kind::Copy } else { Kind::Move }
     }
 
     /// The sub-tab strip. Each tab header is also a drop target, so you can
@@ -605,70 +737,84 @@ impl App {
         let mut drop_on: Option<(usize, DragPayload)> = None;
         let mut new_device_tab = false;
 
-        // Wraps onto extra rows instead of scrolling once tabs outgrow the pane.
-        ui.horizontal_wrapped(|ui| {
-            let active = self.pane(role).active;
-            let titles: Vec<(usize, String, bool)> = self
-                .pane(role)
-                .tabs
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (i, t.title(), t.loading))
-                .collect();
+        // One row: tabs scroll sideways when they outgrow the pane, while the
+        // +/🎹/× buttons stay pinned on the right.
+        let n_tabs = self.pane(role).tabs.len();
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if n_tabs > 1 && ui.small_button("×").on_hover_text("Close tab").clicked() {
+                    close = Some(self.pane(role).active);
+                }
+                if ui
+                    .small_button("🎹")
+                    .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)")
+                    .clicked()
+                {
+                    new_device_tab = true;
+                }
+                if ui.small_button("+").on_hover_text("New tab").clicked() {
+                    new_tab = true;
+                }
 
-            for (i, title, loading) in titles {
-                let label = if loading {
-                    format!("{title} …")
-                } else {
-                    title
-                };
-                let (inner, payload) =
-                    ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
-                        ui.selectable_label(i == active, label)
+                let active = self.pane(role).active;
+                // Bring the active tab into view whenever it changes.
+                let seen_id = egui::Id::new(("tab_strip_active", role.label()));
+                let changed = ui.data(|d| d.get_temp::<usize>(seen_id)) != Some(active);
+                ui.data_mut(|d| d.insert_temp(seen_id, active));
+
+                egui::ScrollArea::horizontal()
+                    .id_salt(("tab_strip", role.label()))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let titles: Vec<(usize, String, bool)> = self
+                                .pane(role)
+                                .tabs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| (i, t.title(), t.loading))
+                                .collect();
+
+                            for (i, title, loading) in titles {
+                                let label = if loading { format!("{title} …") } else { title };
+                                let (inner, payload) =
+                                    ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
+                                        ui.add(theme::pane_tab(&label, i == active))
+                                    });
+                                let resp = inner.inner;
+                                if i == active && changed {
+                                    resp.scroll_to_me(None);
+                                }
+                                if resp.clicked() {
+                                    switch_to = Some(i);
+                                }
+                                if resp.middle_clicked() {
+                                    close = Some(i);
+                                }
+                                resp.context_menu(|ui| {
+                                    if ui
+                                        .add_enabled(n_tabs > 1, egui::Button::new("Close this"))
+                                        .clicked()
+                                    {
+                                        close = Some(i);
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(n_tabs > 1, egui::Button::new("Close others"))
+                                        .clicked()
+                                    {
+                                        close_others = Some(i);
+                                        ui.close();
+                                    }
+                                });
+                                if let Some(p) = payload {
+                                    drop_on = Some((i, (*p).clone()));
+                                }
+                            }
+                        });
                     });
-                if inner.inner.clicked() {
-                    switch_to = Some(i);
-                }
-                if inner.inner.middle_clicked() {
-                    close = Some(i);
-                }
-                let n_tabs = self.pane(role).tabs.len();
-                inner.inner.context_menu(|ui| {
-                    if ui
-                        .add_enabled(n_tabs > 1, egui::Button::new("Close this"))
-                        .clicked()
-                    {
-                        close = Some(i);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(n_tabs > 1, egui::Button::new("Close others"))
-                        .clicked()
-                    {
-                        close_others = Some(i);
-                        ui.close();
-                    }
-                });
-                if let Some(p) = payload {
-                    drop_on = Some((i, (*p).clone()));
-                }
-            }
-
-            if ui.small_button("+").on_hover_text("New tab").clicked() {
-                new_tab = true;
-            }
-            if ui
-                .small_button("🎹")
-                .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)")
-                .clicked()
-            {
-                new_device_tab = true;
-            }
-            if self.pane(role).tabs.len() > 1
-                && ui.small_button("×").on_hover_text("Close tab").clicked()
-            {
-                close = Some(self.pane(role).active);
-            }
+            });
         });
 
         if let Some(i) = switch_to {
@@ -679,7 +825,7 @@ impl App {
         if let Some((i, p)) = drop_on {
             if let Some(tab) = self.pane(role).tabs.get(i) {
                 let (dest, to_dev) = (tab.cwd.clone(), tab.device);
-                let kind = self.drop_kind(ui, role, &p, to_dev);
+                let kind = self.drop_kind(ui, &p, to_dev);
                 self.transfer(kind, p.device, p.paths, to_dev, dest);
             }
         }

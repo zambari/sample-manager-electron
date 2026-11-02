@@ -12,10 +12,10 @@ pub enum Action {
     /// The core verb of this app: commit the source selection into the active
     /// destination tab.
     Commit,
-    /// Audition the sample under the cursor.
-    Preview,
-    /// Begin inline rename.
+    /// Begin inline rename (one item only).
     Rename,
+    /// Open the Multi-Rename Tool (find / replace) over the selection.
+    MultiRename,
     /// Descend into the directory under the cursor.
     OpenDir,
     GoUp,
@@ -29,6 +29,8 @@ pub enum Action {
     /// Delete from the Digitakt right away, skipping /trash.
     DeleteNow,
     SelectAll,
+    /// Take back the last file operation on the computer.
+    Undo,
     /// Add/remove the cursor row from the selection without moving it.
     ToggleSelect,
     Refresh,
@@ -71,7 +73,6 @@ impl Keymap {
     fn common() -> Vec<(Chord, Action)> {
         vec![
             (plain(Key::Enter), Action::Commit),
-            (plain(Key::Space), Action::Preview),
             (plain(Key::ArrowUp), Action::CursorUp),
             (plain(Key::ArrowDown), Action::CursorDown),
             (shift(Key::ArrowUp), Action::ExtendUp),
@@ -80,6 +81,7 @@ impl Keymap {
             (plain(Key::ArrowLeft), Action::Collapse),
             (plain(Key::Escape), Action::Cancel),
             (cmd(Key::A), Action::SelectAll),
+            (cmd(Key::Z), Action::Undo),
             (cmd(Key::I), Action::ComputeSize),
             (cmd(Key::R), Action::Refresh),
             (cmd(Key::T), Action::NewTab),
@@ -95,6 +97,7 @@ impl Keymap {
             // Finder: Enter renames -- but here Enter is Commit, so rename
             // keeps F2 and gains ⌘↩ as the Finder-ish alternative.
             (plain(Key::F2), Action::Rename),
+            (shift(Key::F2), Action::MultiRename),
             (cmd(Key::Enter), Action::Rename),
             (cmd(Key::ArrowDown), Action::OpenDir),
             (cmd(Key::ArrowUp), Action::GoUp),
@@ -112,6 +115,7 @@ impl Keymap {
         let mut bindings = Self::common();
         bindings.extend([
             (plain(Key::F2), Action::Rename),
+            (shift(Key::F2), Action::MultiRename),
             (plain(Key::F5), Action::Refresh),
             (plain(Key::Backspace), Action::GoUp),
             (plain(Key::Delete), Action::Trash),

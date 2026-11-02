@@ -31,6 +31,7 @@ mod actions;
 mod editing;
 mod panels;
 mod transfers;
+mod undo;
 
 /// A transfer the user has been asked about and not yet answered.
 struct PendingPlan {
@@ -118,15 +119,16 @@ pub struct App {
     next_tab_id: u64,
     show_hidden: bool,
     pending: Option<PendingPlan>,
-    /// Paths waiting on the "move to Trash?" confirmation; `true` if they
-    /// are on the device.
-    trash_pending: Option<(bool, Vec<PathBuf>)>,
     /// Digitakt paths waiting on the "delete now?" confirmation.
     delete_pending: Option<Vec<PathBuf>>,
     /// Duplicate groups waiting on the "trash duplicates?" confirmation.
     dupes_pending: Option<Vec<crate::jobs::DupGroup>>,
     /// Paths cut or copied in a file pane, waiting for Paste.
     clipboard: Option<Clipboard>,
+    /// File operations ⌘Z can take back, newest last.
+    undo: Vec<undo::FileUndo>,
+    /// Running jobs whose result becomes an undo step.
+    undo_jobs: std::collections::HashMap<u64, undo::UndoJob>,
     /// The pane whose header path is being typed into, and the text so far.
     path_edit: Option<(Role, String)>,
     /// Mounted disks for the drives menu, and when they were last probed.
@@ -172,6 +174,11 @@ pub struct App {
     /// Source / destination column widths from the last frame, used to keep
     /// the editor column from being squeezed below its minimum.
     side_widths: [f32; 2],
+    /// Master output volume. Session only, never saved.
+    volume: f32,
+    /// Level meter: shown level and peak-hold mark per side (linear).
+    meter: [f32; 2],
+    meter_hold: [f32; 2],
     /// The window had focus last frame; regaining it re-lists local folders.
     window_focused: bool,
     /// Device file waiting on the "load to editor?" confirmation, with its size.
@@ -260,6 +267,9 @@ impl App {
             hold_cursor_load: session.is_some(),
             last_stream_error: None,
             side_widths: [0.0; 2],
+            volume: 1.0,
+            meter: [0.0; 2],
+            meter_hold: [0.0; 2],
             window_focused: true,
             device_load_pending: None,
             device_load: None,
@@ -277,9 +287,10 @@ impl App {
             next_tab_id,
             show_hidden: saved.as_ref().is_some_and(|s| s.show_hidden),
             pending: None,
-            trash_pending: None,
             delete_pending: None,
             clipboard: None,
+            undo: Vec::new(),
+            undo_jobs: Default::default(),
             path_edit: None,
             volumes: None,
             dupes_pending: None,
@@ -481,26 +492,13 @@ impl eframe::App for App {
                 if yes {
                     let paths: Vec<PathBuf> = groups.into_iter().flat_map(|g| g.remove).collect();
                     self.status = format!("Moving {} duplicate(s) to Trash…", paths.len());
-                    self.jobs.trash(paths);
+                    self.trash_local(paths);
                 } else {
                     self.status = "Duplicate removal cancelled".to_owned();
                 }
             }
         }
 
-        if let Some((on_dev, paths)) = &self.trash_pending {
-            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, *on_dev, false) {
-                let (on_dev, paths) = self.trash_pending.take().expect("checked above");
-                if yes && on_dev {
-                    let n = paths.len();
-                    self.run_device(device::Task::Trash { paths }, "Moving to /trash", n, 0);
-                } else if yes {
-                    self.jobs.trash(paths);
-                } else {
-                    self.status = "Delete cancelled".to_owned();
-                }
-            }
-        }
         if let Some(paths) = &self.delete_pending {
             if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, true, true) {
                 let paths = self.delete_pending.take().expect("checked above");

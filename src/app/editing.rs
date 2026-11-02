@@ -96,6 +96,12 @@ impl App {
         if cur == self.last_cursor {
             return;
         }
+        // Building a multi-selection moves the cursor too; don't load each
+        // row it passes. Leave `last_cursor` alone so collapsing back to a
+        // single row still loads it.
+        if self.pane(self.focused).active_tab().selected.len() > 1 {
+            return;
+        }
         self.last_cursor = cur.clone();
         if let Some(p) = cur {
             if self.editor.prefs.auto_load {
