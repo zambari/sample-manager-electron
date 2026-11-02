@@ -53,9 +53,23 @@ impl Pane {
             return;
         }
         self.tabs.remove(idx);
+        // Keep the same tab active when one to its left goes away.
+        if idx < self.active {
+            self.active -= 1;
+        }
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
         }
+    }
+
+    /// Close every tab except `idx`, which becomes the active one.
+    pub fn close_other_tabs(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        let keep = self.tabs.swap_remove(idx);
+        self.tabs = vec![keep];
+        self.active = 0;
     }
 
     pub fn cycle(&mut self, delta: isize) {

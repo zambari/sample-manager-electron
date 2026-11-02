@@ -14,7 +14,7 @@ mod sample;
 use crate::jobs::{Emitter, Ev};
 use crate::ops::Policy;
 use proto::{Args, DirEntry, Reader};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -389,6 +389,24 @@ pub fn upload_target(local: &Path, dir: &Path) -> PathBuf {
     dir.join(device_name(local))
 }
 
+/// Audio files under local `p` (non-hidden, as an upload picks them) and their bytes.
+fn count_local(p: &Path) -> (usize, u64) {
+    if !p.is_dir() {
+        return (1, std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+    }
+    let mut total = (0, 0);
+    let walk = walkdir::WalkDir::new(p)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !e.file_name().to_string_lossy().starts_with('.'));
+    for de in walk.flatten() {
+        if de.file_type().is_file() && crate::fs_model::is_audio_path(de.path()) {
+            total.0 += 1;
+            total.1 += de.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    total
+}
+
 impl Worker {
     fn run(mut self, rx: Receiver<Cmd>) {
         while let Ok(cmd) = rx.recv() {
@@ -507,10 +525,11 @@ impl Worker {
             Task::Trash { paths } => {
                 let trash = PathBuf::from(TRASH);
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
+                let counts = self.count_files(&paths, false, cancel);
+                self.set_totals(&counts, true);
+                let mut before = (0, 0);
                 for (i, p) in paths.into_iter().enumerate() {
-                    if let Some(pr) = self.job.as_mut() {
-                        pr.item = i;
-                    }
+                    self.catch_up(&mut before, counts.get(i.wrapping_sub(1)), true);
                     if p.starts_with(&trash) {
                         errors.push(format!("{} is already in {TRASH}", dev_str(&p)));
                         continue;
@@ -540,13 +559,14 @@ impl Worker {
             }
             Task::Delete { paths } => {
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
+                let counts = self.count_files(&paths, false, cancel);
+                self.set_totals(&counts, false);
+                let mut before = (0, 0);
                 for (i, p) in paths.into_iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    if let Some(j) = self.job.as_mut() {
-                        j.item = i;
-                    }
+                    self.catch_up(&mut before, counts.get(i.wrapping_sub(1)), false);
                     let res = self.stat(&p).and_then(|e| self.remove(&p, e.is_dir, cancel));
                     if let Err(e) = res {
                         errors.push(e);
@@ -562,13 +582,18 @@ impl Worker {
                     crate::log::line(format!("  {} -> {}", src.display(), dst.display()));
                 }
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: total_bytes, item: 0, items: n, file: None });
+                let srcs: Vec<PathBuf> = items.iter().map(|(s, _)| s.clone()).collect();
+                let counts = self.count_files(&srcs, dir == Dir::Upload, cancel);
+                // Device sizes are exact; an upload's bytes on the wire are
+                // not its file sizes, so keep the caller's guess there.
+                let scan_bytes = dir != Dir::Upload || total_bytes == 0;
+                self.set_totals(&counts, scan_bytes);
+                let mut before = (0, 0);
                 for (i, (src, dst_dir)) in items.into_iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    if let Some(p) = self.job.as_mut() {
-                        p.item = i;
-                    }
+                    self.catch_up(&mut before, counts.get(i.wrapping_sub(1)), scan_bytes);
                     self.progress(&src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 0);
                     let res = match dir {
                         Dir::Move => self.move_item(&src, &dst_dir, policy, cancel),
@@ -596,6 +621,82 @@ impl Worker {
             errors.retain(|e| !e.ends_with("cancelled"));
         }
         self.em.send(Ev::Finished { job, touched: touched_local, device_touched: touched_dev, errors, cancelled });
+    }
+
+    /// Files under each of `paths` and their bytes, so the bar can count
+    /// files rather than top-level items. `local`: paths on disk (an
+    /// upload), filtered the way [`Self::upload`] picks files.
+    fn count_files(&mut self, paths: &[PathBuf], local: bool, cancel: &AtomicBool) -> Vec<(usize, u64)> {
+        self.progress("Counting files…", 0);
+        let mut listings: HashMap<PathBuf, Vec<(String, bool, u64)>> = HashMap::new();
+        let mut out = Vec::with_capacity(paths.len());
+        for p in paths {
+            if local {
+                out.push(count_local(p));
+                continue;
+            }
+            // One listing per parent folder, not one per item.
+            let parent = p.parent().unwrap_or(Path::new("/")).to_path_buf();
+            if !listings.contains_key(&parent) {
+                let l = self.with_conn(|c| c.list(&parent)).unwrap_or_default();
+                listings.insert(parent.clone(), l.into_iter().map(|e| (e.name, e.is_dir, e.size as u64)).collect());
+            }
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let found = listings[&parent].iter().find(|e| e.0 == name).map(|e| (e.1, e.2));
+            out.push(match found {
+                None => (0, 0),
+                Some((false, size)) => (1, size),
+                Some((true, _)) => self.count_dir(p, cancel),
+            });
+        }
+        out
+    }
+
+    fn count_dir(&mut self, p: &Path, cancel: &AtomicBool) -> (usize, u64) {
+        let Ok(kids) = self.with_conn(|c| c.list(p)) else { return (0, 0) };
+        let mut total = (0, 0);
+        for k in kids {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let (n, b) = if k.is_dir { self.count_dir(&p.join(&k.name), cancel) } else { (1, k.size as u64) };
+            total.0 += n;
+            total.1 += b;
+        }
+        total
+    }
+
+    /// Put the counted files (and, with `bytes`, their size) on the bar.
+    fn set_totals(&mut self, counts: &[(usize, u64)], bytes: bool) {
+        let Some(p) = self.job.as_mut() else { return };
+        p.items = counts.iter().map(|c| c.0).sum();
+        if bytes {
+            p.total = counts.iter().map(|c| c.1).sum();
+        }
+        let ev = p.ev("");
+        self.em.send(ev);
+    }
+
+    /// Before the next top-level item: count the previous one (`prev`) as
+    /// fully done, so skipped files or a folder renamed in one go still add up.
+    fn catch_up(&mut self, before: &mut (usize, u64), prev: Option<&(usize, u64)>, bytes: bool) {
+        let Some(&(n, b)) = prev else { return };
+        before.0 += n;
+        before.1 += b;
+        let Some(p) = self.job.as_mut() else { return };
+        p.item = p.item.max(before.0);
+        if bytes {
+            p.done = p.done.max(before.1);
+        }
+    }
+
+    /// One file finished: tick the file count.
+    fn file_done(&mut self) {
+        let Some(p) = self.job.as_mut() else { return };
+        p.item += 1;
+        p.last = p.done;
+        let ev = p.ev("");
+        self.em.send(ev);
     }
 
     /// Look up one device item by listing its folder.
@@ -663,7 +764,9 @@ impl Worker {
             }
             self.with_conn(|c| c.rmdir(p))
         } else {
-            self.with_conn(|c| c.delete_file(p))
+            self.with_conn(|c| c.delete_file(p))?;
+            self.file_done();
+            Ok(())
         }
     }
 
@@ -691,6 +794,9 @@ impl Worker {
         })?;
         if renamed {
             self.progress("", size);
+            if !is_dir {
+                self.file_done();
+            }
             return Ok(());
         }
         crate::log::line(format!("device: rename refused, moving {} piece by piece", dev_str(src)));
@@ -711,6 +817,7 @@ impl Worker {
             let raw = self.read_raw(src, true, cancel)?;
             self.write_raw(target, &raw, true, cancel)?;
             self.with_conn(|c| c.delete_file(src))?;
+            self.file_done();
         }
         Ok(())
     }
@@ -751,7 +858,9 @@ impl Worker {
         // Known only once connected, which placing the file made sure of.
         let stereo = mono.is_none() && self.conn.as_ref().is_some_and(|c| c.stereo);
         let raw = sample::to_device(&s, stereo);
-        self.write_raw(&target, &raw, false, cancel)
+        self.write_raw(&target, &raw, false, cancel)?;
+        self.file_done();
+        Ok(())
     }
 
     /// `half`: this write follows a read of the same bytes (a device-to-device
@@ -860,7 +969,9 @@ impl Worker {
         self.progress(&entry.name, 0);
         let raw = self.read_raw(src, false, cancel)?;
         std::fs::create_dir_all(dst_dir).map_err(|e| format!("{}: {e}", dst_dir.display()))?;
-        sample::write_wav(&raw, &target).map_err(|e| format!("{}: {e}", target.display()))
+        sample::write_wav(&raw, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+        self.file_done();
+        Ok(())
     }
 
     fn copy(&mut self, src: &Path, dst_dir: &Path, policy: Policy, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {
@@ -888,6 +999,8 @@ impl Worker {
         }
         self.progress(&entry.name, 0);
         let raw = self.read_raw(src, true, cancel)?;
-        self.write_raw(&target, &raw, true, cancel)
+        self.write_raw(&target, &raw, true, cancel)?;
+        self.file_done();
+        Ok(())
     }
 }

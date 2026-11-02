@@ -320,7 +320,20 @@ const PROGRESS_INTERVAL_BYTES: u64 = 4 * 1024 * 1024;
 
 fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBool>) {
     let total_bytes: u64 = ops.iter().map(|o| o.approx_bytes).sum();
-    let total_items = ops.len();
+    // Files, not top-level items, so a folder visibly moves along.
+    let counts: Vec<usize> = ops
+        .iter()
+        .map(|o| {
+            if o.is_dir {
+                walkdir::WalkDir::new(&o.src).into_iter().flatten().filter(|d| d.file_type().is_file()).count()
+            } else {
+                1
+            }
+        })
+        .collect();
+    let total_items: usize = counts.iter().sum();
+    let mut files_before = 0usize;
+    let mut done_items = 0usize;
     let mut done_bytes = 0u64;
     let mut last_reported = 0u64;
     let mut errors = Vec::new();
@@ -335,7 +348,7 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
             job,
             done_bytes,
             total_bytes,
-            done_items: i,
+            done_items,
             total_items,
             label: op
                 .src
@@ -345,15 +358,16 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
             file: None,
         });
 
-        let mut on_bytes = |n: u64| {
+        let mut on_bytes = |n: u64, files: usize| {
             done_bytes += n;
-            if done_bytes - last_reported >= PROGRESS_INTERVAL_BYTES {
+            done_items += files;
+            if files > 0 || done_bytes - last_reported >= PROGRESS_INTERVAL_BYTES {
                 last_reported = done_bytes;
                 em.send(Ev::Progress {
                     job,
                     done_bytes,
                     total_bytes,
-                    done_items: i,
+                    done_items,
                     total_items,
                     label: String::new(),
                     file: None,
@@ -361,7 +375,9 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
             }
         };
 
-        let res = run_one(op, kind, &cancel, &mut on_bytes);
+        let res = run_one(op, counts[i], kind, &cancel, &mut on_bytes);
+        files_before += counts[i];
+        done_items = done_items.max(files_before);
         match res {
             Ok(()) => {
                 if let Some(p) = op.dst.parent() {
@@ -390,11 +406,14 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
     });
 }
 
+/// `on_bytes(bytes, files)` as data and whole files go by; `files` is how
+/// many files `op` holds, all counted at once by a rename.
 fn run_one(
     op: &Op,
+    files: usize,
     kind: Kind,
     cancel: &AtomicBool,
-    on_bytes: &mut impl FnMut(u64),
+    on_bytes: &mut impl FnMut(u64, usize),
 ) -> std::io::Result<()> {
     if let Some(parent) = op.dst.parent() {
         std::fs::create_dir_all(parent)?;
@@ -417,7 +436,7 @@ fn run_one(
         // Same-volume moves are a rename: instant, and no progress to report.
         match std::fs::rename(&op.src, &op.dst) {
             Ok(()) => {
-                on_bytes(op.approx_bytes);
+                on_bytes(op.approx_bytes, files);
                 return Ok(());
             }
             // Cross-device: fall through to copy-then-delete.
@@ -429,6 +448,7 @@ fn run_one(
         copy_tree(&op.src, &op.dst, cancel, on_bytes)?;
     } else {
         copy_file(&op.src, &op.dst, cancel, on_bytes)?;
+        on_bytes(0, 1);
     }
 
     if kind == Kind::Move {
@@ -445,7 +465,7 @@ fn copy_tree(
     src: &Path,
     dst: &Path,
     cancel: &AtomicBool,
-    on_bytes: &mut impl FnMut(u64),
+    on_bytes: &mut impl FnMut(u64, usize),
 ) -> std::io::Result<()> {
     for de in walkdir::WalkDir::new(src).follow_links(false) {
         if cancel.load(Ordering::Relaxed) {
@@ -464,6 +484,7 @@ fn copy_tree(
             std::fs::create_dir_all(&target)?;
         } else if de.file_type().is_file() {
             copy_file(de.path(), &target, cancel, on_bytes)?;
+            on_bytes(0, 1);
         }
         // Symlinks are skipped for now; recreating them correctly is
         // platform-specific and not needed for sample folders.
@@ -475,7 +496,7 @@ fn copy_file(
     src: &Path,
     dst: &Path,
     cancel: &AtomicBool,
-    on_bytes: &mut impl FnMut(u64),
+    on_bytes: &mut impl FnMut(u64, usize),
 ) -> std::io::Result<()> {
     let mut r = std::io::BufReader::new(std::fs::File::open(src)?);
     let mut w = std::io::BufWriter::new(std::fs::File::create(dst)?);
@@ -495,7 +516,7 @@ fn copy_file(
             break;
         }
         w.write_all(&buf[..n])?;
-        on_bytes(n as u64);
+        on_bytes(n as u64, 0);
     }
     w.flush()?;
     Ok(())

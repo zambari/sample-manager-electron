@@ -81,6 +81,31 @@ struct ActiveJob {
     file: Option<(&'static str, u64, u64)>,
 }
 
+/// Jobs already finished since the queue was last empty, so the status bar
+/// can show the whole queue as one run instead of restarting per job.
+#[derive(Default)]
+struct Batch {
+    done_items: usize,
+    total_items: usize,
+    done_bytes: u64,
+    total_bytes: u64,
+    /// Some finished job never knew its size: the bar counts files instead.
+    bytes_unknown: bool,
+}
+
+impl Batch {
+    fn absorb(&mut self, a: &ActiveJob, cancelled: bool) {
+        // A finished job counts in full; a cancelled one only for what it did.
+        let items = if cancelled { a.done_items } else { a.total_items.max(a.done_items) };
+        let bytes = if cancelled { a.done_bytes } else { a.total_bytes.max(a.done_bytes) };
+        self.done_items += items;
+        self.total_items += items;
+        self.done_bytes += bytes;
+        self.total_bytes += bytes;
+        self.bytes_unknown |= a.total_bytes == 0;
+    }
+}
+
 pub struct App {
     jobs: Jobs,
     device: Device,
@@ -107,8 +132,12 @@ pub struct App {
     clipboard: Option<Clipboard>,
     /// Every job not yet finished, oldest first.
     active_jobs: Vec<ActiveJob>,
+    /// Finished part of the current queue.
+    batch: Batch,
     status: String,
     errors: Vec<String>,
+    /// How many of `errors` are already written to the log.
+    errors_logged: usize,
     /// Last state seen by `logic`, to notice changes that need saving.
     last_state: Option<state::AppState>,
     engine: Engine,
@@ -252,8 +281,10 @@ impl App {
             clipboard: None,
             dupes_pending: None,
             active_jobs: Vec::new(),
+            batch: Batch::default(),
             status: String::new(),
             errors,
+            errors_logged: 0,
             last_state: None,
         };
         app.reload_all();
@@ -784,7 +815,13 @@ impl App {
                     cancelled,
                 } => {
                     self.jobs.forget(job);
+                    if let Some(a) = self.active_jobs.iter().find(|a| a.id == job) {
+                        self.batch.absorb(a, cancelled);
+                    }
                     self.active_jobs.retain(|a| a.id != job);
+                    if self.active_jobs.is_empty() {
+                        self.batch = Batch::default();
+                    }
                     let load = self.device_load.take_if(|(id, _)| *id == job).map(|(_, p)| p);
                     let load = load.filter(|p| !cancelled && errors.is_empty() && p.is_file());
                     self.status = if cancelled {
@@ -796,9 +833,6 @@ impl App {
                     };
                     if !self.active_jobs.is_empty() {
                         self.status += &format!(" · {} more job(s) to go", self.active_jobs.len());
-                    }
-                    for e in &errors {
-                        crate::log::line(format!("job {job} error: {e}"));
                     }
                     self.errors.extend(errors);
                     for dir in touched {
@@ -1871,33 +1905,53 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        // Anything shown as an error also goes to the log, once.
+        for e in self.errors.iter().skip(self.errors_logged) {
+            crate::log::line(format!("error: {e}"));
+        }
+        self.errors_logged = self.errors.len();
+
         let waiting = self.active_jobs.len().saturating_sub(1);
         if let Some(a) = self.shown_job() {
-            let frac = if a.total_bytes > 0 {
-                a.done_bytes as f32 / a.total_bytes as f32
-            } else if a.total_items > 0 {
-                a.done_items as f32 / a.total_items as f32
+            // The whole queue as one run: finished jobs plus every live one.
+            // A waiting device job counts its top-level items until it starts
+            // and counts the files inside, so the total can grow.
+            let b = &self.batch;
+            let done_items = b.done_items + self.active_jobs.iter().map(|j| j.done_items).sum::<usize>();
+            let total_items = b.total_items + self.active_jobs.iter().map(|j| j.total_items).sum::<usize>();
+            let done_bytes = b.done_bytes + self.active_jobs.iter().map(|j| j.done_bytes).sum::<u64>();
+            let total_bytes = b.total_bytes + self.active_jobs.iter().map(|j| j.total_bytes).sum::<u64>();
+            let bytes_known = !b.bytes_unknown && self.active_jobs.iter().all(|j| j.total_bytes > 0);
+            let frac = if bytes_known && total_bytes > 0 {
+                done_bytes as f32 / total_bytes as f32
+            } else if total_items > 0 {
+                done_items as f32 / total_items as f32
             } else {
                 0.0
             };
             let job_id = a.id;
             let file = a.file;
             // Device folders have no known size up front: show bytes so far.
-            let bytes = if a.total_bytes > 0 {
-                format!("{} / {}", fs_model::human_bytes(a.done_bytes), fs_model::human_bytes(a.total_bytes))
+            let bytes = if bytes_known {
+                format!("{} / {}", fs_model::human_bytes(done_bytes), fs_model::human_bytes(total_bytes))
             } else {
-                fs_model::human_bytes(a.done_bytes)
+                fs_model::human_bytes(done_bytes)
             };
             let label = if a.started || !a.label.is_empty() { a.label.as_str() } else { "Starting…" };
-            let text = format!("{}/{} · {bytes} · {label}", (a.done_items + 1).min(a.total_items.max(1)), a.total_items);
+            let text = format!("{}/{} files · {bytes} · {label}", done_items.min(total_items), total_items);
             // Buttons pinned right; the bar takes the rest so long names fit.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Cancel").clicked() {
+                if waiting > 0 && ui.button("Cancel all").clicked() {
+                    for j in &self.active_jobs {
+                        self.jobs.cancel(j.id);
+                    }
+                }
+                if ui.button("Cancel").on_hover_text("Stop the job running now").clicked() {
                     self.jobs.cancel(job_id);
                 }
                 if waiting > 0 {
                     ui.label(format!("+{waiting} queued"))
-                        .on_hover_text("Waiting jobs start when this one finishes. Cancel stops only the one shown.");
+                        .on_hover_text("Waiting jobs start when this one finishes. Their files count in the bar.");
                 }
                 // This file, chunk by chunk.
                 if let Some((phase, done, total)) = file.filter(|f| f.2 > 0) {
@@ -1922,34 +1976,9 @@ impl App {
         }
 
         ui.horizontal(|ui| {
-            // Both panes' counts, always Source then Destination, so they can
-            // be compared at a glance. Selection info goes with the focused one.
-            for (i, role) in [Role::Source, Role::Dest].into_iter().enumerate() {
-                if i > 0 {
-                    ui.separator();
-                }
-                let tab = self.pane(role).active_tab();
-                let mut text = format!("{} · {} items", role.label(), tab.entries.len());
-                if role == self.focused {
-                    let sel_bytes: u64 = tab
-                        .entries
-                        .iter()
-                        .filter(|e| tab.selected.contains(&e.path))
-                        .map(|e| if e.is_dir { 0 } else { e.len })
-                        .sum();
-                    text += &format!(
-                        " · {} selected ({})",
-                        tab.selected.len(),
-                        fs_model::human_bytes(sel_bytes)
-                    );
-                }
-                let strong = role == self.focused && !self.editor_focused;
-                ui.label(if strong {
-                    egui::RichText::new(text).strong()
-                } else {
-                    egui::RichText::new(text)
-                });
-            }
+            // Counts live in each pane's own footer; here just say which
+            // side has focus.
+            ui.label(if self.editor_focused { "Editor" } else { self.focused.label() });
 
             if let Some(p) = self.preview.playing() {
                 ui.separator();
@@ -1968,14 +1997,47 @@ impl App {
                             egui::RichText::new(format!("⚠ {}", truncate(last, 60)))
                                 .color(ui.visuals().error_fg_color),
                         )
-                        .on_hover_text("click to clear")
+                        .on_hover_text(format!("{}\n\nclick to clear", self.errors.join("\n")))
                         .clicked()
                     {
                         self.errors.clear();
+                        self.errors_logged = 0;
                     }
                 }
             });
         });
+    }
+
+    /// "12 files · 3 folders · 45.2 MB", plus the selection when there is one.
+    /// Counts what's listed, including children of folders expanded in tree mode.
+    fn pane_footer_text(tab: &DirTab) -> String {
+        let (mut files, mut dirs, mut bytes) = (0usize, 0usize, 0u64);
+        let (mut n_sel, mut sel_bytes) = (0usize, 0u64);
+        for e in &tab.entries {
+            if e.is_dir {
+                dirs += 1;
+            } else {
+                files += 1;
+                bytes += e.len;
+            }
+            if tab.selected.contains(&e.path) {
+                n_sel += 1;
+                if !e.is_dir {
+                    sel_bytes += e.len;
+                }
+            }
+        }
+        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut text = format!(
+            "{} · {} · {}",
+            plural(files, "file", "files"),
+            plural(dirs, "folder", "folders"),
+            fs_model::human_bytes(bytes)
+        );
+        if n_sel > 0 {
+            text += &format!(" — {n_sel} selected ({})", fs_model::human_bytes(sel_bytes));
+        }
+        text
     }
 
     fn show_pane(&mut self, ui: &mut egui::Ui, role: Role) {
@@ -2007,6 +2069,16 @@ impl App {
 
         self.tab_strip(ui, role);
         ui.separator();
+
+        // Per-pane footer: counts stay visible even while a transfer's
+        // progress bar takes over the window's status bar.
+        let footer = Self::pane_footer_text(self.pane(role).active_tab());
+        egui::Panel::bottom(egui::Id::new(("pane_footer", role.label())))
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 3)))
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(footer).small().weak());
+            });
 
         let intents = {
             let sizes = &self.sizes;
@@ -2216,61 +2288,76 @@ impl App {
     fn tab_strip(&mut self, ui: &mut egui::Ui, role: Role) {
         let mut switch_to = None;
         let mut close = None;
+        let mut close_others = None;
         let mut new_tab = false;
         let mut drop_on: Option<(usize, DragPayload)> = None;
         let mut new_device_tab = false;
 
-        egui::ScrollArea::horizontal()
-            .id_salt(("tabs", role.label()))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let active = self.pane(role).active;
-                    let titles: Vec<(usize, String, bool)> = self
-                        .pane(role)
-                        .tabs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| (i, t.title(), t.loading))
-                        .collect();
+        // Wraps onto extra rows instead of scrolling once tabs outgrow the pane.
+        ui.horizontal_wrapped(|ui| {
+            let active = self.pane(role).active;
+            let titles: Vec<(usize, String, bool)> = self
+                .pane(role)
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i, t.title(), t.loading))
+                .collect();
 
-                    for (i, title, loading) in titles {
-                        let label = if loading {
-                            format!("{title} …")
-                        } else {
-                            title
-                        };
-                        let (inner, payload) =
-                            ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
-                                ui.selectable_label(i == active, label)
-                            });
-                        if inner.inner.clicked() {
-                            switch_to = Some(i);
-                        }
-                        if inner.inner.middle_clicked() {
-                            close = Some(i);
-                        }
-                        if let Some(p) = payload {
-                            drop_on = Some((i, (*p).clone()));
-                        }
-                    }
-
-                    if ui.small_button("+").on_hover_text("New tab").clicked() {
-                        new_tab = true;
-                    }
+            for (i, title, loading) in titles {
+                let label = if loading {
+                    format!("{title} …")
+                } else {
+                    title
+                };
+                let (inner, payload) =
+                    ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
+                        ui.selectable_label(i == active, label)
+                    });
+                if inner.inner.clicked() {
+                    switch_to = Some(i);
+                }
+                if inner.inner.middle_clicked() {
+                    close = Some(i);
+                }
+                let n_tabs = self.pane(role).tabs.len();
+                inner.inner.context_menu(|ui| {
                     if ui
-                        .small_button("🎹")
-                        .on_hover_text("Open the Digitakt's +Drive in a new tab (USB MIDI)")
+                        .add_enabled(n_tabs > 1, egui::Button::new("Close this"))
                         .clicked()
                     {
-                        new_device_tab = true;
+                        close = Some(i);
+                        ui.close();
                     }
-                    if self.pane(role).tabs.len() > 1
-                        && ui.small_button("×").on_hover_text("Close tab").clicked()
+                    if ui
+                        .add_enabled(n_tabs > 1, egui::Button::new("Close others"))
+                        .clicked()
                     {
-                        close = Some(self.pane(role).active);
+                        close_others = Some(i);
+                        ui.close();
                     }
                 });
-            });
+                if let Some(p) = payload {
+                    drop_on = Some((i, (*p).clone()));
+                }
+            }
+
+            if ui.small_button("+").on_hover_text("New tab").clicked() {
+                new_tab = true;
+            }
+            if ui
+                .small_button("🎹")
+                .on_hover_text("Open the Digitakt's +Drive in a new tab (USB MIDI)")
+                .clicked()
+            {
+                new_device_tab = true;
+            }
+            if self.pane(role).tabs.len() > 1
+                && ui.small_button("×").on_hover_text("Close tab").clicked()
+            {
+                close = Some(self.pane(role).active);
+            }
+        });
 
         if let Some(i) = switch_to {
             self.pane_mut(role).active = i;
@@ -2303,6 +2390,9 @@ impl App {
         }
         if let Some(i) = close {
             self.pane_mut(role).close_tab(i);
+        }
+        if let Some(i) = close_others {
+            self.pane_mut(role).close_other_tabs(i);
         }
     }
 }
