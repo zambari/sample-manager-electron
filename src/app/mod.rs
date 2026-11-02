@@ -413,6 +413,10 @@ impl eframe::App for App {
         if focused && !self.window_focused {
             self.reload_local();
         }
+        // Leaving for another app: go quiet.
+        if !focused && self.window_focused && self.engine.is_playing() {
+            self.engine.stop();
+        }
         self.window_focused = focused;
         self.absorb_editor();
 
