@@ -43,7 +43,8 @@ case "$mode" in
     cargo build --release --target x86_64-apple-darwin
     cargo build --release --target aarch64-apple-darwin
 
-    rm -rf "$out"
+    # Leave any Windows zip in $out alone.
+    rm -rf "${app:?}" "${out:?}/${app_name:?}.zip"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     lipo -create -output "$app/Contents/MacOS/sample_manager" \
       target/x86_64-apple-darwin/release/sample_manager \
