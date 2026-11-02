@@ -226,6 +226,10 @@ pub enum EdAction {
     SelectAll,
     Normalize,
     Export,
+    /// Remove the selection from the audio (no clipboard).
+    Delete,
+    /// Write the edited audio back over the open file.
+    SaveInPlace,
     /// Step the file cursor in the last-focused pane to the next/previous
     /// sample without leaving the editor.
     NextFile,
@@ -283,6 +287,9 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     hit(Key::A, m.command_only(), A::SelectAll);
     hit(Key::N, none, A::Normalize);
     hit(Key::Enter, none, A::Export);
+    hit(Key::Backspace, none, A::Delete);
+    hit(Key::Delete, none, A::Delete);
+    hit(Key::S, m.command_only(), A::SaveInPlace);
     hit(Key::ArrowDown, none, A::NextFile);
     hit(Key::ArrowUp, none, A::PrevFile);
     hit(Key::Tab, none, A::SwitchPane);
@@ -293,4 +300,5 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
 pub const EDITOR_HELP: &str = "Space play/stop (⇧ from the other start) · I / O set in/out (live while playing) · L loop · M mono preview · \
 S snap to zero · V follow playback · [ / ] step in point (to zero crossings when snapping), ⇧ for out point · C crop to region, ⇧C uncrop · \
 ⌘Z undo, ⇧⌘Z redo · ←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
+⌘X / ⌘C / ⌘V cut / copy / paste (paste goes in at the playhead, or over a selection; works across files) · ⌫ delete selection · ⌘S save in place · \
 N normalize · ↩ export · ↑/↓ next/prev sample · Tab next column";

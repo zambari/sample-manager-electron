@@ -311,3 +311,62 @@ pub fn confirm_device_load(ctx: &Context, path: &std::path::Path, bytes: u64) ->
     });
     answer
 }
+
+pub enum LeaveChoice {
+    /// Stay on the edited file.
+    Cancel,
+    Discard,
+    SaveInPlace,
+    Commit,
+}
+
+/// The editor's audio was cut or pasted into and is about to be left (another
+/// file is loading, or the app is closing). `quitting` changes the wording;
+/// `dest` names the destination folder, `None` when it can't take a commit.
+pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str>) -> Option<LeaveChoice> {
+    let mut choice = None;
+    Modal::new(Id::unique("leave_editor_modal")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading(format!("\"{name}\" has unsaved edits"));
+        ui.add_space(6.0);
+        ui.label(if quitting {
+            "Audio was cut or pasted into this file. Quitting now throws those edits away."
+        } else {
+            "Audio was cut or pasted into this file. Opening another one throws those edits away \
+             (the clipboard is kept, so you can still paste into the next file)."
+        });
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Saving writes what you hear: the trimmed region, with gain. Files that aren't WAV are saved as a WAV beside the original.")
+                .weak(),
+        );
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc — keep editing").clicked() {
+                choice = Some(LeaveChoice::Cancel);
+            }
+            if ui
+                .button(RichText::new("Discard edits").color(ui.visuals().error_fg_color))
+                .on_hover_text(if quitting { "Quit without saving" } else { "Open the other file without saving" })
+                .clicked()
+            {
+                choice = Some(LeaveChoice::Discard);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let commit = ui
+                    .add_enabled(dest.is_some(), egui::Button::new("Commit to destination"))
+                    .on_hover_text(dest.map_or("The destination tab is busy".to_owned(), |d| format!("Export into {d}, leaving the original untouched")));
+                if commit.clicked() {
+                    choice = Some(LeaveChoice::Commit);
+                }
+                if ui.button("Save in place").on_hover_text("Overwrite the original file").clicked() {
+                    choice = Some(LeaveChoice::SaveInPlace);
+                }
+            });
+        });
+    });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        choice = Some(LeaveChoice::Cancel);
+    }
+    choice
+}

@@ -112,6 +112,61 @@ pub struct Memo {
     crop: Option<(usize, usize)>,
 }
 
+impl Memo {
+    /// "Open it fresh": the out-of-range selection makes `install` fall back
+    /// to the whole file at unity gain.
+    const FRESH: Memo = Memo { sel: (0, usize::MAX), playhead: 0, gain_db: 0.0, crop: None };
+}
+
+/// Audio cut or copied in the editor, kept across file switches so it can be
+/// pasted into another file. Gain is baked in: it's what you heard.
+pub struct AudioClip {
+    pub rate: u32,
+    pub channels: Vec<Vec<f32>>,
+}
+
+impl AudioClip {
+    pub fn frames(&self) -> usize {
+        self.channels.first().map_or(0, Vec::len)
+    }
+
+    /// The clip reshaped for a file with `nch` channels at `rate`: mono is
+    /// spread to every channel, multichannel folded to mono, and a different
+    /// rate linearly resampled so pitch and length are kept.
+    fn adapt(&self, rate: u32, nch: usize) -> Vec<Vec<f32>> {
+        let src = &self.channels;
+        let chans: Vec<Vec<f32>> = if src.len() == nch {
+            src.clone()
+        } else if nch == 1 {
+            let n = self.frames();
+            vec![(0..n).map(|f| stats::mono_at(src, f)).collect()]
+        } else {
+            (0..nch).map(|i| src[i % src.len()].clone()).collect()
+        };
+        if self.rate == rate || self.rate == 0 || rate == 0 {
+            return chans;
+        }
+        let ratio = self.rate as f64 / rate as f64;
+        let n_in = self.frames();
+        let n_out = ((n_in as f64) / ratio).round() as usize;
+        chans
+            .iter()
+            .map(|c| {
+                (0..n_out)
+                    .map(|i| {
+                        let x = i as f64 * ratio;
+                        let j = x.floor() as usize;
+                        let t = (x - j as f64) as f32;
+                        let a = c.get(j).copied().unwrap_or(0.0);
+                        let b = c.get(j + 1).copied().unwrap_or(a);
+                        a + (b - a) * t
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
 /// One undo step: the trim, playhead, gain and crop. Prefs (loop, snap...)
 /// are deliberately left out.
 #[derive(Clone)]
@@ -122,6 +177,9 @@ struct EditState {
     crop: Option<(usize, usize)>,
     /// The (possibly cropped) sample that goes with `crop`. Cheap: Arcs.
     shown: Option<Loaded>,
+    /// The whole edited file and its content revision (cut / paste).
+    full: Option<Loaded>,
+    rev: u64,
 }
 
 const CH_IN: u8 = 1;
@@ -129,6 +187,7 @@ const CH_OUT: u8 = 2;
 const CH_PLAYHEAD: u8 = 4;
 const CH_GAIN: u8 = 8;
 const CH_CROP: u8 = 16;
+const CH_AUDIO: u8 = 32;
 
 impl EditState {
     /// Which fields differ, as a CH_* mask.
@@ -148,6 +207,9 @@ impl EditState {
         }
         if self.crop != o.crop {
             m |= CH_CROP;
+        }
+        if self.rev != o.rev {
+            m |= CH_AUDIO;
         }
         m
     }
@@ -171,7 +233,8 @@ const COALESCE_SECS: f64 = 0.6;
 
 enum Ev {
     Loaded { generation: u64, path: PathBuf, result: Result<Loaded, String> },
-    Exported(Result<PathBuf, String>),
+    /// `rev` is the content revision that was rendered.
+    Exported { rev: u64, result: Result<PathBuf, String> },
     BatchExported { dest_dir: PathBuf, done: usize, errors: Vec<String> },
 }
 
@@ -233,6 +296,15 @@ pub struct Editor {
     pub play_when_loaded: bool,
     memos: HashMap<PathBuf, Memo>,
     stats_key: Option<(usize, usize, u32, usize, bool)>,
+    /// Content revision: bumped by every cut / paste. Unique per edit so undo
+    /// and redo land back on a matching number.
+    rev: u64,
+    next_rev: u64,
+    /// `rev` when the file was loaded, and when it was last written out.
+    loaded_rev: u64,
+    clean_rev: u64,
+    /// Audio cut or copied, for pasting (into this file or another).
+    pub clip: Option<AudioClip>,
     stats: Stats,
     phase: Phase,
     file_stats: Stats,
@@ -263,6 +335,11 @@ impl Editor {
             play_when_loaded: false,
             memos: HashMap::new(),
             stats_key: None,
+            rev: 0,
+            next_rev: 0,
+            loaded_rev: 0,
+            clean_rev: 0,
+            clip: None,
             stats: Stats::default(),
             phase: Phase::default(),
             file_stats: Stats::default(),
@@ -352,10 +429,14 @@ impl Editor {
                         }
                     }
                 }
-                Ev::Exported(r) => {
+                Ev::Exported { rev, result } => {
                     self.exporting = false;
-                    out.push(match r {
-                        Ok(p) => Outcome::Exported(p),
+                    out.push(match result {
+                        Ok(p) => {
+                            // The edits are safely written somewhere.
+                            self.clean_rev = rev;
+                            Outcome::Exported(p)
+                        }
                         Err(e) => Outcome::Error(format!("export failed: {e}")),
                     });
                 }
@@ -378,15 +459,22 @@ impl Editor {
         }
     }
 
+    /// Positions only make sense for the file as it is on disk: once its
+    /// audio was cut or pasted into, forget them instead.
     fn remember(&mut self) {
         let Some(path) = self.path().map(Path::to_path_buf) else { return };
+        if self.rev != self.loaded_rev {
+            self.memos.remove(&path);
+            return;
+        }
         let memo = self.memo();
         self.memos.insert(path, memo);
     }
 
     /// The loaded file and its edits, for saving.
     pub fn session(&self) -> Option<Session> {
-        Some(Session { path: self.path()?.to_path_buf(), memo: self.memo() })
+        let memo = if self.rev == self.loaded_rev { self.memo() } else { Memo::FRESH };
+        Some(Session { path: self.path()?.to_path_buf(), memo })
     }
 
     /// Reload a saved session: the edits are re-applied once the file decodes.
@@ -421,6 +509,10 @@ impl Editor {
             }
         }
         self.view.fit_pending = true;
+        self.next_rev += 1;
+        self.rev = self.next_rev;
+        self.loaded_rev = self.rev;
+        self.clean_rev = self.rev;
         self.history = History { committed: Some(self.state()), ..History::default() };
     }
 
@@ -486,11 +578,19 @@ impl Editor {
             gain_db: self.gain_db,
             crop: self.crop,
             shown: self.current.clone(),
+            full: self.full.clone(),
+            rev: self.rev,
         }
     }
 
     fn restore(&mut self, st: EditState) {
-        if st.crop != self.crop {
+        if st.rev != self.rev {
+            self.full = st.full;
+            self.rev = st.rev;
+            self.current = st.shown;
+            self.crop = st.crop;
+            self.refresh_file_stats();
+        } else if st.crop != self.crop {
             self.current = st.shown;
             self.crop = st.crop;
             self.view.fit_pending = true;
@@ -519,7 +619,7 @@ impl Editor {
             h.committed = Some(prev);
             return;
         }
-        let coalesce = mask == h.last_mask && mask & CH_CROP == 0 && now - h.last_time < COALESCE_SECS;
+        let coalesce = mask == h.last_mask && mask & (CH_CROP | CH_AUDIO) == 0 && now - h.last_time < COALESCE_SECS;
         if !coalesce {
             h.undo.push(prev);
             if h.undo.len() > UNDO_LIMIT {
@@ -751,9 +851,146 @@ impl Editor {
         self.file_stats
     }
 
-    /// Have the trim or gain moved away from "the file as it is"?
+    /// Have the trim, gain or audio moved away from "the file as it is"?
     pub fn is_edited(&self) -> bool {
-        self.crop.is_some() || self.sel != (0, self.frames()) || self.gain_db.abs() > 0.001
+        self.rev != self.loaded_rev || self.crop.is_some() || self.sel != (0, self.frames()) || self.gain_db.abs() > 0.001
+    }
+
+    /// Audio was cut or pasted into and that hasn't been written anywhere yet.
+    pub fn is_dirty(&self) -> bool {
+        self.current.is_some() && self.rev != self.clean_rev
+    }
+
+    fn refresh_file_stats(&mut self) {
+        if let Some(f) = &self.full {
+            let n = f.sample.frames();
+            self.file_stats = stats::compute(&f.sample.channels, 0, n, 1.0);
+        }
+    }
+
+    // ---- cut / copy / paste ------------------------------------------------
+
+    /// Whether the selection is "everything shown", i.e. nothing picked out.
+    fn whole_selected(&self) -> bool {
+        self.sel == (0, self.frames())
+    }
+
+    /// Copy the selection, with gain, to the editor clipboard.
+    pub fn copy(&mut self) -> bool {
+        let Some(s) = self.sample() else { return false };
+        let (a, b) = self.sel;
+        let g = self.gain();
+        let channels = s.channels.iter().map(|c| c[a..b].iter().map(|x| x * g).collect()).collect();
+        self.clip = Some(AudioClip { rate: s.rate, channels });
+        true
+    }
+
+    /// Whether removing the selection would leave some audio behind.
+    pub fn can_remove(&self) -> bool {
+        let Some(full) = &self.full else { return false };
+        self.current.is_some() && full.sample.frames() > self.sel.1 - self.sel.0
+    }
+
+    pub fn cut(&mut self) -> bool {
+        if !self.can_remove() || !self.copy() {
+            return false;
+        }
+        self.delete()
+    }
+
+    /// Remove the selection without touching the clipboard.
+    pub fn delete(&mut self) -> bool {
+        if !self.can_remove() {
+            return false;
+        }
+        let (a, b) = self.sel;
+        self.splice(a, b, &[]);
+        true
+    }
+
+    pub fn can_paste(&self) -> bool {
+        self.current.is_some() && self.clip.as_ref().is_some_and(|c| c.frames() > 0)
+    }
+
+    /// Insert the clipboard at the playhead, or over the selection if part
+    /// of the file is selected. The playhead ends up after the pasted audio,
+    /// so pasting again continues from there.
+    pub fn paste(&mut self) -> bool {
+        if !self.can_paste() {
+            return false;
+        }
+        let (Some(s), Some(clip)) = (self.sample(), &self.clip) else { return false };
+        let ins = clip.adapt(s.rate, s.channels.len());
+        let (a, b) = if self.whole_selected() {
+            let p = self.playhead.min(self.frames());
+            (p, p)
+        } else {
+            self.sel
+        };
+        self.splice(a, b, &ins);
+        true
+    }
+
+    /// Replace `[a, b)` of the shown sample with `ins` (one Vec per channel).
+    /// The edit goes into the whole file; a crop around it grows or shrinks
+    /// with it. Afterwards nothing is selected and the playhead sits at the
+    /// end of what went in.
+    fn splice(&mut self, a: usize, b: usize, ins: &[Vec<f32>]) {
+        let Some(full) = &self.full else { return };
+        let off = self.crop_offset();
+        let (fa, fb) = (a + off, b + off);
+        let n = ins.first().map_or(0, Vec::len);
+        let fs = &full.sample;
+        let channels: Vec<Vec<f32>> = fs
+            .channels
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut v = Vec::with_capacity(c.len() - (fb - fa) + n);
+                v.extend_from_slice(&c[..fa]);
+                if let Some(x) = ins.get(i) {
+                    v.extend_from_slice(x);
+                }
+                v.extend_from_slice(&c[fb..]);
+                v
+            })
+            .collect();
+        let sample = Sample {
+            path: fs.path.clone(),
+            rate: fs.rate,
+            channels,
+            bits: fs.bits,
+            format: fs.format.clone(),
+            file_len: fs.file_len,
+        };
+        let total = sample.frames();
+        let new_full = Loaded::new(sample);
+        self.full = Some(new_full.clone());
+        self.next_rev += 1;
+        self.rev = self.next_rev;
+        self.refresh_file_stats();
+        self.drag = None;
+        self.stats_key = None;
+        let caret = fa + n;
+        match self.crop {
+            Some((ca, cb)) if cb + n > ca + (fb - fa) => {
+                let cb = cb + n - (fb - fa);
+                self.sel = (ca, cb);
+                self.playhead = caret;
+                self.apply_crop(ca, cb);
+                // apply_crop asks for a refit; keep the view where it is.
+                self.view.fit_pending = false;
+            }
+            _ => {
+                // No crop, or the whole crop was cut away.
+                if self.crop.take().is_some() {
+                    self.view.fit_pending = true;
+                }
+                self.current = Some(new_full);
+                self.sel = (0, total);
+                self.playhead = caret.min(total);
+            }
+        }
     }
 
     // ---- export -----------------------------------------------------------
@@ -768,9 +1005,10 @@ impl Editor {
         let r = Render { start: self.sel.0, end: self.sel.1, gain: self.gain(), mono };
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
+        let rev = self.rev;
         let _ = std::thread::Builder::new().name("export".into()).spawn(move || {
-            let res = export::write_wav(&sample, &r, &target);
-            let _ = tx.send(Ev::Exported(res));
+            let result = export::write_wav(&sample, &r, &target);
+            let _ = tx.send(Ev::Exported { rev, result });
             ctx.request_repaint();
         });
     }

@@ -21,7 +21,7 @@ use crate::preview::Preview;
 use crate::sizes::SizeCache;
 use crate::state;
 use crate::tab::DirTab;
-use crate::ui::dialogs::{self, Decision, MonoChoice};
+use crate::ui::dialogs::{self, Decision, LeaveChoice, MonoChoice};
 use crate::ui::theme;
 use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
 use std::path::{Path, PathBuf};
@@ -46,6 +46,17 @@ enum PlanKind {
     Device { dir: device::Dir, mono: bool },
     /// The editor's export, rendered locally and then uploaded (one op).
     DeviceExport { mono: bool },
+}
+
+/// What was about to happen when the editor's unsaved audio edits got in
+/// the way.
+#[derive(Clone)]
+enum Leave {
+    /// Load another file (`audition` arguments).
+    Audition(PathBuf, bool),
+    /// `load_into_editor`, e.g. a fresh download from the device.
+    LoadEditor(PathBuf),
+    Quit,
 }
 
 /// An editor export rendered to a temp file, waiting to be uploaded.
@@ -131,6 +142,14 @@ pub struct App {
     device_load_pending: Option<(PathBuf, u64)>,
     /// Download job fetching a device file for the editor, and where it lands.
     device_load: Option<(u64, PathBuf)>,
+    /// Waiting on the "unsaved edits" question.
+    leave_pending: Option<Leave>,
+    /// Chose to save first: carry on with this once the export lands.
+    leave_after_save: Option<Leave>,
+    /// The user okayed closing the window with edits unsaved (or saved them).
+    allow_close: bool,
+    /// Close once the running job (an upload of the saved edit) finishes.
+    close_when_idle: bool,
 }
 
 impl App {
@@ -211,6 +230,10 @@ impl App {
             window_focused: true,
             device_load_pending: None,
             device_load: None,
+            leave_pending: None,
+            leave_after_save: None,
+            allow_close: false,
+            close_when_idle: false,
             jobs,
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
@@ -795,25 +818,11 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
         let renaming = self.pane(self.focused).active_tab().renaming.is_some();
-        if renaming || self.pending.is_some() || self.device_load_pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
+        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
             return; // a text field (filter box, typed value) has the keyboard
-        }
-
-        if self.editor_focused {
-            let actions = ui.input(keymap::editor_actions);
-            let wave = self.editor.wave_rect;
-            for a in actions {
-                self.perform_editor(a, wave);
-            }
-            return;
-        }
-
-        let actions = ui.input(|i| self.keymap.actions(i));
-        for action in actions {
-            self.perform(action);
         }
 
         // ⌘X / ⌘C / ⌘V arrive as clipboard events, not key presses.
@@ -824,6 +833,24 @@ impl App {
                 .cloned()
                 .collect()
         });
+
+        if self.editor_focused {
+            let actions = ui.input(keymap::editor_actions);
+            let wave = self.editor.wave_rect;
+            for a in actions {
+                self.perform_editor(a, wave);
+            }
+            for e in clip {
+                self.editor_clipboard(&e);
+            }
+            return;
+        }
+
+        let actions = ui.input(|i| self.keymap.actions(i));
+        for action in actions {
+            self.perform(action);
+        }
+
         let role = self.focused;
         for e in clip {
             match e {
@@ -836,6 +863,35 @@ impl App {
     }
 
     // ---- clipboard --------------------------------------------------------
+
+    /// Cut / copy / paste of audio inside the editor.
+    fn editor_clipboard(&mut self, e: &egui::Event) {
+        let ed = &mut self.editor;
+        let secs = |f: usize, rate: u32| f as f64 / rate.max(1) as f64;
+        match e {
+            egui::Event::Cut | egui::Event::Copy => {
+                let cut = matches!(e, egui::Event::Cut);
+                let ok = if cut { ed.cut() } else { ed.copy() };
+                if let (true, Some(c)) = (ok, &ed.clip) {
+                    let verb = if cut { "Cut" } else { "Copied" };
+                    self.status = format!("{verb} {:.3}s of audio — ⌘V pastes it here or into another file", secs(c.frames(), c.rate));
+                } else if cut {
+                    self.status = "Can't cut everything — select part of the file first".to_owned();
+                }
+            }
+            egui::Event::Paste(_) => {
+                if let Some(c) = &ed.clip {
+                    let len = secs(c.frames(), c.rate);
+                    if ed.paste() {
+                        self.status = format!("Pasted {len:.3}s");
+                    }
+                } else {
+                    self.status = "Nothing to paste — copy some audio in the editor first".to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn set_clipboard(&mut self, kind: Kind, role: Role, paths: Vec<PathBuf>) {
         if paths.is_empty() {
@@ -909,6 +965,10 @@ impl App {
             if play {
                 self.start_play();
             }
+            return;
+        }
+        if self.editor.is_dirty() {
+            self.leave_pending = Some(Leave::Audition(path.to_path_buf(), play));
             return;
         }
         if self.engine.is_playing() {
@@ -1011,6 +1071,62 @@ impl App {
         self.offer(plan, PlanKind::Export { mono });
     }
 
+    /// Write what you hear back over the open file (as `<stem>.wav` beside
+    /// it when it isn't a WAV). Folded to mono only if you're listening so.
+    fn save_in_place(&mut self) {
+        let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        if self.editor.exporting {
+            return;
+        }
+        let Some(dir) = src.parent() else { return };
+        let target = crate::audio::export::target_for(&src, dir);
+        self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
+        let mono = self.editor.mono_active();
+        self.editor.export(target, mono);
+    }
+
+    /// Do what the unsaved-edits question interrupted.
+    fn finish_leave(&mut self, leave: Leave) {
+        match leave {
+            Leave::Audition(p, play) => self.audition(&p, play),
+            Leave::LoadEditor(p) => self.load_into_editor(&p),
+            Leave::Quit => {
+                self.allow_close = true;
+                if self.active_job.is_some() {
+                    // An upload of the saved edit is still going.
+                    self.close_when_idle = true;
+                    self.status = "Quitting once the transfer finishes…".to_owned();
+                } else {
+                    self.ctx_close();
+                }
+            }
+        }
+    }
+
+    fn ctx_close(&self) {
+        self.editor_ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn answer_leave(&mut self, leave: Leave, choice: LeaveChoice) {
+        match choice {
+            LeaveChoice::Cancel => {
+                self.status = "Kept editing — the edits are still unsaved".to_owned();
+            }
+            LeaveChoice::Discard => {
+                self.editor.discard();
+                self.finish_leave(leave);
+            }
+            LeaveChoice::SaveInPlace => {
+                self.leave_after_save = Some(leave);
+                self.save_in_place();
+            }
+            LeaveChoice::Commit => {
+                self.leave_after_save = Some(leave);
+                self.export();
+            }
+        }
+    }
+
     fn perform_editor(&mut self, a: EdAction, wave: Option<egui::Rect>) {
         let ed = &mut self.editor;
         let frames = ed.frames();
@@ -1098,6 +1214,12 @@ impl App {
             EdAction::SelectAll => ed.select_all(),
             EdAction::Normalize => ed.normalize(),
             EdAction::Export => self.export(),
+            EdAction::Delete => {
+                if !ed.delete() {
+                    self.status = "Can't delete everything — select part of the file first".to_owned();
+                }
+            }
+            EdAction::SaveInPlace => self.save_in_place(),
             EdAction::NextFile => self.step_file(1),
             EdAction::PrevFile => self.step_file(-1),
             EdAction::SwitchPane => {
@@ -1315,6 +1437,10 @@ impl App {
     /// (a fresh download over the same temp file).
     fn load_into_editor(&mut self, path: &Path) {
         let play = self.editor.prefs.auto_play;
+        if self.editor.is_dirty() {
+            self.leave_pending = Some(Leave::LoadEditor(path.to_path_buf()));
+            return;
+        }
         if self.editor.path() == Some(path) {
             if self.voice_path.as_deref() == Some(path) {
                 self.engine.stop();
@@ -1515,6 +1641,45 @@ impl eframe::App for App {
             }
         }
 
+        // Closing the window with unsaved audio edits: ask first.
+        let close = ui.ctx().input(|i| i.viewport().close_requested());
+        if close && self.editor.is_dirty() && !self.allow_close {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.leave_pending.is_none() && self.leave_after_save.is_none() {
+                self.leave_pending = Some(Leave::Quit);
+            }
+        }
+
+        if let Some(leave) = self.leave_pending.clone() {
+            let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+            let tab = self.pane(Role::Dest).active_tab();
+            let dest = (!tab.loading).then(|| {
+                let d = tab.cwd.file_name().map_or_else(|| tab.cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
+                if tab.device { format!("{d} on the Digitakt") } else { d }
+            });
+            let quitting = matches!(leave, Leave::Quit);
+            if let Some(c) = dialogs::leave_editor(ui.ctx(), &name, quitting, dest.as_deref()) {
+                self.leave_pending = None;
+                self.answer_leave(leave, c);
+            }
+        }
+
+        // A save chosen in that dialog that never got going (its conflict or
+        // mono question was cancelled, or everything was skipped): drop it.
+        if self.leave_after_save.is_some()
+            && !self.editor.exporting
+            && self.pending.is_none()
+            && self.mono_pending.is_none()
+            && self.staged_upload.is_none()
+        {
+            self.leave_after_save = None;
+        }
+
+        if self.close_when_idle && self.active_job.is_none() {
+            self.close_when_idle = false;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         self.handle_keys(ui);
         self.follow_cursor();
 
@@ -1548,6 +1713,7 @@ impl App {
                 }
                 Outcome::Exported(p) if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) => {
                     let s = self.staged_upload.take().expect("checked above");
+                    let leave = self.leave_after_save.take();
                     let task = device::Task::Transfer {
                         dir: device::Dir::Upload,
                         items: vec![(s.staged, s.dest_dir)],
@@ -1557,6 +1723,9 @@ impl App {
                     };
                     self.status = "Sending to the Digitakt…".to_owned();
                     self.run_device(task, "", 1, 0);
+                    if let Some(l) = leave {
+                        self.finish_leave(l);
+                    }
                 }
                 Outcome::Exported(p) => {
                     self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
@@ -1571,6 +1740,9 @@ impl App {
                         self.sizes.invalidate_subtree(dir);
                         self.reload_showing(dir, false);
                     }
+                    if let Some(l) = self.leave_after_save.take() {
+                        self.finish_leave(l);
+                    }
                 }
                 Outcome::BatchExported(dir, n) => {
                     self.status = format!("Folded {n} file(s) to mono");
@@ -1578,8 +1750,10 @@ impl App {
                     self.reload_showing(&dir, false);
                 }
                 Outcome::Error(e) => {
-                    // A failed render never reaches the upload.
+                    // A failed render never reaches the upload, and the
+                    // edits it was saving are still unsaved: stay put.
                     self.staged_upload = None;
+                    self.leave_after_save = None;
                     self.errors.push(e);
                 }
             }

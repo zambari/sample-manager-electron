@@ -22,6 +22,7 @@ pub enum EdIntent {
     /// Playhead was moved while playing: jump the voice there.
     Seek(usize),
     Export,
+    SaveInPlace,
 }
 
 const RULER_H: f32 = 18.0;
@@ -164,7 +165,9 @@ fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) 
         ui.separator();
         if let Some(p) = ed.path() {
             let mut name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            if ed.is_edited() {
+            if ed.is_dirty() {
+                name.push_str("  ● unsaved");
+            } else if ed.is_edited() {
                 name.push_str("  •");
             }
             ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
@@ -278,6 +281,33 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
             }
             if ui.add_enabled(ed.can_redo(), egui::Button::new("↷ Redo")).on_hover_text("⇧⌘Z").clicked() {
                 ed.redo();
+            }
+            ui.separator();
+            let whole = ed.sel == (0, ed.frames());
+            if ui
+                .add_enabled(ed.can_remove(), egui::Button::new("Cut"))
+                .on_hover_text("⌘X — take the selection out of the audio, onto the clipboard")
+                .clicked()
+            {
+                ed.cut();
+            }
+            if ui.button("Copy").on_hover_text("⌘C — copy the selection (with gain) to the clipboard. It stays there when you open another file.").clicked() {
+                ed.copy();
+            }
+            let paste_tip = match &ed.clip {
+                Some(c) if whole => format!("⌘V — insert {:.3}s at the playhead", c.frames() as f64 / c.rate.max(1) as f64),
+                Some(c) => format!("⌘V — replace the selection with {:.3}s", c.frames() as f64 / c.rate.max(1) as f64),
+                None => "⌘V — nothing copied yet".to_owned(),
+            };
+            if ui.add_enabled(ed.can_paste(), egui::Button::new("Paste")).on_hover_text(paste_tip).clicked() {
+                ed.paste();
+            }
+            if ui
+                .add_enabled(ed.is_dirty() && !ed.exporting, egui::Button::new("Save"))
+                .on_hover_text("⌘S — write what you hear back over the original file")
+                .clicked()
+            {
+                out.push(EdIntent::SaveInPlace);
             }
             ui.separator();
             if ui
