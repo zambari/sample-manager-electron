@@ -556,10 +556,15 @@ impl App {
                     self.status = format!("Checking {} files for duplicates…", paths.len());
                     self.jobs.find_duplicates(paths);
                 }
-                Intent::NewFolder(dir) => self.new_folder(role, dir, None),
-                Intent::NewFolderNamed { dir, name } => self.new_folder(role, dir, Some(name)),
+                Intent::NewFolder { dir, base } => self.new_folder(role, dir, None, base),
+                Intent::NewFolderNamed { dir, name } => self.new_folder(role, dir, Some(name), None),
                 Intent::NewFolderWith { dir, paths } => self.new_folder_with(role, dir, paths),
                 Intent::LoadFromDevice(p) => self.ask_device_load(p),
+                Intent::MonoCopy { dirs, folds } => {
+                    for d in dirs {
+                        self.mono_copy(d, folds.clone());
+                    }
+                }
             }
         }
     }

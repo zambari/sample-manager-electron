@@ -509,6 +509,7 @@ impl App {
                     }
                 }
                 Ev::Applied { job, done, replaced } => self.applied(job, done, replaced),
+                Ev::Note { job, text } => self.finish_note = Some((job, text)),
                 Ev::DeviceStatus(s) => {
                     if let Err(e) = &s {
                         crate::log::line(format!("device status: {e}"));

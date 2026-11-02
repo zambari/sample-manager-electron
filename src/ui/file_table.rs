@@ -60,14 +60,18 @@ pub enum Intent {
     Reveal(PathBuf),
     /// Find identical files among these and offer to trash the extras.
     RemoveDuplicates(Vec<PathBuf>),
-    /// Make a new folder in this directory and start renaming it.
-    NewFolder(PathBuf),
+    /// Make a new folder in `dir` and start renaming it. With `base`, the
+    /// proposed name starts with that (the right-clicked folder's name).
+    NewFolder { dir: PathBuf, base: Option<String> },
     /// Make a folder with this exact name in this directory.
     NewFolderNamed { dir: PathBuf, name: String },
     /// Make a new folder in `dir`, move these into it, and start renaming it.
     NewFolderWith { dir: PathBuf, paths: Vec<PathBuf> },
     /// Fetch this device file and open it in the editor (after a warning).
     LoadFromDevice(PathBuf),
+    /// Make a "<name> Mono" copy of each of these folders, folding stereo
+    /// files down each of these ways.
+    MonoCopy { dirs: Vec<PathBuf>, folds: Vec<crate::audio::stats::Fold> },
 }
 
 pub struct TableCtx<'a> {
@@ -229,7 +233,7 @@ fn rows(
         intents.push(Intent::TookFocus);
     }
     bg.context_menu(|ui| {
-        new_folder_button(ui, cx, tab.cwd.clone(), intents);
+        new_folder_button(ui, cx, tab.cwd.clone(), None, intents);
         paste_button(ui, cx, None, intents);
         if !tab.device {
             reveal_button(ui, tab.cwd.clone(), intents);
@@ -530,6 +534,26 @@ fn row(
             intents.push(Intent::WantSize(vec![entry.path.clone()]));
             ui.close();
         }
+        if local && entry.is_dir {
+            let dirs: Vec<PathBuf> = tab.effective_selection().into_iter().filter(|p| p.is_dir()).collect();
+            ui.menu_button("Make mono copy", |ui| {
+                use crate::audio::stats::Fold;
+                let opts: [(&str, &str, &[Fold]); 4] = [
+                    ("Left + Right", "Each stereo file becomes two: \"name L\" and \"name R\"", &[Fold::Left, Fold::Right]),
+                    ("Left only", "Keep the left channel of stereo files", &[Fold::Left]),
+                    ("Right only", "Keep the right channel of stereo files", &[Fold::Right]),
+                    ("Mix", "Average both channels of stereo files", &[Fold::Mix]),
+                ];
+                for (label, hint, folds) in opts {
+                    if ui.button(label).on_hover_text(hint).clicked() {
+                        intents.push(Intent::MonoCopy { dirs: dirs.clone(), folds: folds.to_vec() });
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Copy the folder's samples to \"<name> Mono\": mono files as they are, stereo ones folded down");
+        }
         if local && entry.is_dir && ui.button("Add to favourites").clicked() {
             intents.push(Intent::AddFavourite(entry.path.clone()));
             ui.close();
@@ -544,7 +568,8 @@ fn row(
         }
         // Next to the row, i.e. in the folder the row sits in.
         if let Some(parent) = entry.path.parent() {
-            new_folder_button(ui, cx, parent.to_path_buf(), intents);
+            let base = entry.is_dir.then(|| entry.name.clone());
+            new_folder_button(ui, cx, parent.to_path_buf(), base, intents);
             if local {
                 let sel = tab.effective_selection();
                 let label = if sel.len() == 1 { "New folder with this item".to_owned() } else { format!("New folder with {} items", sel.len()) };
@@ -724,9 +749,9 @@ fn paste_button(ui: &mut Ui, cx: &TableCtx<'_>, target: Option<PathBuf>, intents
     }
 }
 
-fn new_folder_button(ui: &mut Ui, cx: &TableCtx<'_>, dir: PathBuf, intents: &mut Vec<Intent>) {
+fn new_folder_button(ui: &mut Ui, cx: &TableCtx<'_>, dir: PathBuf, base: Option<String>, intents: &mut Vec<Intent>) {
     if ui.button("New folder").clicked() {
-        intents.push(Intent::NewFolder(dir.clone()));
+        intents.push(Intent::NewFolder { dir: dir.clone(), base });
         ui.close();
     }
     if let Some(name) = &cx.other_folder {

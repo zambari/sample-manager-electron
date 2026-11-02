@@ -261,9 +261,9 @@ impl App {
     }
 
     /// Make "New Folder" (or "New Folder 2", ...) in `dir` and open the
-    /// inline rename on it. With `named`, make exactly that folder and just
-    /// select it.
-    pub(super) fn new_folder(&mut self, role: Role, dir: PathBuf, named: Option<String>) {
+    /// inline rename on it. With `base`, propose "<base> 2", "<base> 3", ...
+    /// instead. With `named`, make exactly that folder and just select it.
+    pub(super) fn new_folder(&mut self, role: Role, dir: PathBuf, named: Option<String>, base: Option<String>) {
         let device = self.pane(role).active_tab().device;
         if let Some(name) = named {
             let path = dir.join(&name);
@@ -295,32 +295,40 @@ impl App {
             tab.cursor = None;
             return;
         }
-        const BASE: &str = "New Folder";
-        let path = if device {
-            let taken: std::collections::HashSet<String> = [&self.source, &self.dest]
+        // With a base (the right-clicked folder, which already exists here),
+        // start numbering at 2; otherwise try plain "New Folder" first.
+        let (base, first) = match base {
+            Some(b) => (b, None),
+            None => ("New Folder".to_owned(), Some("New Folder".to_owned())),
+        };
+        let taken: std::collections::HashSet<String> = if device {
+            [&self.source, &self.dest]
                 .into_iter()
                 .flat_map(|p| p.tabs.iter())
                 .filter(|t| t.device)
                 .find_map(|t| t.listing_of(&dir))
                 .map(|l| l.iter().map(|e| e.name.clone()).collect())
-                .unwrap_or_default();
-            let name = std::iter::once(BASE.to_owned())
-                .chain((2..10_000).map(|n| format!("{BASE} {n}")))
-                .find(|n| !taken.contains(n))
-                .unwrap_or_else(|| BASE.to_owned());
-            let path = dir.join(name);
-            self.run_device(device::Task::Mkdir { path: path.clone() }, "Creating folder", 1, 0);
-            path
+                .unwrap_or_default()
         } else {
-            let path = fs_model::unique_sibling(&dir.join(BASE));
+            Default::default()
+        };
+        let free = |n: &String| if device { !taken.contains(n) } else { !dir.join(n).exists() };
+        let name = first
+            .into_iter()
+            .chain((2..10_000).map(|n| format!("{base} {n}")))
+            .find(|n| free(n))
+            .unwrap_or_else(|| format!("{base} new"));
+        let path = dir.join(&name);
+        if device {
+            self.run_device(device::Task::Mkdir { path: path.clone() }, "Creating folder", 1, 0);
+        } else {
             if let Err(e) = std::fs::create_dir(&path) {
                 self.errors.push(format!("{}: {e}", path.display()));
                 return;
             }
             self.push_undo(undo::FileUndo::NewFolder(path.clone()));
             self.reload_showing(&dir, false);
-            path
-        };
+        }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.focused = role;
         self.editor_focused = false;

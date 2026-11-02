@@ -6,6 +6,7 @@
 //! The UI never blocks: it posts a request, keeps rendering from cached state,
 //! and picks up [`Ev`] messages in `App::logic`.
 
+use crate::audio::stats::Fold;
 use crate::fs_model::{self, Entry};
 
 use crate::ops::{Kind, Op};
@@ -78,6 +79,8 @@ pub enum Ev {
     DeviceStatus(Result<String, String>),
     /// The device's MIDI port went away (unplugged or switched off).
     DeviceLost,
+    /// A summary to show in place of "Done" when `job` finishes.
+    Note { job: u64, text: String },
 }
 
 /// Files with identical contents: `keep` has the shortest name.
@@ -194,6 +197,14 @@ impl Jobs {
             let (groups, errors) = find_duplicates(&paths);
             em.send(Ev::Duplicates { groups, errors });
         });
+    }
+
+    /// Copy the audio in `src` to a new folder `dst`, mono files as they
+    /// are and stereo ones folded down once per entry of `folds`.
+    pub fn mono_copy(&mut self, src: PathBuf, dst: PathBuf, folds: Vec<Fold>) -> u64 {
+        let (job, cancel) = self.register();
+        self.spawn("mono_copy", move |em| mono_copy(em, job, src, dst, folds, cancel));
+        job
     }
 
     pub fn trash(&mut self, paths: Vec<PathBuf>) -> u64 {
@@ -589,4 +600,99 @@ fn copy_file(
     }
     w.flush()?;
     Ok(())
+}
+
+/// See [`Jobs::mono_copy`]. Only audio files are copied; the folder layout
+/// is kept. Nothing is made unless at least one file is stereo.
+fn mono_copy(em: Emitter, job: u64, src: PathBuf, dst: PathBuf, folds: Vec<Fold>, cancel: Arc<AtomicBool>) {
+    use crate::audio::{decode, export};
+    let finish = |touched: Vec<PathBuf>, errors: Vec<String>, cancelled: bool| {
+        em.send(Ev::Finished { job, touched, device_touched: Vec::new(), errors, cancelled });
+    };
+    let progress = |done_items: usize, total_items: usize, label: String| {
+        em.send(Ev::Progress { job, done_bytes: 0, total_bytes: 0, done_items, total_items, label, file: None });
+    };
+    let name_of = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+    // Hidden files include macOS "._" sidecars, which look like audio by name.
+    let files: Vec<PathBuf> = walkdir::WalkDir::new(&src)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+        .filter(|d| d.file_type().is_file() && !d.file_name().to_string_lossy().starts_with('.'))
+        .map(|d| d.into_path())
+        .filter(|p| fs_model::is_audio_path(p))
+        .collect();
+    let total = files.len();
+
+    // Header-only pass first, so an all-mono folder costs no decoding.
+    let mut chans = Vec::with_capacity(total);
+    for (i, f) in files.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return finish(Vec::new(), Vec::new(), true);
+        }
+        if i % 16 == 0 {
+            progress(i, total, format!("Checking {}", name_of(f)));
+        }
+        chans.push(decode::channel_count(f));
+    }
+    // Unknown counts get decoded to find out.
+    if !chans.iter().any(|c| c.is_none_or(|n| n > 1)) {
+        em.send(Ev::Note { job, text: format!("{}: no stereo files, nothing to do", name_of(&src)) });
+        return finish(Vec::new(), Vec::new(), false);
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&dst) {
+        return finish(Vec::new(), vec![format!("{}: {e}", dst.display())], false);
+    }
+    let mut errors = Vec::new();
+    let (mut copied, mut split) = (0usize, 0usize);
+    for (i, (f, ch)) in files.iter().zip(&chans).enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        progress(i, total, name_of(f));
+        let rel = f.strip_prefix(&src).unwrap_or(f);
+        let out_dir = dst.join(rel.parent().unwrap_or(Path::new("")));
+        let res = std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string()).and_then(|()| {
+            let copy = |copied: &mut usize| {
+                std::fs::copy(f, fs_model::unique_sibling(&out_dir.join(name_of(f)))).map_err(|e| e.to_string())?;
+                *copied += 1;
+                Ok(())
+            };
+            if *ch == Some(1) {
+                return copy(&mut copied);
+            }
+            let s = decode::decode(f)?;
+            if s.channels.len() < 2 {
+                return copy(&mut copied);
+            }
+            let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            for &fold in &folds {
+                // One variant keeps the name; several get " L" / " R" / " Mix".
+                let name = if folds.len() == 1 { format!("{stem}.wav") } else { format!("{stem} {}.wav", fold.short()) };
+                let r = export::Render { start: 0, end: s.frames(), gain: 1.0, mono: Some(fold) };
+                export::write_wav(&s, &r, &fs_model::unique_sibling(&out_dir.join(name)))?;
+            }
+            split += 1;
+            Ok(())
+        });
+        if let Err(e) = res {
+            errors.push(format!("{}: {e}", f.display()));
+        }
+    }
+    let cancelled = cancel.load(Ordering::Relaxed);
+    let touched: Vec<PathBuf> = dst.parent().map(Path::to_path_buf).into_iter().collect();
+    if cancelled {
+        // Don't leave half a copy behind; the Trash keeps it just in case.
+        let _ = trash_one(&dst);
+        return finish(touched, errors, true);
+    }
+    let what = folds.iter().map(|f| f.short()).collect::<Vec<_>>().join(" + ");
+    em.send(Ev::Note {
+        job,
+        text: format!("Made {}: {split} stereo file(s) folded to {what}, {copied} mono file(s) copied", name_of(&dst)),
+    });
+    em.send(Ev::Applied { job, done: vec![(src.clone(), dst.clone())], replaced: false });
+    finish(touched, errors, false);
 }

@@ -94,6 +94,27 @@ impl App {
         id
     }
 
+    /// Copy `dir`'s samples to a new "<name> Mono" folder beside it, stereo
+    /// files folded down each of `folds` ways. Undo trashes the new folder.
+    pub(super) fn mono_copy(&mut self, dir: PathBuf, folds: Vec<crate::audio::stats::Fold>) {
+        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else { return };
+        let dst = crate::fs_model::unique_sibling(&parent.join(format!("{} Mono", name.to_string_lossy())));
+        let id = self.jobs.mono_copy(dir, dst, folds);
+        self.active_jobs.push(ActiveJob {
+            id,
+            label: String::new(),
+            done_bytes: 0,
+            total_bytes: 0,
+            done_items: 0,
+            total_items: 0,
+            started: true,
+            file: None,
+            file_bar: false,
+        });
+        self.undo_jobs.insert(id, UndoJob::Copy);
+        self.status = "Making mono copy…".to_owned();
+    }
+
     pub(super) fn undo_file(&mut self) {
         if !self.active_jobs.is_empty() {
             self.status = "Undo waits until the running job finishes".to_owned();
