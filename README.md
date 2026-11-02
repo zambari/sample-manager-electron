@@ -13,6 +13,54 @@ Elektron Digitakt.
 
 Built in Rust with [egui](https://github.com/emilk/egui).
 
+![Sample Manager: source browser, sample editor and destination browser](docs/screenshot.webp)
+
+## How it works
+
+The window is a sandwich: a **source** browser on the left, a
+**destination** browser on the right, and a **sample editor** in between.
+The idea is to dig through a large sample library quickly, cut out just the
+bits you want, make them mono if needed, and drop them into a target
+folder. That target can be another local folder or an Elektron machine's
++Drive.
+
+**Source (left).** Where you browse your library. Tabs at the top hold
+bookmarked folders (★ adds favourites, `+Drive` opens a connected Elektron
+device). Sort by name, size, date or kind, type to filter, switch to a tree
+view, or tick *All files* to list every file below the current folder.
+Selecting a file loads it into the editor (and plays it, with *Auto-play*
+on), so you can step through hundreds of samples with the arrow keys.
+
+**Sample editor (centre).** Trim the loaded sample down to the part you
+want. The *Show* row toggles panels on and off:
+
+- **Transport**: play/stop, loop, follow playhead, snap to zero crossings,
+  auto-load and auto-play.
+- **Tools**: undo/redo, cut/copy/paste, save, crop/uncrop to the selection,
+  halve or double the loop, and the channel mode: keep *Stereo*, *Mix* to
+  mono, or keep only *L* or *R*.
+- **Wave**: the main waveform. The green and red markers are the in and
+  out points; the shaded part between them is the selection.
+- **Scalpel**: a 40 ms close-up around the playhead for precise cuts.
+- **Map**: the whole file at a glance; click to jump.
+- **Gain**: gain and normalise.
+- **Stats**: file statistics and a phase meter.
+
+*Export → Destination* writes the selection, with the chosen channel mode,
+into the folder open on the right.
+
+**Destination (right).** The target folder, with the same tabs and
+browsing tools as the source. It can be a local folder or the +Drive of a
+Digitakt (or another Elektron sampler) over USB.
+
+**Commit to destination** (top right) copies the source selection into the
+active destination tab. If a single file is open in the editor, it is
+written as you hear it: trimmed, with gain and mono settings applied, and
+the original stays untouched. *Move* does the same but moves the files.
+
+**Top bar.** Audio output device and its sample rate, and a toggle for
+showing hidden files.
+
 ## Building
 
 Install Rust from <https://rustup.rs>, then:
