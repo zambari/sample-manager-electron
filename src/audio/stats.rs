@@ -76,9 +76,41 @@ pub fn mono_at(channels: &[Vec<f32>], i: usize) -> f32 {
     channels.iter().map(|c| c[i]).sum::<f32>() / channels.len().max(1) as f32
 }
 
-pub fn mono_region(channels: &[Vec<f32>], start: usize, end: usize) -> Vec<f32> {
+/// How multichannel audio is folded down to one channel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum Fold {
+    /// Average of all channels.
+    #[default]
+    Mix,
+    /// Keep only the left channel.
+    Left,
+    /// Keep only the right channel.
+    Right,
+}
+
+impl Fold {
+    pub const ALL: [Fold; 3] = [Fold::Mix, Fold::Left, Fold::Right];
+
+    pub fn short(self) -> &'static str {
+        match self {
+            Fold::Mix => "Mix",
+            Fold::Left => "L",
+            Fold::Right => "R",
+        }
+    }
+
+    pub fn at(self, channels: &[Vec<f32>], i: usize) -> f32 {
+        match self {
+            Fold::Mix => mono_at(channels, i),
+            Fold::Left => channels[0][i],
+            Fold::Right => channels[1.min(channels.len() - 1)][i],
+        }
+    }
+}
+
+pub fn fold_region(channels: &[Vec<f32>], start: usize, end: usize, fold: Fold) -> Vec<f32> {
     let end = end.min(channels.first().map_or(0, Vec::len));
-    (start.min(end)..end).map(|i| mono_at(channels, i)).collect()
+    (start.min(end)..end).map(|i| fold.at(channels, i)).collect()
 }
 
 pub fn phase(channels: &[Vec<f32>], start: usize, end: usize) -> Phase {

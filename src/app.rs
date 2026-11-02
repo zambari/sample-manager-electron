@@ -19,9 +19,10 @@ use crate::ops::{self, Clipboard, Kind, Plan, Policy};
 use crate::pane::{Pane, Role};
 use crate::preview::Preview;
 use crate::sizes::SizeCache;
+use crate::audio::stats::Fold;
 use crate::state;
 use crate::tab::DirTab;
-use crate::ui::dialogs::{self, Decision, LeaveChoice, MonoChoice};
+use crate::ui::dialogs::{self, Decision, LeaveChoice};
 use crate::ui::theme;
 use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
 use std::path::{Path, PathBuf};
@@ -40,12 +41,12 @@ enum PlanKind {
     /// rest are plain copies.
     Commit { fold: std::collections::HashSet<PathBuf>, dest_dir: PathBuf },
     /// The editor's single-file export (one op).
-    Export { mono: bool },
+    Export { mono: Option<Fold> },
     /// Anything touching the Digitakt. Op destinations are only used to ask
     /// about conflicts; the device worker settles the final names.
-    Device { dir: device::Dir, mono: bool },
+    Device { dir: device::Dir, mono: Option<Fold> },
     /// The editor's export, rendered locally and then uploaded (one op).
-    DeviceExport { mono: bool },
+    DeviceExport { mono: Option<Fold> },
 }
 
 /// What was about to happen when the editor's unsaved audio edits got in
@@ -73,6 +74,11 @@ struct ActiveJob {
     total_bytes: u64,
     done_items: usize,
     total_items: usize,
+    /// Has reported progress, so it is running rather than waiting its turn
+    /// (device jobs run one after another).
+    started: bool,
+    /// The file on the wire: `(phase, bytes done, file size)`.
+    file: Option<(&'static str, u64, u64)>,
 }
 
 pub struct App {
@@ -90,9 +96,6 @@ pub struct App {
     next_tab_id: u64,
     show_hidden: bool,
     pending: Option<PendingPlan>,
-    /// Destination of an export waiting on the mono-fold warning, and
-    /// whether it is on the device.
-    mono_pending: Option<(PathBuf, bool)>,
     /// Paths waiting on the "move to Trash?" confirmation; `true` if they
     /// are on the device.
     trash_pending: Option<(bool, Vec<PathBuf>)>,
@@ -100,7 +103,8 @@ pub struct App {
     dupes_pending: Option<Vec<crate::jobs::DupGroup>>,
     /// Paths cut or copied in a file pane, waiting for Paste.
     clipboard: Option<Clipboard>,
-    active_job: Option<ActiveJob>,
+    /// Every job not yet finished, oldest first.
+    active_jobs: Vec<ActiveJob>,
     status: String,
     errors: Vec<String>,
     /// Last state seen by `logic`, to notice changes that need saving.
@@ -193,9 +197,6 @@ impl App {
         let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
         let engine = Engine::open(output_device.as_deref());
         let mut editor = Editor::new(ctx.clone(), saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default());
-        // Mono preview and Save mono are linked; older saved prefs may disagree.
-        let mono = editor.prefs.mono_preview;
-        editor.set_mono(mono);
         let session = saved.as_ref().and_then(|s| s.session.clone()).filter(|s| s.path.is_file());
         if let Some(s) = &session {
             editor.restore_session(s);
@@ -244,11 +245,10 @@ impl App {
             next_tab_id,
             show_hidden: saved.as_ref().is_some_and(|s| s.show_hidden),
             pending: None,
-            mono_pending: None,
             trash_pending: None,
             clipboard: None,
             dupes_pending: None,
-            active_job: None,
+            active_jobs: Vec::new(),
             status: String::new(),
             errors,
             last_state: None,
@@ -472,7 +472,7 @@ impl App {
 
         // Otherwise trim and gain don't apply; files are copied as they are,
         // except multichannel audio when "save mono" is on, which gets folded.
-        let (fold, copy): (Vec<PathBuf>, Vec<PathBuf>) = if self.editor.prefs.save_mono {
+        let (fold, copy): (Vec<PathBuf>, Vec<PathBuf>) = if self.editor.prefs.mono.is_some() {
             sources.into_iter().partition(|p| {
                 p.is_file()
                     && crate::fs_model::is_audio_path(p)
@@ -551,7 +551,7 @@ impl App {
         if kind == Kind::Move && dir != device::Dir::Move {
             self.status = "Between the computer and the Digitakt, Move copies; originals are kept".to_owned();
         }
-        let mono = dir == device::Dir::Upload && self.editor.prefs.save_mono;
+        let mono = if dir == device::Dir::Upload { self.editor.prefs.mono } else { None };
         self.offer(plan, PlanKind::Device { dir, mono });
     }
 
@@ -573,13 +573,15 @@ impl App {
     fn run_device(&mut self, task: device::Task, label: &str, total_items: usize, total_bytes: u64) -> u64 {
         let (id, cancel) = self.jobs.register();
         self.device.run(id, cancel, task);
-        self.active_job = Some(ActiveJob {
+        self.active_jobs.push(ActiveJob {
             id,
             label: label.to_owned(),
             done_bytes: 0,
             total_bytes,
             done_items: 0,
             total_items,
+            started: false,
+            file: None,
         });
         id
     }
@@ -681,7 +683,7 @@ impl App {
                 if let Some(p) = self.editor.path().map(Path::to_path_buf) {
                     self.mark_committed([p]);
                 }
-                self.status = format!("Exporting{} to {}…", if mono { " (mono)" } else { "" }, op.dst.display());
+                self.status = format!("Exporting{} to {}…", mono.map_or(String::new(), |f| format!(" (mono {})", f.short())), op.dst.display());
                 self.editor.export(op.dst, mono);
                 return;
             }
@@ -691,7 +693,7 @@ impl App {
                 if !folds.is_empty() {
                     self.mark_committed(folds.iter().map(|o| o.src.clone()));
                     self.status = format!("Folding {} file(s) to mono…", folds.len());
-                    self.editor.export_mono_batch(folds.into_iter().map(|o| (o.src, o.dst)).collect(), dest_dir);
+                    self.editor.export_mono_batch(folds.into_iter().map(|o| (o.src, o.dst)).collect(), dest_dir, self.editor.prefs.mono.unwrap_or_default());
                 }
                 if resolved.is_empty() {
                     return;
@@ -704,13 +706,15 @@ impl App {
         let total_items = resolved.len();
         let total_bytes = resolved.iter().map(|o| o.approx_bytes).sum();
         let id = self.jobs.execute(plan.kind, resolved);
-        self.active_job = Some(ActiveJob {
+        self.active_jobs.push(ActiveJob {
             id,
             label: String::new(),
             done_bytes: 0,
             total_bytes,
             done_items: 0,
             total_items,
+            started: true,
+            file: None,
         });
     }
 
@@ -755,16 +759,17 @@ impl App {
                     done_items,
                     total_items,
                     label,
+                    file,
                 } => {
-                    if let Some(a) = self.active_job.as_mut() {
-                        if a.id == job {
-                            a.done_bytes = done_bytes;
-                            a.total_bytes = total_bytes;
-                            a.done_items = done_items;
-                            a.total_items = total_items;
-                            if !label.is_empty() {
-                                a.label = label;
-                            }
+                    if let Some(a) = self.active_jobs.iter_mut().find(|a| a.id == job) {
+                        a.started = true;
+                        a.file = file;
+                        a.done_bytes = done_bytes;
+                        a.total_bytes = total_bytes;
+                        a.done_items = done_items;
+                        a.total_items = total_items;
+                        if !label.is_empty() {
+                            a.label = label;
                         }
                     }
                 }
@@ -776,9 +781,7 @@ impl App {
                     cancelled,
                 } => {
                     self.jobs.forget(job);
-                    if self.active_job.as_ref().is_some_and(|a| a.id == job) {
-                        self.active_job = None;
-                    }
+                    self.active_jobs.retain(|a| a.id != job);
                     let load = self.device_load.take_if(|(id, _)| *id == job).map(|(_, p)| p);
                     let load = load.filter(|p| !cancelled && errors.is_empty() && p.is_file());
                     self.status = if cancelled {
@@ -788,6 +791,9 @@ impl App {
                     } else {
                         format!("Finished with {} error(s)", errors.len())
                     };
+                    if !self.active_jobs.is_empty() {
+                        self.status += &format!(" · {} more job(s) to go", self.active_jobs.len());
+                    }
                     for e in &errors {
                         crate::log::line(format!("job {job} error: {e}"));
                     }
@@ -818,7 +824,7 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
         let renaming = self.pane(self.focused).active_tab().renaming.is_some();
-        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
+        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -946,7 +952,7 @@ impl App {
                 end: b,
                 looping: self.editor.prefs.looping,
                 gain: self.editor.gain(),
-                mono: self.editor.mono_active(),
+                mono: self.editor.fold(),
             },
         );
     }
@@ -1042,16 +1048,11 @@ impl App {
         }
         let tab = self.pane(Role::Dest).active_tab();
         let (dest, to_dev) = (tab.cwd.clone(), tab.device);
-        // Folding to mono without having listened to the fold: ask first.
-        if self.editor.exports_mono() && !self.editor.mono_active() {
-            self.mono_pending = Some((dest, to_dev));
-            return;
-        }
-        let mono = self.editor.exports_mono();
+        let mono = self.editor.fold();
         self.export_to(dest, to_dev, mono);
     }
 
-    fn export_to(&mut self, dest: PathBuf, to_dev: bool, mono: bool) {
+    fn export_to(&mut self, dest: PathBuf, to_dev: bool, mono: Option<Fold>) {
         let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
         if to_dev {
             let dst = device::upload_target(&src, &dest);
@@ -1081,7 +1082,7 @@ impl App {
         let Some(dir) = src.parent() else { return };
         let target = crate::audio::export::target_for(&src, dir);
         self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
-        let mono = self.editor.mono_active();
+        let mono = self.editor.fold();
         self.editor.export(target, mono);
     }
 
@@ -1091,20 +1092,15 @@ impl App {
             Leave::Audition(p, play) => self.audition(&p, play),
             Leave::LoadEditor(p) => self.load_into_editor(&p),
             Leave::Quit => {
+                // Closed from `ui` once no job (an upload of the saved edit)
+                // is running.
                 self.allow_close = true;
-                if self.active_job.is_some() {
-                    // An upload of the saved edit is still going.
-                    self.close_when_idle = true;
+                self.close_when_idle = true;
+                if !self.active_jobs.is_empty() {
                     self.status = "Quitting once the transfer finishes…".to_owned();
-                } else {
-                    self.ctx_close();
                 }
             }
         }
-    }
-
-    fn ctx_close(&self) {
-        self.editor_ctx().send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn answer_leave(&mut self, leave: Leave, choice: LeaveChoice) {
@@ -1172,8 +1168,7 @@ impl App {
             EdAction::SetOut => ed.set_out(here),
             EdAction::ToggleLoop => ed.prefs.looping = !ed.prefs.looping,
             EdAction::ToggleMono => {
-                let on = !ed.prefs.mono_preview;
-                ed.set_mono(on);
+                ed.toggle_mono();
             }
             EdAction::Nudge(n, dir) => {
                 let px = ed.view.fpp.round().max(1.0) as isize;
@@ -1347,7 +1342,7 @@ impl App {
             },
             Action::Cancel => {
                 self.engine.stop();
-                if let Some(a) = &self.active_job {
+                if let Some(a) = self.shown_job() {
                     self.jobs.cancel(a.id);
                 }
                 self.pane_mut(role).active_tab_mut().renaming = None;
@@ -1425,7 +1420,7 @@ impl App {
             dir: device::Dir::Download,
             items: vec![(src, dir)],
             policy: Policy::Replace,
-            mono: false,
+            mono: None,
             total_bytes: bytes,
         };
         let id = self.run_device(task, &format!("Loading {name}"), 1, bytes);
@@ -1532,7 +1527,7 @@ impl eframe::App for App {
                 self.start_play();
             }
             let ed = &self.editor;
-            self.engine.update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain(), ed.mono_active());
+            self.engine.update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain(), ed.fold());
             ctx.request_repaint();
         }
         self.preview.set(if self.engine.is_playing() { self.voice_path.clone() } else { None });
@@ -1583,22 +1578,6 @@ impl eframe::App for App {
                 match decision {
                     Decision::Proceed(policy) => self.launch(&pending.plan, pending.what, policy),
                     Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
-                }
-            }
-        }
-
-        if self.mono_pending.is_some() {
-            let ph = self.editor.region_phase();
-            if let Some(c) = dialogs::mono_export(ui.ctx(), &ph) {
-                let (dest, to_dev) = self.mono_pending.take().expect("checked above");
-                match c {
-                    MonoChoice::SaveMono => self.export_to(dest, to_dev, true),
-                    MonoChoice::SaveStereo => self.export_to(dest, to_dev, false),
-                    MonoChoice::Listen => {
-                        self.editor.prefs.mono_preview = true;
-                        self.status = "Mono preview on — export again when it sounds right".to_owned();
-                    }
-                    MonoChoice::Cancel => self.status = "Export cancelled".to_owned(),
                 }
             }
         }
@@ -1669,13 +1648,12 @@ impl eframe::App for App {
         if self.leave_after_save.is_some()
             && !self.editor.exporting
             && self.pending.is_none()
-            && self.mono_pending.is_none()
             && self.staged_upload.is_none()
         {
             self.leave_after_save = None;
         }
 
-        if self.close_when_idle && self.active_job.is_none() {
+        if self.close_when_idle && self.active_jobs.is_empty() {
             self.close_when_idle = false;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -1718,7 +1696,7 @@ impl App {
                         dir: device::Dir::Upload,
                         items: vec![(s.staged, s.dest_dir)],
                         policy: s.policy,
-                        mono: false,
+                        mono: None,
                         total_bytes: std::fs::metadata(&p).map_or(0, |m| m.len()),
                     };
                     self.status = "Sending to the Digitakt…".to_owned();
@@ -1776,6 +1754,7 @@ impl App {
                 }
                 EdIntent::Seek(f) => self.engine.seek(f),
                 EdIntent::Export => self.export(),
+                EdIntent::SaveInPlace => self.save_in_place(),
             }
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -1863,8 +1842,14 @@ impl App {
         });
     }
 
+    /// The job the status bar shows: the oldest one that is running.
+    fn shown_job(&self) -> Option<&ActiveJob> {
+        self.active_jobs.iter().find(|a| a.started).or(self.active_jobs.first())
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        if let Some(a) = &self.active_job {
+        let waiting = self.active_jobs.len().saturating_sub(1);
+        if let Some(a) = self.shown_job() {
             let frac = if a.total_bytes > 0 {
                 a.done_bytes as f32 / a.total_bytes as f32
             } else if a.total_items > 0 {
@@ -1873,23 +1858,42 @@ impl App {
                 0.0
             };
             let job_id = a.id;
-            let text = format!(
-                "{}/{} · {} / {} · {}",
-                a.done_items + 1,
-                a.total_items,
-                fs_model::human_bytes(a.done_bytes),
-                fs_model::human_bytes(a.total_bytes),
-                a.label
-            );
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::ProgressBar::new(frac.clamp(0.0, 1.0))
-                        .desired_width(240.0)
-                        .text(text),
-                );
+            let file = a.file;
+            // Device folders have no known size up front: show bytes so far.
+            let bytes = if a.total_bytes > 0 {
+                format!("{} / {}", fs_model::human_bytes(a.done_bytes), fs_model::human_bytes(a.total_bytes))
+            } else {
+                fs_model::human_bytes(a.done_bytes)
+            };
+            let label = if a.started || !a.label.is_empty() { a.label.as_str() } else { "Starting…" };
+            let text = format!("{}/{} · {bytes} · {label}", (a.done_items + 1).min(a.total_items.max(1)), a.total_items);
+            // Buttons pinned right; the bar takes the rest so long names fit.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Cancel").clicked() {
                     self.jobs.cancel(job_id);
                 }
+                if waiting > 0 {
+                    ui.label(format!("+{waiting} queued"))
+                        .on_hover_text("Waiting jobs start when this one finishes. Cancel stops only the one shown.");
+                }
+                // This file, chunk by chunk.
+                if let Some((phase, done, total)) = file.filter(|f| f.2 > 0) {
+                    ui.add(
+                        egui::ProgressBar::new((done as f32 / total as f32).clamp(0.0, 1.0))
+                            .desired_width(200.0)
+                            .text(format!(
+                                "{phase} {} / {}",
+                                fs_model::human_bytes(done.min(total)),
+                                fs_model::human_bytes(total)
+                            )),
+                    )
+                    .on_hover_text("Current file");
+                }
+                ui.add(
+                    egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                        .desired_width(ui.available_width())
+                        .text(text),
+                );
             });
             return;
         }

@@ -6,7 +6,7 @@
 use crate::audio::decode::{self, Sample};
 use crate::audio::export::{self, Render};
 use crate::audio::peaks::ChannelPeaks;
-use crate::audio::stats::{self, Phase, Stats};
+use crate::audio::stats::{self, Fold, Phase, Stats};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,12 +29,12 @@ pub struct Prefs {
     pub play_from_in: bool,
     /// Scroll the waveform along with the play cursor.
     pub follow_playback: bool,
-    /// Hear multichannel files folded to mono. Stats and normalize follow.
-    /// Not saved: always starts off.
+    /// Fold multichannel files to one channel: what you hear, the stats,
+    /// normalize and export all follow. Not saved: always starts off.
     #[serde(skip)]
-    pub mono_preview: bool,
-    /// Export multichannel files as a single mono channel.
-    pub save_mono: bool,
+    pub mono: Option<Fold>,
+    /// Last fold picked, so M turns mono back on the same way.
+    pub fold: Fold,
     /// Which editor panels are shown.
     pub panels: Panels,
 }
@@ -73,8 +73,8 @@ impl Default for Prefs {
             normalize_db: -0.3,
             play_from_in: false,
             follow_playback: true,
-            mono_preview: false,
-            save_mono: false,
+            mono: None,
+            fold: Fold::Mix,
             panels: Panels::default(),
         }
     }
@@ -295,7 +295,7 @@ pub struct Editor {
     /// Start playing once the pending load lands.
     pub play_when_loaded: bool,
     memos: HashMap<PathBuf, Memo>,
-    stats_key: Option<(usize, usize, u32, usize, bool)>,
+    stats_key: Option<(usize, usize, u32, usize, Option<Fold>)>,
     /// Content revision: bumped by every cut / paste. Unique per edit so undo
     /// and redo land back on a matching number.
     rev: u64,
@@ -366,14 +366,19 @@ impl Editor {
         self.sample().is_some_and(|s| s.channels.len() > 1)
     }
 
-    /// Mono preview is on and there is more than one channel to fold.
+    /// The fold in effect: mono is on and there is more than one channel.
+    pub fn fold(&self) -> Option<Fold> {
+        self.prefs.mono.filter(|_| self.is_multichannel())
+    }
+
+    /// Mono is on and there is more than one channel to fold.
     pub fn mono_active(&self) -> bool {
-        self.prefs.mono_preview && self.is_multichannel()
+        self.fold().is_some()
     }
 
     /// Export would fold channels together.
     pub fn exports_mono(&self) -> bool {
-        self.prefs.save_mono && self.is_multichannel()
+        self.mono_active()
     }
 
     /// Ask for `path` to be loaded. A no-op if it already is (or is on its way).
@@ -746,10 +751,18 @@ impl Editor {
         self.sel = if dir < 0 { (a - half, b - half) } else { (a + half, b + half) };
     }
 
-    /// Mono preview and mono export are one switch for now.
-    pub fn set_mono(&mut self, on: bool) {
-        self.prefs.mono_preview = on;
-        self.prefs.save_mono = on;
+    /// Off, or fold this way (listening and export alike).
+    pub fn set_mono(&mut self, mono: Option<Fold>) {
+        self.prefs.mono = mono;
+        if let Some(f) = mono {
+            self.prefs.fold = f;
+        }
+    }
+
+    /// M: mono off, or back on with the last fold picked.
+    pub fn toggle_mono(&mut self) {
+        let m = if self.prefs.mono.is_some() { None } else { Some(self.prefs.fold) };
+        self.set_mono(m);
     }
 
     pub fn select_all(&mut self) {
@@ -818,7 +831,7 @@ impl Editor {
     }
 
     fn refresh_region(&mut self) {
-        let mono = self.mono_active();
+        let mono = self.fold();
         let Some(c) = &self.current else {
             self.stats = Stats::default();
             self.phase = Phase::default();
@@ -829,8 +842,8 @@ impl Editor {
             return;
         }
         let ch = &c.sample.channels;
-        self.stats = if mono {
-            let m = stats::mono_region(ch, self.sel.0, self.sel.1);
+        self.stats = if let Some(fold) = mono {
+            let m = stats::fold_region(ch, self.sel.0, self.sel.1, fold);
             let n = m.len();
             stats::compute(&[m], 0, n, self.gain())
         } else {
@@ -854,6 +867,12 @@ impl Editor {
     /// Have the trim, gain or audio moved away from "the file as it is"?
     pub fn is_edited(&self) -> bool {
         self.rev != self.loaded_rev || self.crop.is_some() || self.sel != (0, self.frames()) || self.gain_db.abs() > 0.001
+    }
+
+    /// Give up on the unsaved audio edits. They stay on screen until the
+    /// next load, but no longer hold anything up.
+    pub fn discard(&mut self) {
+        self.clean_rev = self.rev;
     }
 
     /// Audio was cut or pasted into and that hasn't been written anywhere yet.
@@ -996,7 +1015,7 @@ impl Editor {
     // ---- export -----------------------------------------------------------
 
     /// Write the edited region to exactly `target` (overwriting it).
-    pub fn export(&mut self, target: PathBuf, mono: bool) {
+    pub fn export(&mut self, target: PathBuf, mono: Option<Fold>) {
         let Some(sample) = self.sample().cloned() else { return };
         if self.exporting {
             return;
@@ -1016,7 +1035,7 @@ impl Editor {
     /// Fold whole files to mono, untrimmed and at unity gain, each `(src,
     /// target)` pair writing exactly `target`. Runs independently of the
     /// single-file export.
-    pub fn export_mono_batch(&self, jobs: Vec<(PathBuf, PathBuf)>, dest_dir: PathBuf) {
+    pub fn export_mono_batch(&self, jobs: Vec<(PathBuf, PathBuf)>, dest_dir: PathBuf, fold: Fold) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let _ = std::thread::Builder::new().name("export-batch".into()).spawn(move || {
@@ -1024,7 +1043,7 @@ impl Editor {
             let mut errors = Vec::new();
             for (p, target) in jobs {
                 let res = decode::decode(&p).and_then(|s| {
-                    let r = Render { start: 0, end: s.frames(), gain: 1.0, mono: true };
+                    let r = Render { start: 0, end: s.frames(), gain: 1.0, mono: Some(fold) };
                     export::write_wav(&s, &r, &target)
                 });
                 match res {

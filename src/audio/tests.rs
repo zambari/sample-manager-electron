@@ -51,7 +51,7 @@ fn export_trims_and_applies_gain() {
     let out_dir = d.join("out");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let r = Render { start: 1000, end: 13_000, gain: 2.0, mono: false };
+    let r = Render { start: 1000, end: 13_000, gain: 2.0, mono: None };
     let a = write_wav(&s, &r, &out_dir.join("sine.wav")).unwrap();
     assert_eq!(a.file_name().unwrap(), "sine.wav");
 

@@ -8,8 +8,8 @@ pub struct Render {
     pub start: usize,
     pub end: usize,
     pub gain: f32,
-    /// Fold to a single channel (average of all).
-    pub mono: bool,
+    /// Fold to a single channel this way.
+    pub mono: Option<super::stats::Fold>,
 }
 
 /// Where an export of `src` into `dest_dir` lands: `<stem>.wav`. This can be
@@ -34,9 +34,9 @@ pub fn write_wav(sample: &Sample, r: &Render, target: &Path) -> Result<PathBuf, 
         Some(24) => (24, false),
         _ => (32, true),
     };
-    let mono = r.mono && sample.channels.len() > 1;
+    let mono = r.mono.filter(|_| sample.channels.len() > 1);
     let spec = hound::WavSpec {
-        channels: if mono { 1 } else { sample.channels.len() as u16 },
+        channels: if mono.is_some() { 1 } else { sample.channels.len() as u16 },
         sample_rate: sample.rate,
         bits_per_sample: bits,
         sample_format: if float { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
@@ -49,8 +49,8 @@ pub fn write_wav(sample: &Sample, r: &Render, target: &Path) -> Result<PathBuf, 
         res.map_err(|e| e.to_string())
     };
     for f in r.start..end {
-        if mono {
-            put(super::stats::mono_at(&sample.channels, f) * r.gain)?;
+        if let Some(fold) = mono {
+            put(fold.at(&sample.channels, f) * r.gain)?;
         } else {
             for ch in &sample.channels {
                 put(ch[f] * r.gain)?;

@@ -45,8 +45,8 @@ pub enum Task {
         /// `(source, destination folder)`.
         items: Vec<(PathBuf, PathBuf)>,
         policy: Policy,
-        /// Fold uploads to mono.
-        mono: bool,
+        /// Fold uploads to mono this way.
+        mono: Option<crate::audio::stats::Fold>,
         /// Best guess for the progress bar.
         total_bytes: u64,
     },
@@ -239,7 +239,8 @@ impl Conn {
         self.ok(proto::ITEM_RENAME, Args::default().str(&a).str(&b), format!("could not move {a} to {b}"))
     }
 
-    fn read(&mut self, p: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64)) -> R<Vec<u8>> {
+    /// `on_bytes(chunk, file_total)` after each chunk.
+    fn read(&mut self, p: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64, u64)) -> R<Vec<u8>> {
         let s = dev_str(p);
         let r = self.request(proto::READ_OPEN, Args::default().str(&s))?;
         let mut rd = Reader::new(&r);
@@ -269,7 +270,7 @@ impl Conn {
                     return refused(format!("read failed: {s}"));
                 }
                 data.extend_from_slice(chunk);
-                on_bytes(chunk.len() as u64);
+                on_bytes(chunk.len() as u64, total as u64);
             }
             Ok(())
         })();
@@ -280,7 +281,8 @@ impl Conn {
         Ok(data)
     }
 
-    fn write(&mut self, p: &Path, data: &[u8], cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64)) -> R<()> {
+    /// `on_bytes(chunk, file_total)` after each chunk.
+    fn write(&mut self, p: &Path, data: &[u8], cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64, u64)) -> R<()> {
         let s = dev_str(p);
         let total = data.len() as u32;
         let r = self.request(proto::WRITE_OPEN, Args::default().u32(total).str(&s))?;
@@ -302,7 +304,7 @@ impl Conn {
                     return refused(format!("write failed: {s}"));
                 }
                 off += chunk.len();
-                on_bytes(chunk.len() as u64);
+                on_bytes(chunk.len() as u64, total as u64);
             }
             Ok(())
         })();
@@ -341,6 +343,8 @@ struct Prog {
     total: u64,
     item: usize,
     items: usize,
+    /// The file on the wire: `(phase, bytes done, file size)`.
+    file: Option<(&'static str, u64, u64)>,
 }
 
 impl Prog {
@@ -352,6 +356,7 @@ impl Prog {
             done_items: self.item,
             total_items: self.items,
             label: label.to_owned(),
+            file: self.file,
         }
     }
 }
@@ -443,6 +448,9 @@ impl Worker {
 
     fn progress(&mut self, label: &str, n: u64) {
         let Some(p) = self.job.as_mut() else { return };
+        if !label.is_empty() {
+            p.file = None;
+        }
         p.done += n;
         if label.is_empty() && p.done - p.last < PROGRESS_EVERY {
             return;
@@ -461,6 +469,17 @@ impl Worker {
                 v.push(p.to_path_buf());
             }
         };
+        // Tells the UI this job is now running rather than waiting in line.
+        let items = match &task {
+            Task::Transfer { items, .. } => items.len(),
+            Task::Trash { paths } => paths.len(),
+            _ => 1,
+        };
+        let total = match &task {
+            Task::Transfer { total_bytes, .. } => *total_bytes,
+            _ => 0,
+        };
+        self.em.send(Prog { id: job, done: 0, last: 0, total, item: 0, items, file: None }.ev(""));
 
         match task {
             Task::Rename { from, to } => {
@@ -485,7 +504,11 @@ impl Worker {
             }
             Task::Trash { paths } => {
                 let trash = PathBuf::from(TRASH);
-                for p in paths {
+                self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
+                for (i, p) in paths.into_iter().enumerate() {
+                    if let Some(pr) = self.job.as_mut() {
+                        pr.item = i;
+                    }
                     if p.starts_with(&trash) {
                         errors.push(format!("{} is already in {TRASH}", dev_str(&p)));
                         continue;
@@ -500,14 +523,16 @@ impl Worker {
                         Ok(trash.join(name))
                     });
                     let res = target.and_then(|t| {
-                        let is_dir = self.stat(&p)?.is_dir;
-                        self.relocate(&p, &t, is_dir, cancel)
+                        let e = self.stat(&p)?;
+                        self.progress(&e.name, 0);
+                        self.relocate(&p, &t, e.is_dir, e.size as u64, cancel)
                     });
                     match res {
                         Ok(_) => touch(&mut touched_dev, p.parent().unwrap_or(Path::new("/"))),
                         Err(e) => errors.push(e),
                     }
                 }
+                self.job = None;
                 touch(&mut touched_dev, &trash);
                 touch(&mut touched_dev, Path::new("/"));
             }
@@ -517,7 +542,7 @@ impl Worker {
                 for (src, dst) in &items {
                     crate::log::line(format!("  {} -> {}", src.display(), dst.display()));
                 }
-                self.job = Some(Prog { id: job, done: 0, last: 0, total: total_bytes, item: 0, items: n });
+                self.job = Some(Prog { id: job, done: 0, last: 0, total: total_bytes, item: 0, items: n, file: None });
                 for (i, (src, dst_dir)) in items.into_iter().enumerate() {
                     if cancel.load(Ordering::Relaxed) {
                         break;
@@ -525,6 +550,7 @@ impl Worker {
                     if let Some(p) = self.job.as_mut() {
                         p.item = i;
                     }
+                    self.progress(&src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 0);
                     let res = match dir {
                         Dir::Move => self.move_item(&src, &dst_dir, policy, cancel),
                         Dir::Upload => self.upload(&src, &dst_dir, policy, mono, cancel, &mut errors),
@@ -600,47 +626,58 @@ impl Worker {
         // A rename can't merge folders: an existing folder is in the way.
         let policy = if entry.is_dir && policy == Policy::Replace { Policy::KeepBoth } else { policy };
         let Some((target, _)) = self.place_on_device(dst_dir, &name, entry.is_dir, policy)? else { return Ok(()) };
-        if self.relocate(src, &target, entry.is_dir, cancel)? {
-            self.progress("", entry.size as u64);
+        self.relocate(src, &target, entry.is_dir, entry.size as u64, cancel)
+    }
+
+    /// `parent/name` of a device path, for the status bar.
+    fn short(p: &Path) -> String {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match p.parent().and_then(|d| d.file_name()) {
+            Some(d) => format!("{}/{name}", d.to_string_lossy()),
+            None => name,
         }
-        Ok(())
     }
 
     /// Move `src` to `target` (a free path). The device refuses to rename a
     /// folder into another folder, so when a rename is refused, rebuild the
-    /// item at `target` piece by piece and remove the source. Returns whether
-    /// the plain rename worked (the fallback reports its own progress).
-    fn relocate(&mut self, src: &Path, target: &Path, is_dir: bool, cancel: &AtomicBool) -> Result<bool, String> {
+    /// item at `target` piece by piece and remove the source. `size` is the
+    /// file's size (0 for folders), counted into progress once it has moved.
+    fn relocate(&mut self, src: &Path, target: &Path, is_dir: bool, size: u64, cancel: &AtomicBool) -> Result<(), String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         let renamed = self.with_conn(|c| match c.rename(src, target) {
             Ok(()) => Ok(true),
             Err(Fail::Refused(_)) => Ok(false),
             Err(e) => Err(e),
         })?;
         if renamed {
-            return Ok(true);
-        }
-        if cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".into());
+            self.progress("", size);
+            return Ok(());
         }
         crate::log::line(format!("device: rename refused, moving {} piece by piece", dev_str(src)));
         if is_dir {
+            self.progress(&format!("{}/…", Self::short(src)), 0);
             self.with_conn(|c| c.mkdir(target))?;
             let kids = self.with_conn(|c| c.list(src))?;
             for k in kids {
+                // Each child gets its own line, so a big folder visibly moves.
+                self.progress(&Self::short(&src.join(&k.name)), 0);
                 // Stop at the first failure so the source keeps what didn't move.
-                self.relocate(&src.join(&k.name), &target.join(&k.name), k.is_dir, cancel)?;
+                self.relocate(&src.join(&k.name), &target.join(&k.name), k.is_dir, k.size as u64, cancel)?;
             }
             self.with_conn(|c| c.rmdir(src))?;
         } else {
-            self.progress(&src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 0);
-            let raw = self.read_raw(src, cancel)?;
-            self.write_raw(target, &raw, cancel)?;
+            self.progress(&Self::short(src), 0);
+            // Read and write each count half, so the file adds up to its size once.
+            let raw = self.read_raw(src, true, cancel)?;
+            self.write_raw(target, &raw, true, cancel)?;
             self.with_conn(|c| c.delete_file(src))?;
         }
-        Ok(false)
+        Ok(())
     }
 
-    fn upload(&mut self, src: &Path, dst_dir: &Path, policy: Policy, mono: bool, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {
+    fn upload(&mut self, src: &Path, dst_dir: &Path, policy: Policy, mono: Option<crate::audio::stats::Fold>, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {
         if src.is_dir() {
             let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let Some((target, exists)) = self.place_on_device(dst_dir, &name, true, policy)? else { return Ok(()) };
@@ -667,26 +704,37 @@ impl Worker {
 
         let name = device_name(src);
         self.progress(&name, 0);
-        let s = crate::audio::decode::decode(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let mut s = crate::audio::decode::decode(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        if let Some(fold) = mono.filter(|_| s.channels.len() > 1) {
+            let one = (0..s.frames()).map(|i| fold.at(&s.channels, i)).collect();
+            s.channels = vec![one];
+        }
         let Some((target, _)) = self.place_on_device(dst_dir, &name, false, policy)? else { return Ok(()) };
         // Known only once connected, which placing the file made sure of.
-        let stereo = !mono && self.conn.as_ref().is_some_and(|c| c.stereo);
+        let stereo = mono.is_none() && self.conn.as_ref().is_some_and(|c| c.stereo);
         let raw = sample::to_device(&s, stereo);
-        self.write_raw(&target, &raw, cancel)
+        self.write_raw(&target, &raw, false, cancel)
     }
 
-    fn write_raw(&mut self, target: &Path, raw: &[u8], cancel: &AtomicBool) -> Result<(), String> {
+    /// `half`: this write follows a read of the same bytes (a device-to-device
+    /// copy), and each counts for half.
+    fn write_raw(&mut self, target: &Path, raw: &[u8], half: bool, cancel: &AtomicBool) -> Result<(), String> {
+        if let Some(p) = self.job.as_mut() {
+            p.file = None;
+        }
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
         let em = &self.em;
-        let mut on = |n: u64| {
+        let mut on = |n: u64, file_total: u64| {
             if let Some(p) = prog.as_mut() {
-                p.done += n;
-                if p.done - p.last >= PROGRESS_EVERY {
-                    p.last = p.done;
-                    em.send(p.ev(""));
-                }
+                p.done += if half { n - n / 2 } else { n };
+                let file_done = p.file.filter(|f| f.0 == "sending").map_or(0, |f| f.1) + n;
+                p.file = Some(("sending", file_done, file_total));
+                // Every chunk: they are slow enough that this is cheap, and
+                // small samples would otherwise never show movement.
+                p.last = p.done;
+                em.send(p.ev(""));
             }
         };
         let Some(c) = self.conn.as_mut() else { return Err("not connected".into()) };
@@ -706,18 +754,24 @@ impl Worker {
         res
     }
 
-    fn read_raw(&mut self, src: &Path, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+    /// `half`: see [`Self::write_raw`].
+    fn read_raw(&mut self, src: &Path, half: bool, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+        if let Some(p) = self.job.as_mut() {
+            p.file = None;
+        }
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
         let em = &self.em;
-        let mut on = |n: u64| {
+        let mut on = |n: u64, file_total: u64| {
             if let Some(p) = prog.as_mut() {
-                p.done += n;
-                if p.done - p.last >= PROGRESS_EVERY {
-                    p.last = p.done;
-                    em.send(p.ev(""));
-                }
+                p.done += if half { n / 2 } else { n };
+                let file_done = p.file.filter(|f| f.0 == "reading").map_or(0, |f| f.1) + n;
+                p.file = Some(("reading", file_done, file_total));
+                // Every chunk: they are slow enough that this is cheap, and
+                // small samples would otherwise never show movement.
+                p.last = p.done;
+                em.send(p.ev(""));
             }
         };
         let Some(c) = self.conn.as_mut() else { return Err("not connected".into()) };
@@ -766,7 +820,7 @@ impl Worker {
             (true, Policy::KeepBoth) => crate::fs_model::unique_sibling(&target),
         };
         self.progress(&entry.name, 0);
-        let raw = self.read_raw(src, cancel)?;
+        let raw = self.read_raw(src, false, cancel)?;
         std::fs::create_dir_all(dst_dir).map_err(|e| format!("{}: {e}", dst_dir.display()))?;
         sample::write_wav(&raw, &target).map_err(|e| format!("{}: {e}", target.display()))
     }
@@ -795,7 +849,7 @@ impl Worker {
             return Ok(());
         }
         self.progress(&entry.name, 0);
-        let raw = self.read_raw(src, cancel)?;
-        self.write_raw(&target, &raw, cancel)
+        let raw = self.read_raw(src, true, cancel)?;
+        self.write_raw(&target, &raw, true, cancel)
     }
 }

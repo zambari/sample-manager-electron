@@ -297,7 +297,7 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     out
 }
 
-pub const EDITOR_HELP: &str = "Space play/stop (⇧ from the other start) · I / O set in/out (live while playing) · L loop · M mono preview · \
+pub const EDITOR_HELP: &str = "Space play/stop (⇧ from the other start) · I / O set in/out (live while playing) · L loop · M mono on/off · \
 S snap to zero · V follow playback · [ / ] step in point (to zero crossings when snapping), ⇧ for out point · C crop to region, ⇧C uncrop · \
 ⌘Z undo, ⇧⌘Z redo · ←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
 ⌘X / ⌘C / ⌘V cut / copy / paste (paste goes in at the playhead, or over a selection; works across files) · ⌫ delete selection · ⌘S save in place · \

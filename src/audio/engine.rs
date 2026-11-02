@@ -9,6 +9,7 @@
 //! the whole point: you nudge a trim point and hear the loop seam move.
 
 use super::decode::Sample;
+use super::stats::Fold;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,8 +26,8 @@ struct Voice {
     end: usize,
     looping: bool,
     gain: f32,
-    /// Fold all source channels into one and send it to every output.
-    mono: bool,
+    /// Fold the source channels into one and send it to every output.
+    mono: Option<Fold>,
     playing: bool,
 }
 
@@ -60,7 +61,7 @@ pub struct PlayParams {
     pub end: usize,
     pub looping: bool,
     pub gain: f32,
-    pub mono: bool,
+    pub mono: Option<Fold>,
 }
 
 impl Engine {
@@ -150,7 +151,7 @@ impl Engine {
     }
 
     /// Live parameter changes while playing.
-    pub fn update(&self, loop_start: usize, end: usize, looping: bool, gain: f32, mono: bool) {
+    pub fn update(&self, loop_start: usize, end: usize, looping: bool, gain: f32, mono: Option<Fold>) {
         let mut v = self.shared.voice.lock().expect("poisoned");
         v.loop_start = loop_start;
         v.end = end;
@@ -224,8 +225,7 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
     let frames = sample.frames();
     let end = v.end.min(frames).max(1);
     let gain = v.gain;
-    let mono = v.mono && src_ch > 1;
-    let inv_ch = 1.0 / src_ch.max(1) as f32;
+    let mono = v.mono.filter(|_| src_ch > 1);
 
     for frame in data.chunks_mut(out_ch) {
         if !v.playing {
@@ -249,9 +249,9 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
         // Interpolate within the region only, so a loop seam sounds exactly as
         // the exported file will when looped on a sampler.
         let j = if i + 1 < end { i + 1 } else if v.looping { v.loop_start } else { i };
-        if mono {
-            let a: f32 = sample.channels.iter().map(|ch| ch[i]).sum::<f32>() * inv_ch;
-            let b: f32 = sample.channels.iter().map(|ch| ch[j]).sum::<f32>() * inv_ch;
+        if let Some(fold) = mono {
+            let a = fold.at(&sample.channels, i);
+            let b = fold.at(&sample.channels, j);
             let s = T::from_sample(((a + (b - a) * t) * gain).clamp(-1.0, 1.0));
             frame.fill(s);
             v.pos += step;

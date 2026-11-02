@@ -39,6 +39,9 @@ pub enum Ev {
         done_items: usize,
         total_items: usize,
         label: String,
+        /// The file currently on the wire (device jobs): `(phase, bytes
+        /// done, file size)`.
+        file: Option<(&'static str, u64, u64)>,
     },
     /// Result of [`Jobs::find_duplicates`].
     Duplicates {
@@ -339,6 +342,7 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            file: None,
         });
 
         let mut on_bytes = |n: u64| {
@@ -352,6 +356,7 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, cancel: Arc<AtomicBo
                     done_items: i,
                     total_items,
                     label: String::new(),
+                    file: None,
                 });
             }
         };

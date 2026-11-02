@@ -6,7 +6,7 @@
 //! zooms around the pointer, horizontal scroll / middle-drag / ⌥-drag pans.
 //! Keys are handled in the app (see `App::perform_editor`).
 
-use crate::audio::stats::{self, Stats};
+use crate::audio::stats::{self, Fold, Stats};
 use crate::editor::{Drag, Editor};
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, vec2};
 
@@ -32,6 +32,9 @@ const SCOPE_H: f32 = 110.0;
 const SCOPE_SECS: f64 = 0.040;
 const GRAB_PX: f32 = 6.0;
 const MIN_FPP: f64 = 1.0 / 48.0;
+/// Below this many frames per pixel, draw the waveform as a smooth filled
+/// curve through the samples instead of per-column min/max bars.
+const SOLID_CURVE_FPP: f64 = 4.0;
 
 pub const IN_COLOR: Color32 = Color32::from_rgb(90, 200, 120);
 pub const OUT_COLOR: Color32 = Color32::from_rgb(235, 115, 90);
@@ -177,8 +180,9 @@ fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) 
             ui.label(RichText::new(format!("✂ cropped view {:.3}–{:.3}s", s.seconds(a), s.seconds(b))).weak())
                 .on_hover_text("Only part of the file is loaded for editing. ⇧C or Uncrop shows the whole file again.");
         }
-        if ed.mono_active() {
-            ui.label(RichText::new("◐ MONO").color(MONO_COLOR).strong())
+        if let Some(f) = ed.fold() {
+            let txt = if f == Fold::Mix { "◐ MONO".to_owned() } else { format!("◐ MONO {}", f.short()) };
+            ui.label(RichText::new(txt).color(MONO_COLOR).strong())
                 .on_hover_text("Playing folded to mono. M toggles.");
         }
         if ed.loading.is_some() {
@@ -354,21 +358,32 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, playing: bool, can_export: bool, out: &
                 ed.shift_selection(1);
             }
             ui.separator();
-            // Mono preview and Save mono are one switch for now.
-            let mut mono = ed.prefs.mono_preview;
-            let a = ui
-                .toggle_value(&mut mono, "◐ Mono")
-                .on_hover_text("M — listen to the channels folded to mono (L+R averaged). Stats and Normalize follow what you hear.");
-            let b = ui
-                .toggle_value(&mut mono, "Save mono")
-                .on_hover_text("Export stereo / multichannel files as a single mono channel. Linked to ◐ Mono for now.");
-            if a.changed() || b.changed() {
+            // One control for listening and export: stereo, or which mono fold.
+            ui.label("◐").on_hover_text("Mono: what you hear, the stats, Normalize and export all follow. M toggles.");
+            let mut mono = ed.prefs.mono;
+            let mut changed = ui
+                .selectable_value(&mut mono, None, "Stereo")
+                .on_hover_text("Keep all channels. M toggles mono.")
+                .changed();
+            for f in Fold::ALL {
+                let tip = match f {
+                    Fold::Mix => "Mono: L+R averaged. Very wide stereo can lose level or sound hollow (phase cancellation).",
+                    Fold::Left => "Mono from the left channel only — no phase cancellation.",
+                    Fold::Right => "Mono from the right channel only — no phase cancellation.",
+                };
+                changed |= ui.selectable_value(&mut mono, Some(f), f.short()).on_hover_text(tip).changed();
+            }
+            if changed {
                 ed.set_mono(mono);
             }
             let label = if ed.exporting {
                 "Exporting…"
             } else if ed.exports_mono() {
-                "Export mono → Destination"
+                match ed.fold() {
+                    Some(Fold::Left) => "Export mono (L) → Destination",
+                    Some(Fold::Right) => "Export mono (R) → Destination",
+                    _ => "Export mono → Destination",
+                }
             } else {
                 "Export → Destination"
             };
@@ -684,8 +699,9 @@ fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: Rect, vis: &
             }
         }
 
-        if m.fpp >= 1.0 {
-            // One min/max bar per pixel column.
+        if m.fpp >= SOLID_CURVE_FPP {
+            // One min/max bar per pixel column, always spanning the zero line
+            // so the wave reads as a solid shape rather than a thin trace.
             let w = rect.width().ceil() as usize;
             for px in 0..w {
                 let ff0 = m.start + px as f64 * m.fpp;
@@ -702,15 +718,72 @@ fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: Rect, vis: &
                 let clip = hi * gain >= 1.0 || lo * gain <= -1.0;
                 let col = if clip && inside { CLIP_COLOR } else if inside { wave_in } else { wave_out };
                 let x = rect.left() + px as f32 + 0.5;
-                let (ya, yb) = (y(hi), y(lo));
+                let (ya, yb) = (y(hi.max(0.0)), y(lo.min(0.0)));
                 painter.line_segment([Pos2::new(x, ya), Pos2::new(x, yb.max(ya + 1.0))], Stroke::new(1.0, col));
             }
         } else {
-            // Zoomed past one sample per pixel: draw the samples themselves.
-            let f0 = m.start.floor().max(0.0) as usize;
+            // Few samples per pixel: a filled area between the zero line and
+            // the signal, with an anti-aliased curve on top for a smooth edge.
+            let f0 = (m.start.floor() - 1.0).max(0.0) as usize;
             let f1 = ((m.start + rect.width() as f64 * m.fpp).ceil() as usize + 2).min(data.len());
+            if f1 <= f0 {
+                continue;
+            }
             let pts: Vec<Pos2> = (f0..f1).map(|f| Pos2::new(m.x(f as f64), y(data[f]))).collect();
-            painter.line(pts.clone(), Stroke::new(1.2, wave_in));
+            let inside = |f: usize| f >= ed.sel.0 && f < ed.sel.1;
+            let fill_col = |f: usize, s: f32| {
+                let base = if !inside(f) {
+                    wave_out
+                } else if s.abs() * gain >= 1.0 {
+                    CLIP_COLOR
+                } else {
+                    wave_in
+                };
+                base.gamma_multiply(0.55)
+            };
+
+            let mut mesh = egui::Mesh::default();
+            let mut tri = |a: Pos2, b: Pos2, c: Pos2, col: Color32| {
+                let i = mesh.vertices.len() as u32;
+                mesh.colored_vertex(a, col);
+                mesh.colored_vertex(b, col);
+                mesh.colored_vertex(c, col);
+                mesh.add_triangle(i, i + 1, i + 2);
+            };
+            for i in 0..pts.len().saturating_sub(1) {
+                let (pa, pb) = (pts[i], pts[i + 1]);
+                let (sa, sb) = (data[f0 + i], data[f0 + i + 1]);
+                let col = fill_col(f0 + i, if sa.abs() > sb.abs() { sa } else { sb });
+                let (ma, mb) = (Pos2::new(pa.x, mid), Pos2::new(pb.x, mid));
+                if (sa > 0.0 && sb < 0.0) || (sa < 0.0 && sb > 0.0) {
+                    // Crosses zero: split into two triangles at the crossing.
+                    let t = (pa.y - mid) / (pa.y - pb.y);
+                    let cx = Pos2::new(pa.x + (pb.x - pa.x) * t, mid);
+                    tri(ma, pa, cx, col);
+                    tri(cx, pb, mb, col);
+                } else {
+                    tri(ma, pa, pb, col);
+                    tri(ma, pb, mb, col);
+                }
+            }
+            painter.add(egui::Shape::mesh(mesh));
+
+            // Outline, split into runs so the selection keeps its colour.
+            let mut run: Vec<Pos2> = Vec::new();
+            let mut run_in = inside(f0);
+            for (i, p) in pts.iter().enumerate() {
+                let now_in = inside(f0 + i);
+                if now_in != run_in && !run.is_empty() {
+                    run.push(*p); // join to the next run without a gap
+                    painter.line(std::mem::take(&mut run), Stroke::new(1.2, if run_in { wave_in } else { wave_out }));
+                    run_in = now_in;
+                }
+                run.push(*p);
+            }
+            if run.len() > 1 {
+                painter.line(run, Stroke::new(1.2, if run_in { wave_in } else { wave_out }));
+            }
+
             if 1.0 / m.fpp >= 6.0 {
                 for (i, p) in pts.iter().enumerate() {
                     let f = f0 + i;
