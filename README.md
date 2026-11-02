@@ -50,4 +50,4 @@ License and the Ubuntu Font Licence. Run `cargo metadata` or
 list. No third-party file-browser library is used; the file browser is
 written from scratch on top of `walkdir` and `trash`.
 
-Sample Manager itself has not been given a licence yet.
+Sample Manager itself is released under the [MIT License](LICENSE).
