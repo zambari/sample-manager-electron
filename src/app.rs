@@ -42,7 +42,7 @@ enum PlanKind {
     Commit { fold: std::collections::HashSet<PathBuf>, dest_dir: PathBuf },
     /// The editor's single-file export (one op).
     Export { mono: Option<Fold> },
-    /// Anything touching the Digitakt. Op destinations are only used to ask
+    /// Anything touching the device. Op destinations are only used to ask
     /// about conflicts; the device worker settles the final names.
     Device { dir: device::Dir, mono: Option<Fold> },
     /// The editor's export, rendered locally and then uploaded (one op).
@@ -220,7 +220,7 @@ impl App {
                 tabs.push(mk(home.clone(), false));
             }
             let active = ps.map_or(0, |ps| ps.active).min(tabs.len() - 1);
-            Pane { role, tabs, active }
+            Pane { role, tabs, active, last_local: None }
         };
         let source = restore(Role::Source, saved.as_ref().map(|s| &s.source));
         let dest = restore(Role::Dest, saved.as_ref().map(|s| &s.dest));
@@ -414,7 +414,7 @@ impl App {
     }
 
     /// Re-list any tab showing a directory at or under `dir`, on the disk or
-    /// (`device`) on the Digitakt.
+    /// (`device`) on the device.
     fn reload_showing(&mut self, dir: &Path, device: bool) {
         let mut todo = Vec::new();
         for role in [Role::Source, Role::Dest] {
@@ -583,7 +583,7 @@ impl App {
             plan.ops.push(ops::Op { src, dst, approx_bytes: bytes, is_dir, conflict });
         }
         if kind == Kind::Move && dir != device::Dir::Move {
-            self.status = "Between the computer and the Digitakt, Move copies; originals are kept".to_owned();
+            self.status = "Between the computer and the device, Move copies; originals are kept".to_owned();
         }
         let mono = if dir == device::Dir::Upload { self.editor.prefs.mono } else { None };
         self.offer(plan, PlanKind::Device { dir, mono });
@@ -698,7 +698,7 @@ impl App {
                 }
                 let staged = crate::audio::export::target_for(&src, &tmp);
                 self.mark_committed([src]);
-                self.status = "Rendering for the Digitakt…".to_owned();
+                self.status = "Rendering for the device…".to_owned();
                 self.staged_upload = Some(StagedUpload { staged: staged.clone(), dest_dir, policy });
                 self.editor.export(staged, mono);
                 return;
@@ -782,6 +782,16 @@ impl App {
                         crate::log::line(format!("device status: {e}"));
                     }
                     self.device_status = Some(s)
+                }
+                Ev::DeviceLost => {
+                    for role in [Role::Source, Role::Dest] {
+                        if !self.pane_mut(role).leave_device() {
+                            let id = self.new_tab_id();
+                            self.pane_mut(role).add_tab(DirTab::new(id, dirs_home()));
+                            let i = self.pane(role).active;
+                            self.reload(role, i);
+                        }
+                    }
                 }
                 Ev::DirSize { path, bytes, files } => {
                     self.sizes.set(path, bytes, files);
@@ -1346,7 +1356,7 @@ impl App {
                 let tab = self.pane(role).active_tab();
                 let sel = tab.effective_selection();
                 if !tab.device {
-                    self.status = "Delete now is only for the Digitakt; files on the computer go to the Trash".to_owned();
+                    self.status = "Delete now is only for the device; files on the computer go to the Trash".to_owned();
                 } else if !sel.is_empty() {
                     self.delete_pending = Some(sel);
                 }
@@ -1549,6 +1559,9 @@ impl eframe::App for App {
         }
         // Absorb worker results here rather than in `ui`, so they land even
         // while the window is hidden.
+        for role in [Role::Source, Role::Dest] {
+            self.pane_mut(role).note_active();
+        }
         let events = self.jobs.drain();
         if !events.is_empty() {
             self.absorb(events);
@@ -1691,7 +1704,7 @@ impl eframe::App for App {
             let tab = self.pane(Role::Dest).active_tab();
             let dest = (!tab.loading).then(|| {
                 let d = tab.cwd.file_name().map_or_else(|| tab.cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
-                if tab.device { format!("{d} on the Digitakt") } else { d }
+                if tab.device { format!("{d} on the device") } else { d }
             });
             let quitting = matches!(leave, Leave::Quit);
             if let Some(c) = dialogs::leave_editor(ui.ctx(), &name, quitting, dest.as_deref()) {
@@ -1756,7 +1769,7 @@ impl App {
                         mono: None,
                         total_bytes: std::fs::metadata(&p).map_or(0, |m| m.len()),
                     };
-                    self.status = "Sending to the Digitakt…".to_owned();
+                    self.status = "Sending to the device…".to_owned();
                     self.run_device(task, "", 1, 0);
                     if let Some(l) = leave {
                         self.finish_leave(l);
@@ -2272,7 +2285,7 @@ impl App {
     }
 
     /// Whether a drag dropped into `role` moves or copies. Like Finder: on the
-    /// same storage it moves, so the Digitakt to the Digitakt always moves
+    /// same storage it moves, so the device to the device always moves
     /// (whichever pane), and so does the computer within one pane. Across
     /// storage it copies. Holding ⌥ forces a copy.
     fn drop_kind(&self, ui: &egui::Ui, role: Role, payload: &DragPayload, to_dev: bool) -> Kind {
@@ -2347,7 +2360,7 @@ impl App {
             }
             if ui
                 .small_button("🎹")
-                .on_hover_text("Open the Digitakt's +Drive in a new tab (USB MIDI)")
+                .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)")
                 .clicked()
             {
                 new_device_tab = true;

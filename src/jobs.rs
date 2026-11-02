@@ -59,6 +59,8 @@ pub enum Ev {
     },
     /// The device connection changed: its name, or why there is none.
     DeviceStatus(Result<String, String>),
+    /// The device's MIDI port went away (unplugged or switched off).
+    DeviceLost,
 }
 
 /// Files with identical contents: `keep` has the shortest name.

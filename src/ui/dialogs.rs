@@ -86,7 +86,7 @@ pub fn conflicts(ctx: &Context, plan: &Plan) -> Option<Decision> {
     decision
 }
 
-/// Confirm moving `paths` to the Trash (`device`: the Digitakt's /trash
+/// Confirm moving `paths` to the Trash (`device`: the device's /trash
 /// folder), or with `permanent`, deleting them outright. `Some(true)` = go
 /// ahead, `Some(false)` = cancelled, `None` = still open.
 pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool, permanent: bool) -> Option<bool> {
@@ -120,9 +120,9 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool, 
         }
         ui.add_space(6.0);
         let note = if permanent {
-            "They are deleted from the Digitakt straight away, folders with everything in them. This can't be undone."
+            "They are deleted from the device straight away, folders with everything in them. This can't be undone."
         } else if device {
-            "They go to the /trash folder on the Digitakt; move them back from there."
+            "They go to the /trash folder on the device; move them back from there."
         } else {
             "You can restore them from the Trash."
         };

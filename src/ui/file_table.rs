@@ -18,7 +18,7 @@ pub const ROW_HEIGHT: f32 = 22.0;
 #[derive(Clone, Debug)]
 pub struct DragPayload {
     pub paths: Vec<PathBuf>,
-    /// The paths are on the Digitakt.
+    /// The paths are on the device.
     pub device: bool,
     /// The tab the drag started in.
     pub tab_id: u64,
@@ -47,7 +47,7 @@ pub enum Intent {
     AddFavourite(PathBuf),
     /// Move these to the Trash (after confirmation).
     Trash(Vec<PathBuf>),
-    /// Delete these from the Digitakt right away, skipping /trash (after
+    /// Delete these from the device right away, skipping /trash (after
     /// confirmation).
     DeleteNow(Vec<PathBuf>),
     /// Put these on the clipboard to be moved on the next Paste.
@@ -530,7 +530,7 @@ fn row(
             let label = if sel.len() > 1 { format!("Delete {} items now", sel.len()) } else { "Delete now".to_owned() };
             if ui
                 .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
-                .on_hover_text("Delete from the Digitakt right away, without going through /trash (⌥⌘⌫)")
+                .on_hover_text("Delete from the device right away, without going through /trash (⌥⌘⌫)")
                 .clicked()
             {
                 intents.push(Intent::DeleteNow(sel));

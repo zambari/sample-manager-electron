@@ -1,9 +1,12 @@
-//! An Elektron Digitakt's +Drive, browsed over USB MIDI.
+//! An Elektron machine's +Drive (Digitakt, Digitakt II, Analog Rytm,
+//! Model:Samples), browsed over USB MIDI.
 //!
 //! One worker thread owns the MIDI connection and runs every request in
 //! order: the device answers one API call at a time, so there is nothing to
 //! gain from parallel requests and a lot to lose. The UI posts [`Cmd`]s and
-//! gets results back as ordinary [`crate::jobs::Ev`]s.
+//! gets results back as ordinary [`crate::jobs::Ev`]s. While a job runs, the
+//! worker answers folder listings between its steps (down to single transfer
+//! chunks) so browsing stays responsive; other jobs wait their turn.
 //!
 //! Device paths are plain absolute paths (`/samples/kicks`) stored in
 //! `PathBuf`s; they never touch the local filesystem.
@@ -14,11 +17,11 @@ mod sample;
 use crate::jobs::{Emitter, Ev};
 use crate::ops::Policy;
 use proto::{Args, DirEntry, Reader};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 /// Where elk-herd (and we) put deleted items, so a stray keypress is undoable.
@@ -26,6 +29,8 @@ pub const TRASH: &str = "/trash";
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const PROGRESS_EVERY: u64 = 64 * 1024;
+/// How often to check that the device is still plugged in.
+const PROBE_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
@@ -71,7 +76,7 @@ impl Device {
         let (tx, rx) = channel();
         let _ = std::thread::Builder::new()
             .name("device".into())
-            .spawn(move || Worker { conn: None, em, job: None }.run(rx));
+            .spawn(move || Worker { conn: None, em, job: None, rx, later: VecDeque::new() }.run());
         Self { tx }
     }
 
@@ -119,28 +124,109 @@ struct Conn {
     next: u16,
     stereo: bool,
     name: String,
+    /// The MIDI input port's own name, to notice when it disappears.
+    port: String,
+    /// The port was found gone: every request fails from now on.
+    dead: bool,
+    probed: Instant,
 }
 
-fn find_port<T>(ports: Vec<T>, name: impl Fn(&T) -> Option<String>) -> Option<(T, String)> {
-    ports.into_iter().find_map(|p| {
-        let n = name(&p)?;
-        let l = n.to_ascii_lowercase();
-        (l.contains("elektron") || l.contains("digitakt")).then_some((p, n))
+/// Is a MIDI input called `name` still there? A fresh client each time:
+/// a long-lived one may not see ports come and go without a run loop.
+fn port_present(name: &str) -> bool {
+    let Ok(input) = midir::MidiInput::new("Sample Manager probe") else { return true };
+    input.ports().iter().any(|p| input.port_name(p).ok().as_deref() == Some(name))
+}
+
+/// Could this MIDI port be an Elektron machine?
+fn elektron_port(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    ["elektron", "digitakt", "digitone", "syntakt", "rytm", "model:samples", "model:cycles", "analog four", "analog keys", "analog heat"]
+        .iter()
+        .any(|k| l.contains(k))
+}
+
+/// Elektron product ids (the first byte of the device reply), as listed by
+/// Elektroid: `(name, stereo samples)`. Whether a machine has a sample drive
+/// is read from the commands it says it supports, not from here.
+fn product(id: u8) -> Option<(&'static str, bool)> {
+    Some(match id {
+        4 => ("Analog Four", false),
+        6 => ("Analog Keys", false),
+        8 => ("Analog Rytm", false),
+        10 => ("Analog Heat", false),
+        12 => ("Digitakt", false),
+        14 => ("Analog Four MKII", false),
+        16 => ("Analog Rytm MKII", false),
+        20 => ("Digitone", false),
+        22 => ("Analog Heat MKII", false),
+        25 => ("Model:Samples", false),
+        27 => ("Model:Cycles", false),
+        28 => ("Digitone Keys", false),
+        30 => ("Syntakt", false),
+        32 => ("Analog Heat +FX", false),
+        42 => ("Digitakt II", true),
+        43 => ("Digitone II", false),
+        _ => return None,
     })
 }
 
+/// How long to wait for a port's first answer. Short, so trying a port that
+/// isn't a usable device doesn't hold up the others.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1500);
+
 impl Conn {
+    /// Try each Elektron-looking port in turn; the first that answers and
+    /// has a sample drive wins.
     fn open() -> Result<Self, String> {
+        let input = midir::MidiInput::new("Sample Manager").map_err(|e| e.to_string())?;
+        let names: Vec<String> =
+            input.ports().iter().filter_map(|p| input.port_name(p).ok()).filter(|n| elektron_port(n)).collect();
+        drop(input);
+        if names.is_empty() {
+            return Err("No Elektron device found. Connect it by USB \
+                        (USB config: Overbridge or USB MIDI) and press Refresh."
+                .into());
+        }
+        let mut last = String::new();
+        for name in names {
+            match Self::open_port(&name) {
+                Ok(c) => {
+                    crate::log::line(format!("device: connected to {} on port {name}", c.name));
+                    return Ok(c);
+                }
+                Err(e) => {
+                    crate::log::line(format!("device: port {name}: {e}"));
+                    last = e;
+                }
+            }
+        }
+        Err(last)
+    }
+
+    fn open_port(in_name: &str) -> Result<Self, String> {
         let mut input = midir::MidiInput::new("Sample Manager").map_err(|e| e.to_string())?;
         input.ignore(midir::Ignore::None);
         let output = midir::MidiOutput::new("Sample Manager").map_err(|e| e.to_string())?;
 
-        let not_found = "No Elektron device found. Connect the Digitakt by USB \
-                         (USB config: Overbridge or USB MIDI) and press Refresh.";
-        let (in_port, in_name) =
-            find_port(input.ports(), |p| input.port_name(p).ok()).ok_or(not_found)?;
-        let (out_port, _) =
-            find_port(output.ports(), |p| output.port_name(p).ok()).ok_or(not_found)?;
+        let in_port = input
+            .ports()
+            .into_iter()
+            .find(|p| input.port_name(p).ok().as_deref() == Some(in_name))
+            .ok_or("port went away")?;
+        // The output of the same device carries the same name; failing that,
+        // the only Elektron output there is.
+        let outs: Vec<_> = output.ports().into_iter().filter_map(|p| Some((output.port_name(&p).ok()?, p))).collect();
+        let out_port = match outs.iter().find(|(n, _)| n == in_name) {
+            Some((_, p)) => p.clone(),
+            None => {
+                let mut el = outs.iter().filter(|(n, _)| elektron_port(n));
+                match (el.next(), el.next()) {
+                    (Some((_, p)), None) => p.clone(),
+                    _ => return Err("no matching MIDI output".into()),
+                }
+            }
+        };
 
         let (tx, rx) = channel();
         let _input = input
@@ -159,34 +245,72 @@ impl Conn {
             .connect(&out_port, "sample-manager-out")
             .map_err(|e| format!("MIDI output: {e}"))?;
 
-        let mut c = Self { out, _input, rx, next: 0, stereo: false, name: in_name };
-        let r = c.request(proto::DEVICE, Args::default()).map_err(|e| e.to_string())?;
+        let mut c = Self {
+            out,
+            _input,
+            rx,
+            next: 0,
+            stereo: false,
+            port: in_name.to_owned(),
+            name: in_name.to_owned(),
+            dead: false,
+            probed: Instant::now(),
+        };
+        let r = c
+            .request_within(proto::DEVICE, Args::default(), HANDSHAKE_TIMEOUT)
+            .map_err(|_| "no answer (is USB config set to Overbridge or USB MIDI?)".to_owned())?;
         let mut rd = Reader::new(&r);
-        let product = rd.u8().map_err(Fail::Link).map_err(|e| e.to_string())?;
+        let id = rd.u8().map_err(|e| format!("bad device reply: {e}"))?;
         // Message ids the device supports, then its name.
+        let mut cmds = Vec::new();
         if let Ok(n) = rd.u8() {
             for _ in 0..n {
-                let _ = rd.u8();
+                cmds.extend(rd.u8());
             }
         }
-        if let Ok(name) = rd.str() {
-            if !name.is_empty() {
-                c.name = name;
-            }
+        let known = product(id);
+        c.name = match rd.str() {
+            Ok(n) if !n.is_empty() => n,
+            _ => known.map_or_else(|| format!("Elektron device {id}"), |k| format!("Elektron {}", k.0)),
+        };
+        crate::log::line(format!("device: {} (product {id}) on {in_name}, commands {cmds:02x?}", c.name));
+        // An older firmware may not list its commands; then just try.
+        let needed = [proto::DIR_LIST, proto::READ_OPEN, proto::WRITE_OPEN];
+        if !cmds.is_empty() && !needed.iter().all(|n| cmds.contains(n)) {
+            return Err(format!("{} has no sample drive to browse", c.name));
         }
-        // Digitakt II (42) takes stereo; the original (12) is mono only.
-        c.stereo = product == 42;
+        c.stereo = known.is_some_and(|k| k.1);
         Ok(c)
     }
 
+    /// At most every [`PROBE_EVERY`], check the port is still there.
+    /// Returns false once it is gone.
+    fn probe(&mut self) -> bool {
+        if !self.dead && self.probed.elapsed() >= PROBE_EVERY {
+            self.probed = Instant::now();
+            if !port_present(&self.port) {
+                crate::log::line(format!("device: port {} disappeared", self.port));
+                self.dead = true;
+            }
+        }
+        !self.dead
+    }
+
     fn request(&mut self, cmd: u8, args: Args) -> R<Vec<u8>> {
+        self.request_within(cmd, args, TIMEOUT)
+    }
+
+    fn request_within(&mut self, cmd: u8, args: Args, timeout: Duration) -> R<Vec<u8>> {
+        if self.dead {
+            return Err(Fail::Link("Device disconnected".into()));
+        }
         self.next = self.next.wrapping_add(1).max(1);
         let id = self.next;
         while self.rx.try_recv().is_ok() {} // stale replies
         self.out
             .send(&proto::frame(id, cmd, &args.0))
             .map_err(|e| Fail::Link(format!("MIDI send failed: {e}")))?;
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let msg = self
@@ -241,8 +365,8 @@ impl Conn {
         self.ok(proto::ITEM_RENAME, Args::default().str(&a).str(&b), format!("could not move {a} to {b}"))
     }
 
-    /// `on_bytes(chunk, file_total)` after each chunk.
-    fn read(&mut self, p: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64, u64)) -> R<Vec<u8>> {
+    /// `on_bytes(conn, chunk, file_total)` after each chunk.
+    fn read(&mut self, p: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(&mut Conn, u64, u64)) -> R<Vec<u8>> {
         let s = dev_str(p);
         let r = self.request(proto::READ_OPEN, Args::default().str(&s))?;
         let mut rd = Reader::new(&r);
@@ -272,7 +396,7 @@ impl Conn {
                     return refused(format!("read failed: {s}"));
                 }
                 data.extend_from_slice(chunk);
-                on_bytes(chunk.len() as u64, total as u64);
+                on_bytes(&mut *self, chunk.len() as u64, total as u64);
             }
             Ok(())
         })();
@@ -283,8 +407,8 @@ impl Conn {
         Ok(data)
     }
 
-    /// `on_bytes(chunk, file_total)` after each chunk.
-    fn write(&mut self, p: &Path, data: &[u8], cancel: &AtomicBool, on_bytes: &mut dyn FnMut(u64, u64)) -> R<()> {
+    /// `on_bytes(conn, chunk, file_total)` after each chunk.
+    fn write(&mut self, p: &Path, data: &[u8], cancel: &AtomicBool, on_bytes: &mut dyn FnMut(&mut Conn, u64, u64)) -> R<()> {
         let s = dev_str(p);
         let total = data.len() as u32;
         let r = self.request(proto::WRITE_OPEN, Args::default().u32(total).str(&s))?;
@@ -306,7 +430,7 @@ impl Conn {
                     return refused(format!("write failed: {s}"));
                 }
                 off += chunk.len();
-                on_bytes(chunk.len() as u64, total as u64);
+                on_bytes(&mut *self, chunk.len() as u64, total as u64);
             }
             Ok(())
         })();
@@ -332,6 +456,38 @@ struct Worker {
     conn: Option<Conn>,
     em: Emitter,
     job: Option<Prog>,
+    rx: Receiver<Cmd>,
+    /// Jobs that arrived while another one ran; they go before new commands.
+    later: VecDeque<Cmd>,
+}
+
+fn entries(path: &Path, v: Vec<DirEntry>) -> Vec<crate::fs_model::Entry> {
+    v.into_iter()
+        .map(|d| crate::fs_model::Entry {
+            path: path.join(&d.name),
+            name: d.name,
+            is_dir: d.is_dir,
+            len: if d.is_dir { 0 } else { d.size as u64 },
+            modified: None,
+            is_audio: false,
+        })
+        .collect()
+}
+
+/// Answer listings waiting in `rx` on `c`, mid-transfer; park anything else
+/// in `later`. A link failure is only reported to the listing: the transfer's
+/// next request hits it too and handles the reconnect.
+fn serve_lists(c: &mut Conn, rx: &Receiver<Cmd>, later: &mut VecDeque<Cmd>, em: &Emitter) {
+    c.probe();
+    while let Ok(cmd) = rx.try_recv() {
+        match cmd {
+            Cmd::List { path, generation } => {
+                let result = c.list(&path).map(|v| entries(&path, v)).map_err(|e| e.to_string());
+                em.send(Ev::Listed { device: true, generation, path, result });
+            }
+            job => later.push_back(job),
+        }
+    }
 }
 
 /// Progress of the running transfer.
@@ -408,25 +564,63 @@ fn count_local(p: &Path) -> (usize, u64) {
 }
 
 impl Worker {
-    fn run(mut self, rx: Receiver<Cmd>) {
-        while let Ok(cmd) = rx.recv() {
-            match cmd {
-                Cmd::List { path, generation } => {
-                    let result = self.with_conn(|c| c.list(&path)).map(|v| {
-                        v.into_iter()
-                            .map(|d| crate::fs_model::Entry {
-                                path: path.join(&d.name),
-                                name: d.name,
-                                is_dir: d.is_dir,
-                                len: if d.is_dir { 0 } else { d.size as u64 },
-                                modified: None,
-                                is_audio: false,
-                            })
-                            .collect()
-                    });
-                    self.em.send(Ev::Listed { device: true, generation, path, result });
+    fn run(mut self) {
+        loop {
+            let cmd = match self.later.pop_front() {
+                Some(c) => c,
+                None if self.conn.is_some() => {
+                    let probed = self.conn.as_ref().map_or_else(Instant::now, |c| c.probed);
+                    match self.rx.recv_timeout(PROBE_EVERY.saturating_sub(probed.elapsed())) {
+                        Ok(c) => c,
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.check_alive();
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
                 }
+                None => match self.rx.recv() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                },
+            };
+            match cmd {
+                Cmd::List { path, generation } => self.list_now(path, generation),
                 Cmd::Job { job, cancel, task } => self.job(job, &cancel, task),
+            }
+        }
+    }
+
+    fn list_now(&mut self, path: PathBuf, generation: u64) {
+        let result = self.with_conn(|c| c.list(&path)).map(|v| entries(&path, v));
+        self.em.send(Ev::Listed { device: true, generation, path, result });
+    }
+
+    /// Drop the connection if the device's port is gone.
+    fn check_alive(&mut self) {
+        if self.conn.as_mut().is_some_and(|c| !c.probe()) {
+            self.link_failed("Device disconnected".into());
+        }
+    }
+
+    /// The link broke: drop the connection, and tell the UI whether the
+    /// device is gone altogether (unplugged) or just stopped answering.
+    fn link_failed(&mut self, e: String) -> String {
+        let gone = self.conn.take().is_some_and(|c| c.dead || !port_present(&c.port));
+        self.em.send(Ev::DeviceStatus(Err(e.clone())));
+        if gone {
+            self.em.send(Ev::DeviceLost);
+        }
+        e
+    }
+
+    /// Between a job's steps: answer waiting listings, park waiting jobs.
+    fn serve_pending(&mut self) {
+        self.check_alive();
+        while let Ok(cmd) = self.rx.try_recv() {
+            match cmd {
+                Cmd::List { path, generation } => self.list_now(path, generation),
+                job => self.later.push_back(job),
             }
         }
     }
@@ -457,16 +651,13 @@ impl Worker {
         let c = self.conn.as_mut().expect("opened above");
         match f(c) {
             Ok(v) => Ok(v),
-            Err(Fail::Link(e)) => {
-                self.conn = None;
-                self.em.send(Ev::DeviceStatus(Err(e.clone())));
-                Err(e)
-            }
+            Err(Fail::Link(e)) => Err(self.link_failed(e)),
             Err(Fail::Refused(e)) => Err(e),
         }
     }
 
     fn progress(&mut self, label: &str, n: u64) {
+        self.serve_pending();
         let Some(p) = self.job.as_mut() else { return };
         if !label.is_empty() {
             p.file = None;
@@ -659,6 +850,7 @@ impl Worker {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
+            self.serve_pending();
             let (n, b) = if k.is_dir { self.count_dir(&p.join(&k.name), cancel) } else { (1, k.size as u64) };
             total.0 += n;
             total.1 += b;
@@ -872,8 +1064,9 @@ impl Worker {
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
-        let em = &self.em;
-        let mut on = |n: u64, file_total: u64| {
+        let (em, rx, later) = (&self.em, &self.rx, &mut self.later);
+        let mut on = |c: &mut Conn, n: u64, file_total: u64| {
+            serve_lists(c, rx, later, em);
             if let Some(p) = prog.as_mut() {
                 p.done += if half { n - n / 2 } else { n };
                 let file_done = p.file.filter(|f| f.0 == "sending").map_or(0, |f| f.1) + n;
@@ -889,11 +1082,7 @@ impl Worker {
         let res = match res {
             Ok(()) => Ok(()),
             Err(Fail::Refused(e)) => Err(e),
-            Err(Fail::Link(e)) => {
-                self.conn = None;
-                self.em.send(Ev::DeviceStatus(Err(e.clone())));
-                Err(e)
-            }
+            Err(Fail::Link(e)) => Err(self.link_failed(e)),
         };
         if prog.is_some() {
             self.job = prog;
@@ -909,8 +1098,9 @@ impl Worker {
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
-        let em = &self.em;
-        let mut on = |n: u64, file_total: u64| {
+        let (em, rx, later) = (&self.em, &self.rx, &mut self.later);
+        let mut on = |c: &mut Conn, n: u64, file_total: u64| {
+            serve_lists(c, rx, later, em);
             if let Some(p) = prog.as_mut() {
                 p.done += if half { n / 2 } else { n };
                 let file_done = p.file.filter(|f| f.0 == "reading").map_or(0, |f| f.1) + n;
@@ -926,11 +1116,7 @@ impl Worker {
         let res = match res {
             Ok(v) => Ok(v),
             Err(Fail::Refused(e)) => Err(e),
-            Err(Fail::Link(e)) => {
-                self.conn = None;
-                self.em.send(Ev::DeviceStatus(Err(e.clone())));
-                Err(e)
-            }
+            Err(Fail::Link(e)) => Err(self.link_failed(e)),
         };
         if prog.is_some() {
             self.job = prog;

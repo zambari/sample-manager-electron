@@ -29,6 +29,8 @@ pub struct Pane {
     pub role: Role,
     pub tabs: Vec<DirTab>,
     pub active: usize,
+    /// Id of the local tab last active, to fall back to when the device goes.
+    pub last_local: Option<u64>,
 }
 
 impl Pane {
@@ -75,6 +77,30 @@ impl Pane {
     pub fn cycle(&mut self, delta: isize) {
         let n = self.tabs.len() as isize;
         self.active = ((self.active as isize + delta).rem_euclid(n)) as usize;
+    }
+
+    /// Remember the active tab if it is a local one.
+    pub fn note_active(&mut self) {
+        let t = self.active_tab();
+        if !t.device {
+            self.last_local = Some(t.id);
+        }
+    }
+
+    /// If a device tab is showing, switch to the last local tab (or any
+    /// local one). Returns false when there is no local tab to go to.
+    pub fn leave_device(&mut self) -> bool {
+        if !self.active_tab().device {
+            return true;
+        }
+        let by_id = self.last_local.and_then(|id| self.tabs.iter().position(|t| t.id == id && !t.device));
+        match by_id.or_else(|| self.tabs.iter().position(|t| !t.device)) {
+            Some(i) => {
+                self.active = i;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn tab_dirs(&self) -> Vec<PathBuf> {
