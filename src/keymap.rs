@@ -102,6 +102,8 @@ impl Keymap {
             (Chord { key: Key::Backspace, mods: Modifiers { alt: true, ..Modifiers::COMMAND } }, Action::DeleteNow),
             (cmd(Key::CloseBracket), Action::NextTab),
             (cmd(Key::OpenBracket), Action::PrevTab),
+            // ⌃A as well as ⌘A, for hands used to other platforms.
+            (Chord { key: Key::A, mods: Modifiers::CTRL }, Action::SelectAll),
         ]);
         Self { name: "macOS", bindings }
     }

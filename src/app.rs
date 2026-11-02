@@ -79,6 +79,9 @@ struct ActiveJob {
     started: bool,
     /// The file on the wire: `(phase, bytes done, file size)`.
     file: Option<(&'static str, u64, u64)>,
+    /// Has reported a file on the wire, so the status bar keeps a slot for
+    /// the per-file bar between files instead of letting the main bar jump.
+    file_bar: bool,
 }
 
 /// Jobs already finished since the queue was last empty, so the status bar
@@ -91,6 +94,8 @@ struct Batch {
     total_bytes: u64,
     /// Some finished job never knew its size: the bar counts files instead.
     bytes_unknown: bool,
+    /// Some finished job showed a per-file bar.
+    file_bar: bool,
 }
 
 impl Batch {
@@ -103,6 +108,7 @@ impl Batch {
         self.done_bytes += bytes;
         self.total_bytes += bytes;
         self.bytes_unknown |= a.total_bytes == 0;
+        self.file_bar |= a.file_bar;
     }
 }
 
@@ -616,6 +622,7 @@ impl App {
             total_items,
             started: false,
             file: None,
+            file_bar: false,
         });
         id
     }
@@ -749,6 +756,7 @@ impl App {
             total_items,
             started: true,
             file: None,
+            file_bar: false,
         });
     }
 
@@ -808,12 +816,21 @@ impl App {
                     if let Some(a) = self.active_jobs.iter_mut().find(|a| a.id == job) {
                         a.started = true;
                         a.file = file;
+                        a.file_bar |= file.is_some();
                         a.done_bytes = done_bytes;
                         a.total_bytes = total_bytes;
                         a.done_items = done_items;
                         a.total_items = total_items;
                         if !label.is_empty() {
                             a.label = label;
+                        }
+                    }
+                }
+                Ev::Counted { job, items, bytes } => {
+                    if let Some(a) = self.active_jobs.iter_mut().find(|a| a.id == job) {
+                        a.total_items = items;
+                        if let Some(b) = bytes {
+                            a.total_bytes = b;
                         }
                     }
                 }
@@ -1419,9 +1436,39 @@ impl App {
     }
 
     /// Make "New Folder" (or "New Folder 2", ...) in `dir` and open the
-    /// inline rename on it.
-    fn new_folder(&mut self, role: Role, dir: PathBuf) {
+    /// inline rename on it. With `named`, make exactly that folder and just
+    /// select it.
+    fn new_folder(&mut self, role: Role, dir: PathBuf, named: Option<String>) {
         let device = self.pane(role).active_tab().device;
+        if let Some(name) = named {
+            let path = dir.join(&name);
+            if device {
+                let exists = [&self.source, &self.dest]
+                    .into_iter()
+                    .flat_map(|p| p.tabs.iter())
+                    .filter(|t| t.device)
+                    .find_map(|t| t.listing_of(&dir))
+                    .is_some_and(|l| l.iter().any(|e| e.name == name));
+                if exists {
+                    self.errors.push(format!("{} already exists", path.display()));
+                    return;
+                }
+                self.run_device(device::Task::Mkdir { path: path.clone() }, "Creating folder", 1, 0);
+            } else {
+                if let Err(e) = std::fs::create_dir(&path) {
+                    self.errors.push(format!("{}: {e}", path.display()));
+                    return;
+                }
+                self.reload_showing(&dir, false);
+            }
+            self.focused = role;
+            self.editor_focused = false;
+            let tab = self.pane_mut(role).active_tab_mut();
+            tab.selected.clear();
+            tab.selected.insert(path);
+            tab.cursor = None;
+            return;
+        }
         const BASE: &str = "New Folder";
         let path = if device {
             let taken: std::collections::HashSet<String> = [&self.source, &self.dest]
@@ -1944,6 +1991,9 @@ impl App {
             };
             let job_id = a.id;
             let file = a.file;
+            // Once a device job has shown a per-file bar, keep it for the
+            // rest of the queue so the main bar doesn't resize between files.
+            let file_bar = self.active_jobs.iter().any(|j| j.file_bar) || self.batch.file_bar;
             // Device folders have no known size up front: show bytes so far.
             let bytes = if bytes_known {
                 format!("{} / {}", fs_model::human_bytes(done_bytes), fs_model::human_bytes(total_bytes))
@@ -1966,18 +2016,17 @@ impl App {
                     ui.label(format!("+{waiting} queued"))
                         .on_hover_text("Waiting jobs start when this one finishes. Their files count in the bar.");
                 }
-                // This file, chunk by chunk.
-                if let Some((phase, done, total)) = file.filter(|f| f.2 > 0) {
-                    ui.add(
-                        egui::ProgressBar::new((done as f32 / total as f32).clamp(0.0, 1.0))
-                            .desired_width(200.0)
-                            .text(format!(
-                                "{phase} {} / {}",
-                                fs_model::human_bytes(done.min(total)),
-                                fs_model::human_bytes(total)
-                            )),
-                    )
-                    .on_hover_text("Current file");
+                // This file, chunk by chunk; an empty bar between files.
+                if file_bar {
+                    let (frac, text) = match file.filter(|f| f.2 > 0) {
+                        Some((phase, done, total)) => (
+                            done as f32 / total as f32,
+                            format!("{phase} {} / {}", fs_model::human_bytes(done.min(total)), fs_model::human_bytes(total)),
+                        ),
+                        None => (0.0, "preparing…".to_owned()),
+                    };
+                    ui.add(egui::ProgressBar::new(frac.clamp(0.0, 1.0)).desired_width(200.0).text(text))
+                        .on_hover_text("Current file");
                 }
                 ui.add(
                     egui::ProgressBar::new(frac.clamp(0.0, 1.0))
@@ -2093,6 +2142,13 @@ impl App {
                 ui.label(egui::RichText::new(footer).small().weak());
             });
 
+        let other_folder = {
+            let other = match role {
+                Role::Source => &self.dest,
+                Role::Dest => &self.source,
+            };
+            other.active_tab().cwd.file_name().map(|n| n.to_string_lossy().into_owned())
+        };
         let intents = {
             let sizes = &self.sizes;
             let preview = &self.preview;
@@ -2115,6 +2171,7 @@ impl App {
                     committed,
                     pane_focused: focused,
                     clipboard: self.clipboard.as_ref(),
+                    other_folder,
                 },
             )
         };
@@ -2199,7 +2256,8 @@ impl App {
                     self.status = format!("Checking {} files for duplicates…", paths.len());
                     self.jobs.find_duplicates(paths);
                 }
-                Intent::NewFolder(dir) => self.new_folder(role, dir),
+                Intent::NewFolder(dir) => self.new_folder(role, dir, None),
+                Intent::NewFolderNamed { dir, name } => self.new_folder(role, dir, Some(name)),
                 Intent::LoadFromDevice(p) => self.ask_device_load(p),
             }
         }

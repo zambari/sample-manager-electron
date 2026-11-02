@@ -43,6 +43,13 @@ pub enum Ev {
         /// done, file size)`.
         file: Option<(&'static str, u64, u64)>,
     },
+    /// A queued job's files were counted before its turn: its totals for the
+    /// bar (`bytes` when known), without marking it as running.
+    Counted {
+        job: u64,
+        items: usize,
+        bytes: Option<u64>,
+    },
     /// Result of [`Jobs::find_duplicates`].
     Duplicates {
         groups: Vec<DupGroup>,

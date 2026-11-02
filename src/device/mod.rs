@@ -28,6 +28,10 @@ use std::time::{Duration, Instant};
 pub const TRASH: &str = "/trash";
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+/// Times one read chunk is asked for before the file counts as failed.
+const CHUNK_TRIES: u32 = 4;
+/// Times a whole file is read before it is reported as failed.
+const FILE_TRIES: u32 = 3;
 const PROGRESS_EVERY: u64 = 64 * 1024;
 /// How often to check that the device is still plugged in.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
@@ -76,7 +80,7 @@ impl Device {
         let (tx, rx) = channel();
         let _ = std::thread::Builder::new()
             .name("device".into())
-            .spawn(move || Worker { conn: None, em, job: None, rx, later: VecDeque::new() }.run());
+            .spawn(move || Worker { conn: None, em, job: None, rx, later: VecDeque::new(), counted: HashMap::new(), counting: false }.run());
         Self { tx }
     }
 
@@ -384,18 +388,29 @@ impl Conn {
                 }
                 let len = (total - data.len()).min(proto::CHUNK) as u32;
                 let start = data.len() as u32;
-                let r = self.request(proto::READ, Args::default().u32(fd).u32(len).u32(start))?;
-                let mut rd = Reader::new(&r);
-                let ok = rd.bool().map_err(Fail::Link)?;
-                let _fd = rd.u32().map_err(Fail::Link)?;
-                let _len = rd.u32().map_err(Fail::Link)?;
-                let _start = rd.u32().map_err(Fail::Link)?;
-                let _end = rd.u32().map_err(Fail::Link)?;
-                let chunk = rd.rest();
-                if !ok || chunk.is_empty() {
-                    return refused(format!("read failed: {s}"));
-                }
-                data.extend_from_slice(chunk);
+                // The drive sometimes answers a chunk with "not ok" or no
+                // data; asking again for the same chunk usually works.
+                let mut tries = 0;
+                let chunk = loop {
+                    let r = self.request(proto::READ, Args::default().u32(fd).u32(len).u32(start))?;
+                    let mut rd = Reader::new(&r);
+                    let ok = rd.bool().map_err(Fail::Link)?;
+                    let _fd = rd.u32().map_err(Fail::Link)?;
+                    let _len = rd.u32().map_err(Fail::Link)?;
+                    let _start = rd.u32().map_err(Fail::Link)?;
+                    let _end = rd.u32().map_err(Fail::Link)?;
+                    let chunk = rd.rest();
+                    if ok && !chunk.is_empty() {
+                        break chunk.to_vec();
+                    }
+                    tries += 1;
+                    crate::log::line(format!("device: read chunk at {start} of {s} failed (try {tries}, ok={ok}, {} bytes)", chunk.len()));
+                    if tries >= CHUNK_TRIES || cancel.load(Ordering::Relaxed) {
+                        return refused(format!("read failed: {s}"));
+                    }
+                    std::thread::sleep(Duration::from_millis(100 * tries as u64));
+                };
+                data.extend_from_slice(&chunk);
                 on_bytes(&mut *self, chunk.len() as u64, total as u64);
             }
             Ok(())
@@ -459,6 +474,11 @@ struct Worker {
     rx: Receiver<Cmd>,
     /// Jobs that arrived while another one ran; they go before new commands.
     later: VecDeque<Cmd>,
+    /// File counts of parked jobs, taken as they arrive so the bar's total
+    /// covers the whole queue; the job reuses them when it starts.
+    counted: HashMap<u64, Vec<(usize, u64)>>,
+    /// Counting parked jobs right now (counting serves pending commands too).
+    counting: bool,
 }
 
 fn entries(path: &Path, v: Vec<DirEntry>) -> Vec<crate::fs_model::Entry> {
@@ -623,6 +643,57 @@ impl Worker {
                 job => self.later.push_back(job),
             }
         }
+        self.count_parked();
+    }
+
+    /// What a job's files are counted from: its top-level paths, whether they
+    /// are local (an upload), and whether the counted bytes replace the
+    /// caller's guess.
+    fn count_sources(task: &Task) -> Option<(Vec<PathBuf>, bool, bool)> {
+        match task {
+            Task::Transfer { dir, items, .. } => {
+                // An upload counts its local file sizes, which is what its
+                // progress adds up to (see `write_raw`'s `worth`).
+                Some((items.iter().map(|(s, _)| s.clone()).collect(), *dir == Dir::Upload, true))
+            }
+            // Trash moves bytes; a delete just counts files.
+            Task::Trash { paths } => Some((paths.clone(), false, true)),
+            Task::Delete { paths } => Some((paths.clone(), false, false)),
+            _ => None,
+        }
+    }
+
+    /// Count the files of jobs waiting in `later` and put them on the bar now,
+    /// rather than when each job's turn comes.
+    fn count_parked(&mut self) {
+        if self.counting {
+            return;
+        }
+        let todo: Vec<(u64, Arc<AtomicBool>, Vec<PathBuf>, bool, bool)> = self
+            .later
+            .iter()
+            .filter_map(|c| match c {
+                Cmd::Job { job, cancel, task } if !self.counted.contains_key(job) => {
+                    let (paths, local, bytes) = Self::count_sources(task)?;
+                    Some((*job, cancel.clone(), paths, local, bytes))
+                }
+                _ => None,
+            })
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        self.counting = true;
+        for (job, cancel, paths, local, bytes) in todo {
+            let counts = self.count_files(&paths, local, &cancel);
+            self.em.send(Ev::Counted {
+                job,
+                items: counts.iter().map(|c| c.0).sum(),
+                bytes: bytes.then(|| counts.iter().map(|c| c.1).sum()),
+            });
+            self.counted.insert(job, counts);
+        }
+        self.counting = false;
     }
 
     fn status(&self) {
@@ -681,16 +752,29 @@ impl Worker {
             }
         };
         // Tells the UI this job is now running rather than waiting in line.
-        let items = match &task {
-            Task::Transfer { items, .. } => items.len(),
-            Task::Trash { paths } | Task::Delete { paths } => paths.len(),
+        // Counted while it waited: start from those totals so the bar
+        // doesn't shrink back to top-level items for a moment.
+        let mut counted = self.counted.remove(&job);
+        let scan_bytes = Self::count_sources(&task).is_some_and(|s| s.2);
+        let items = match (&counted, &task) {
+            (Some(c), _) => c.iter().map(|c| c.0).sum(),
+            (None, Task::Transfer { items, .. }) => items.len(),
+            (None, Task::Trash { paths } | Task::Delete { paths }) => paths.len(),
             _ => 1,
         };
-        let total = match &task {
-            Task::Transfer { total_bytes, .. } => *total_bytes,
+        let total = match (&counted, &task) {
+            (Some(c), _) if scan_bytes => c.iter().map(|c| c.1).sum(),
+            (_, Task::Transfer { total_bytes, .. }) => *total_bytes,
             _ => 0,
         };
         self.em.send(Prog { id: job, done: 0, last: 0, total, item: 0, items, file: None }.ev(""));
+        let mut counts_for = |w: &mut Self, paths: &[PathBuf], local: bool| match counted.take() {
+            Some(c) => c,
+            None => {
+                w.progress("Counting files…", 0);
+                w.count_files(paths, local, cancel)
+            }
+        };
 
         match task {
             Task::Rename { from, to } => {
@@ -716,7 +800,7 @@ impl Worker {
             Task::Trash { paths } => {
                 let trash = PathBuf::from(TRASH);
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
-                let counts = self.count_files(&paths, false, cancel);
+                let counts = counts_for(self, &paths, false);
                 self.set_totals(&counts, true);
                 let mut before = (0, 0);
                 for (i, p) in paths.into_iter().enumerate() {
@@ -750,7 +834,7 @@ impl Worker {
             }
             Task::Delete { paths } => {
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
-                let counts = self.count_files(&paths, false, cancel);
+                let counts = counts_for(self, &paths, false);
                 self.set_totals(&counts, false);
                 let mut before = (0, 0);
                 for (i, p) in paths.into_iter().enumerate() {
@@ -774,10 +858,7 @@ impl Worker {
                 }
                 self.job = Some(Prog { id: job, done: 0, last: 0, total: total_bytes, item: 0, items: n, file: None });
                 let srcs: Vec<PathBuf> = items.iter().map(|(s, _)| s.clone()).collect();
-                let counts = self.count_files(&srcs, dir == Dir::Upload, cancel);
-                // Device sizes are exact; an upload's bytes on the wire are
-                // not its file sizes, so keep the caller's guess there.
-                let scan_bytes = dir != Dir::Upload || total_bytes == 0;
+                let counts = counts_for(self, &srcs, dir == Dir::Upload);
                 self.set_totals(&counts, scan_bytes);
                 let mut before = (0, 0);
                 for (i, (src, dst_dir)) in items.into_iter().enumerate() {
@@ -818,7 +899,6 @@ impl Worker {
     /// files rather than top-level items. `local`: paths on disk (an
     /// upload), filtered the way [`Self::upload`] picks files.
     fn count_files(&mut self, paths: &[PathBuf], local: bool, cancel: &AtomicBool) -> Vec<(usize, u64)> {
-        self.progress("Counting files…", 0);
         let mut listings: HashMap<PathBuf, Vec<(String, bool, u64)>> = HashMap::new();
         let mut out = Vec::with_capacity(paths.len());
         for p in paths {
@@ -1007,7 +1087,7 @@ impl Worker {
             self.progress(&Self::short(src), 0);
             // Read and write each count half, so the file adds up to its size once.
             let raw = self.read_raw(src, true, cancel)?;
-            self.write_raw(target, &raw, true, cancel)?;
+            self.write_raw(target, &raw, true, None, cancel)?;
             self.with_conn(|c| c.delete_file(src))?;
             self.file_done();
         }
@@ -1050,14 +1130,21 @@ impl Worker {
         // Known only once connected, which placing the file made sure of.
         let stereo = mono.is_none() && self.conn.as_ref().is_some_and(|c| c.stereo);
         let raw = sample::to_device(&s, stereo);
-        self.write_raw(&target, &raw, false, cancel)?;
+        // What goes over the wire (converted, maybe folded) isn't the file's
+        // size, which is what the bar's total counts: scale it to that, so
+        // the bar doesn't jump when the next file starts.
+        let worth = std::fs::metadata(src).map(|m| m.len()).unwrap_or(raw.len() as u64);
+        self.write_raw(&target, &raw, false, Some(worth), cancel)?;
         self.file_done();
         Ok(())
     }
 
     /// `half`: this write follows a read of the same bytes (a device-to-device
-    /// copy), and each counts for half.
-    fn write_raw(&mut self, target: &Path, raw: &[u8], half: bool, cancel: &AtomicBool) -> Result<(), String> {
+    /// copy), and each counts for half. `worth`: the bar bytes the whole
+    /// write counts for, when not its own length.
+    fn write_raw(&mut self, target: &Path, raw: &[u8], half: bool, worth: Option<u64>, cancel: &AtomicBool) -> Result<(), String> {
+        let len = raw.len().max(1) as u64;
+        let mut sent = 0u64;
         if let Some(p) = self.job.as_mut() {
             p.file = None;
         }
@@ -1068,7 +1155,12 @@ impl Worker {
         let mut on = |c: &mut Conn, n: u64, file_total: u64| {
             serve_lists(c, rx, later, em);
             if let Some(p) = prog.as_mut() {
-                p.done += if half { n - n / 2 } else { n };
+                p.done += match worth {
+                    Some(w) => w * (sent + n) / len - w * sent / len,
+                    None if half => n - n / 2,
+                    None => n,
+                };
+                sent += n;
                 let file_done = p.file.filter(|f| f.0 == "sending").map_or(0, |f| f.1) + n;
                 p.file = Some(("sending", file_done, file_total));
                 // Every chunk: they are slow enough that this is cheap, and
@@ -1095,6 +1187,36 @@ impl Worker {
         if let Some(p) = self.job.as_mut() {
             p.file = None;
         }
+        // A file that still fails after its chunk retries is read again from
+        // the start (reopened), with its progress rolled back first.
+        let start = self.job;
+        let mut attempt = 1;
+        loop {
+            let res = self.read_once(src, half, cancel);
+            match res {
+                Err(e) if attempt < FILE_TRIES && self.conn.is_some() && !cancel.load(Ordering::Relaxed) && e.starts_with("read failed") => {
+                    crate::log::line(format!("device: {e} (attempt {attempt}), reading it again"));
+                    attempt += 1;
+                    if start.is_some() {
+                        self.job = start;
+                        if let Some(p) = self.job.as_mut() {
+                            p.file = None;
+                            self.em.send(p.ev(""));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                res => {
+                    if res.is_ok() && attempt > 1 {
+                        crate::log::line(format!("device: {} read fine on attempt {attempt}", dev_str(src)));
+                    }
+                    return res;
+                }
+            }
+        }
+    }
+
+    fn read_once(&mut self, src: &Path, half: bool, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
@@ -1185,7 +1307,7 @@ impl Worker {
         }
         self.progress(&entry.name, 0);
         let raw = self.read_raw(src, true, cancel)?;
-        self.write_raw(&target, &raw, true, cancel)?;
+        self.write_raw(&target, &raw, true, None, cancel)?;
         self.file_done();
         Ok(())
     }

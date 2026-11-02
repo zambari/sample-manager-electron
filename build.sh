@@ -4,6 +4,8 @@
 # Usage:
 #   ./build.sh          release build  -> target/release/sample_manager
 #   ./build.sh run      release build, then launch the app
+#   ./build.sh bundle   universal (Intel + Apple Silicon) .app, zipped
+#                       -> target/bundle/Sample Manager.zip
 #   ./build.sh dev      debug build (faster to compile, slower to run)
 #   ./build.sh test     run the test suite
 #   ./build.sh clean    delete build output
@@ -27,6 +29,49 @@ case "$mode" in
   run)
     cargo run --release
     ;;
+  bundle)
+    app_name="Sample Manager"
+    version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+    out="target/bundle"
+    app="$out/$app_name.app"
+
+    # Apple Silicon needs macOS 11 at least; use the same floor for Intel.
+    export MACOSX_DEPLOYMENT_TARGET=11.0
+    rustup target add x86_64-apple-darwin aarch64-apple-darwin >/dev/null
+    cargo build --release --target x86_64-apple-darwin
+    cargo build --release --target aarch64-apple-darwin
+
+    rm -rf "$out"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    lipo -create -output "$app/Contents/MacOS/sample_manager" \
+      target/x86_64-apple-darwin/release/sample_manager \
+      target/aarch64-apple-darwin/release/sample_manager
+
+    cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>$app_name</string>
+  <key>CFBundleDisplayName</key><string>$app_name</string>
+  <key>CFBundleIdentifier</key><string>com.zambari.sample-manager</string>
+  <key>CFBundleExecutable</key><string>sample_manager</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>$version</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Sample Manager uses audio devices to play samples.</string>
+</dict>
+</plist>
+PLIST
+
+    # Not notarised: ad-hoc sign so Apple Silicon will run it at all.
+    codesign --force --deep --sign - "$app"
+    ditto -c -k --keepParent "$app" "$out/$app_name.zip"
+    echo
+    echo "Built: $(pwd)/$out/$app_name.zip"
+    ;;
   dev)
     cargo build
     echo
@@ -40,7 +85,7 @@ case "$mode" in
     ;;
   *)
     echo "Unknown option: $mode" >&2
-    echo "Use one of: release (default), run, dev, test, clean" >&2
+    echo "Use one of: release (default), run, bundle, dev, test, clean" >&2
     exit 1
     ;;
 esac

@@ -62,6 +62,8 @@ pub enum Intent {
     RemoveDuplicates(Vec<PathBuf>),
     /// Make a new folder in this directory and start renaming it.
     NewFolder(PathBuf),
+    /// Make a folder with this exact name in this directory.
+    NewFolderNamed { dir: PathBuf, name: String },
     /// Fetch this device file and open it in the editor (after a warning).
     LoadFromDevice(PathBuf),
 }
@@ -76,6 +78,8 @@ pub struct TableCtx<'a> {
     pub pane_focused: bool,
     /// The clipboard, for dimming cut items and enabling Paste.
     pub clipboard: Option<&'a crate::ops::Clipboard>,
+    /// Name of the folder the other pane is showing, offered as a new-folder name.
+    pub other_folder: Option<String>,
 }
 
 impl TableCtx<'_> {
@@ -206,7 +210,7 @@ fn rows(
         intents.push(Intent::TookFocus);
     }
     bg.context_menu(|ui| {
-        new_folder_button(ui, tab.cwd.clone(), intents);
+        new_folder_button(ui, cx, tab.cwd.clone(), intents);
         paste_button(ui, cx, None, intents);
         if !tab.device {
             reveal_button(ui, tab.cwd.clone(), intents);
@@ -217,7 +221,7 @@ fn rows(
         ui.set_min_width(ui.available_width());
         for i in range {
             if i < up {
-                parent_row(ui, intents);
+                parent_row(ui, tab, intents);
             } else {
                 row(ui, tab, cx, i - up, intents);
             }
@@ -225,11 +229,22 @@ fn rows(
     });
 }
 
-fn parent_row(ui: &mut Ui, intents: &mut Vec<Intent>) {
+fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
         Sense::click(),
     );
+    // Dropping onto ".." moves the items up into the parent folder.
+    if let Some(parent) = tab.parent() {
+        if resp.dnd_hover_payload::<DragPayload>().is_some() {
+            let color = crate::ui::theme::ACCENT_BRIGHT;
+            ui.painter().rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
+        }
+        if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
+            intents.push(Intent::DroppedOn { dir: parent, payload: (*p).clone() });
+            return;
+        }
+    }
     if resp.hovered() {
         ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -479,7 +494,7 @@ fn row(
         }
         // Next to the row, i.e. in the folder the row sits in.
         if let Some(parent) = entry.path.parent() {
-            new_folder_button(ui, parent.to_path_buf(), intents);
+            new_folder_button(ui, cx, parent.to_path_buf(), intents);
         }
         ui.separator();
         let sel = tab.effective_selection();
@@ -643,10 +658,20 @@ fn paste_button(ui: &mut Ui, cx: &TableCtx<'_>, target: Option<PathBuf>, intents
     }
 }
 
-fn new_folder_button(ui: &mut Ui, dir: PathBuf, intents: &mut Vec<Intent>) {
+fn new_folder_button(ui: &mut Ui, cx: &TableCtx<'_>, dir: PathBuf, intents: &mut Vec<Intent>) {
     if ui.button("New folder").clicked() {
-        intents.push(Intent::NewFolder(dir));
+        intents.push(Intent::NewFolder(dir.clone()));
         ui.close();
+    }
+    if let Some(name) = &cx.other_folder {
+        if ui
+            .button(format!("New folder “{name}”"))
+            .on_hover_text("Named after the folder open in the other pane")
+            .clicked()
+        {
+            intents.push(Intent::NewFolderNamed { dir, name: name.clone() });
+            ui.close();
+        }
     }
 }
 
@@ -769,7 +794,7 @@ mod tests {
         };
         let mut out = ctx.run_ui(input, |ui| {
             egui::Panel::left("col").default_size(320.0).show(ui, |ui| {
-                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), pane_focused: true, clipboard: None });
+                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), pane_focused: true, clipboard: None, other_folder: None });
             });
             egui::CentralPanel::default().show(ui, |_| {});
         });
