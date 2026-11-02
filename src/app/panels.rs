@@ -245,12 +245,23 @@ impl App {
                 self.device_badge(ui);
             } else {
                 self.favourites_menu(ui, role);
+                self.drives_menu(ui, role);
             }
             ui.separator();
-            let cwd = self.pane(role).active_tab().cwd.display().to_string();
-            let size = egui::TextStyle::Small.resolve(ui.style()).size + 1.0;
-            let color = ui.visuals().text_color();
-            ui.add(egui::Label::new(egui::RichText::new(cwd).size(size).color(color)).truncate());
+            if !on_dev && self.path_edit.as_ref().is_some_and(|(r, _)| *r == role) {
+                self.path_editor(ui, role);
+            } else {
+                let tab = self.pane(role).active_tab();
+                let cwd = if tab.device { crate::device::dev_str(&tab.cwd) } else { tab.cwd.display().to_string() };
+                let size = egui::TextStyle::Small.resolve(ui.style()).size + 1.0;
+                let color = ui.visuals().text_color();
+                let label = egui::Label::new(egui::RichText::new(cwd.clone()).size(size).color(color)).truncate();
+                if on_dev {
+                    ui.add(label);
+                } else if ui.add(label.sense(egui::Sense::click())).on_hover_text("Click to type a path").clicked() {
+                    self.path_edit = Some((role, cwd));
+                }
+            }
         });
 
         self.tab_strip(ui, role);
@@ -466,6 +477,91 @@ impl App {
         }
     }
 
+    /// Drive dropdown: jump to the home folder or any mounted disk (drive
+    /// letters on Windows, /Volumes on macOS).
+    pub(super) fn drives_menu(&mut self, ui: &mut egui::Ui, role: Role) {
+        let cwd = self.pane(role).active_tab().cwd.clone();
+        let mut go = None;
+        ui.menu_button("💾 ⏷", |ui| {
+            ui.set_min_width(180.0);
+            // Probing drives can be slow (a sleeping network share), so only
+            // while the menu is open, and not every frame.
+            if self.volumes.as_ref().is_none_or(|(t, _)| t.elapsed().as_secs_f32() > 2.0) {
+                self.volumes = Some((std::time::Instant::now(), crate::fs_model::volumes()));
+            }
+            let home = dirs_home();
+            if ui.add(egui::Button::new("🏠 Home").selected(cwd == home).frame(false)).on_hover_text(home.display().to_string()).clicked() {
+                go = Some(home);
+                ui.close();
+            }
+            ui.separator();
+            let vols = self.volumes.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
+            // The disk holding cwd: the longest volume path it sits under.
+            let current = vols.iter().filter(|v| cwd.starts_with(&v.path)).max_by_key(|v| v.path.as_os_str().len()).map(|v| &v.path);
+            for v in vols {
+                let resp = ui
+                    .add(egui::Button::new(v.name.as_str()).selected(current == Some(&v.path)).frame(false))
+                    .on_hover_text(v.path.display().to_string());
+                if resp.clicked() {
+                    go = Some(v.path.clone());
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text("Drives");
+        if let Some(p) = go {
+            self.focused = role;
+            self.editor_focused = false;
+            self.open_in(role, p);
+        }
+    }
+
+    /// Typed path in the pane header. Enter goes there, Esc or clicking
+    /// away cancels.
+    pub(super) fn path_editor(&mut self, ui: &mut egui::Ui, role: Role) {
+        let Some((_, buf)) = self.path_edit.as_mut() else { return };
+        let id = egui::Id::new(("path_edit", role.label()));
+        let resp = ui.add(
+            egui::TextEdit::singleline(buf)
+                .id(id)
+                .font(egui::TextStyle::Small)
+                .desired_width(f32::INFINITY),
+        );
+        // First frame: take focus with the whole path selected.
+        if !resp.has_focus() && !resp.lost_focus() {
+            ui.memory_mut(|m| m.request_focus(id));
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+                let n = buf.chars().count();
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(n),
+                )));
+                state.store(ui.ctx(), id);
+            }
+            return;
+        }
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if !resp.lost_focus() {
+            return;
+        }
+        let typed = std::mem::take(buf);
+        self.path_edit = None;
+        if !enter {
+            return;
+        }
+        let Some(path) = typed_path(&typed) else { return };
+        let target = if path.is_file() { path.parent().map(Path::to_path_buf) } else { Some(path.clone()) };
+        match target {
+            Some(dir) if dir.is_dir() => {
+                self.focused = role;
+                self.editor_focused = false;
+                self.open_in(role, dir);
+            }
+            _ => self.errors.push(format!("{}: no such folder", path.display())),
+        }
+    }
+
     /// Whether a drag dropped into `role` moves or copies. Like Finder: on the
     /// same storage it moves, so the device to the device always moves
     /// (whichever pane), and so does the computer within one pane. Across
@@ -590,4 +686,24 @@ impl App {
             self.pane_mut(role).close_other_tabs(i);
         }
     }
+}
+
+/// Turn what was typed into the path bar into a path: trims whitespace and
+/// the quotes Windows' "Copy as path" adds, expands a leading `~`, and makes
+/// a bare drive (`D:`) mean that drive's root.
+fn typed_path(s: &str) -> Option<PathBuf> {
+    let s = s.trim().trim_matches('"').trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s == "~" {
+        return Some(dirs_home());
+    }
+    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
+        return Some(dirs_home().join(rest));
+    }
+    if cfg!(target_os = "windows") && s.len() == 2 && s.ends_with(':') {
+        return Some(PathBuf::from(format!("{s}\\")));
+    }
+    Some(PathBuf::from(s))
 }

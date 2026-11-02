@@ -14,6 +14,64 @@ pub fn is_audio_path(path: &Path) -> bool {
         .is_some_and(|e| AUDIO_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()))
 }
 
+/// A disk the file panes can jump to: a drive letter on Windows, a mounted
+/// volume elsewhere.
+#[derive(Clone, Debug)]
+pub struct Volume {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Mounted disks, the system disk first. Probes the filesystem, so call it
+/// now and then (when a menu opens), not every frame.
+pub fn volumes() -> Vec<Volume> {
+    let mut out = Vec::new();
+    if cfg!(target_os = "windows") {
+        for c in 'A'..='Z' {
+            let path = PathBuf::from(format!("{c}:\\"));
+            if path.is_dir() {
+                out.push(Volume { name: format!("{c}:"), path });
+            }
+        }
+        return out;
+    }
+
+    let root = PathBuf::from("/");
+    let mut mounts: Vec<PathBuf> = Vec::new();
+    let mut root_name = "/".to_owned();
+    let parents: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        vec!["/Volumes".into()]
+    } else {
+        let user = std::env::var_os("USER").map(PathBuf::from).unwrap_or_default();
+        vec![Path::new("/media").join(&user), Path::new("/run/media").join(&user), "/mnt".into()]
+    };
+    for dir in parents {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = e.path();
+            // macOS lists the system disk in /Volumes as a link back to "/".
+            if path.canonicalize().is_ok_and(|c| c == root) {
+                root_name = name;
+                continue;
+            }
+            if path.is_dir() {
+                mounts.push(path);
+            }
+        }
+    }
+    mounts.sort();
+    out.push(Volume { name: root_name, path: root });
+    out.extend(mounts.into_iter().map(|path| Volume {
+        name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        path,
+    }));
+    out
+}
+
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub name: String,

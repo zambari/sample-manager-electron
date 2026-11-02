@@ -114,8 +114,11 @@ fn refused<T>(what: impl Into<String>) -> R<T> {
     Err(Fail::Refused(what.into()))
 }
 
-fn dev_str(p: &Path) -> String {
-    let s = p.to_string_lossy().into_owned();
+/// A device path as the device (and the user) expect it: rooted, with `/`
+/// separators. On Windows, `Path::join` inserts `\`, which the device
+/// would read as part of a file name.
+pub fn dev_str(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
     if s.starts_with('/') { s } else { format!("/{s}") }
 }
 

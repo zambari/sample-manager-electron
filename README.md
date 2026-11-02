@@ -70,7 +70,15 @@ Install Rust from <https://rustup.rs>, then:
 ```
 
 `./build.sh` alone makes a release build at `target/release/sample_manager`.
-The script's header lists the other options (`dev`, `test`, `clean`).
+The script's header lists the other options (`bundle`, `windows`, `dev`,
+`test`, `clean`).
+
+**Windows from a Mac.** `./build.sh windows` cross-compiles a 64-bit `.exe`
+into `target/bundle/Sample Manager Windows.zip`. It needs
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin)
+(`cargo install cargo-xwin --locked`). The first build downloads Microsoft's
+C runtime and Windows SDK into cargo-xwin's cache, which means accepting
+Microsoft's license for them.
 
 ## Acknowledgements
 

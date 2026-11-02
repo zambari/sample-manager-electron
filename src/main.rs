@@ -1,3 +1,6 @@
+// Release builds on Windows are GUI apps: no console window behind them.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod device;
@@ -19,7 +22,11 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1560.0, 880.0])
             .with_min_inner_size([960.0, 520.0])
-            .with_title("Sample Manager"),
+            .with_title("Sample Manager")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .expect("bundled icon is a valid PNG"),
+            ),
         ..Default::default()
     };
 

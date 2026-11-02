@@ -127,6 +127,10 @@ pub struct App {
     dupes_pending: Option<Vec<crate::jobs::DupGroup>>,
     /// Paths cut or copied in a file pane, waiting for Paste.
     clipboard: Option<Clipboard>,
+    /// The pane whose header path is being typed into, and the text so far.
+    path_edit: Option<(Role, String)>,
+    /// Mounted disks for the drives menu, and when they were last probed.
+    volumes: Option<(std::time::Instant, Vec<crate::fs_model::Volume>)>,
     /// Every job not yet finished, oldest first.
     active_jobs: Vec<ActiveJob>,
     /// Finished part of the current queue.
@@ -276,6 +280,8 @@ impl App {
             trash_pending: None,
             delete_pending: None,
             clipboard: None,
+            path_edit: None,
+            volumes: None,
             dupes_pending: None,
             active_jobs: Vec::new(),
             batch: Batch::default(),
@@ -594,7 +600,7 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-fn dirs_home() -> PathBuf {
+pub(super) fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
