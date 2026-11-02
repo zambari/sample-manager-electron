@@ -1,0 +1,431 @@
+//! Playback, auditioning and the audio editor: loading, exporting, unsaved-edit prompts.
+
+use super::*;
+
+impl App {
+    // ---- playback ---------------------------------------------------------
+
+    pub(super) fn playing_current(&self) -> bool {
+        self.engine.is_playing() && self.voice_path.is_some() && self.voice_path.as_deref() == self.editor.path()
+    }
+
+    /// Play from wherever the toolbar's "From" setting says.
+    pub(super) fn start_play(&mut self) {
+        self.start_play_from(self.editor.prefs.play_from_in);
+    }
+
+    /// Play the editor's sample from the in point, or from the parked
+    /// playhead (falling back to the in point if the playhead is outside
+    /// the region).
+    pub(super) fn start_play_from(&mut self, from_in: bool) {
+        let Some(s) = self.editor.sample().cloned() else { return };
+        let (a, b) = self.editor.sel;
+        let ph = self.editor.playhead;
+        let from = if !from_in && (a..b).contains(&ph) { ph } else { a };
+        self.voice_path = Some(s.path.clone());
+        self.voice_sample = Some(s.clone());
+        self.engine.play(
+            s,
+            PlayParams {
+                from,
+                loop_start: a,
+                end: b,
+                looping: self.editor.prefs.looping,
+                gain: self.editor.gain(),
+                mono: self.editor.fold(),
+            },
+        );
+    }
+
+    pub(super) fn toggle_play(&mut self) {
+        if self.playing_current() {
+            self.engine.stop();
+        } else {
+            self.start_play();
+        }
+    }
+
+    /// Load `path` into the editor, optionally starting playback once it's in.
+    pub(super) fn audition(&mut self, path: &Path, play: bool) {
+        if self.editor.path() == Some(path) {
+            if play {
+                self.start_play();
+            }
+            return;
+        }
+        if self.editor.is_dirty() {
+            self.leave_pending = Some(Leave::Audition(path.to_path_buf(), play));
+            return;
+        }
+        if self.engine.is_playing() {
+            self.engine.stop();
+        }
+        self.editor.play_when_loaded = play;
+        self.editor.request(path);
+        if self.opened.insert(path.to_path_buf()) {
+            self.opened_dirty = true;
+        }
+    }
+
+    /// Space / double-click on a file row.
+    pub(super) fn preview_toggle(&mut self, path: &Path) {
+        if self.editor.path() == Some(path) && self.playing_current() {
+            self.engine.stop();
+        } else {
+            self.audition(path, true);
+        }
+    }
+
+    /// Auto-load whatever the file cursor is on, when it changes.
+    pub(super) fn follow_cursor(&mut self) {
+        let cur = self
+            .pane(self.focused)
+            .active_tab()
+            .cursor_entry()
+            .filter(|e| e.is_audio)
+            .map(|e| e.path.clone());
+        if self.hold_cursor_load {
+            // Wait for the restored listing to settle, then adopt its cursor
+            // without loading it.
+            if !self.pane(self.focused).active_tab().loading {
+                self.hold_cursor_load = false;
+                self.last_cursor = cur;
+            }
+            return;
+        }
+        if cur == self.last_cursor {
+            return;
+        }
+        self.last_cursor = cur.clone();
+        if let Some(p) = cur {
+            if self.editor.prefs.auto_load {
+                self.audition(&p, self.editor.prefs.auto_play);
+            }
+        }
+    }
+
+    /// Step the file cursor to the next audio file in `dir` direction.
+    pub(super) fn step_file(&mut self, dir: isize) {
+        let tab = self.pane_mut(self.focused).active_tab_mut();
+        for _ in 0..tab.entries.len() {
+            let before = tab.cursor;
+            tab.move_cursor(dir, false);
+            if tab.cursor == before || tab.cursor_entry().is_some_and(|e| e.is_audio) {
+                break;
+            }
+        }
+        let path = tab.cursor_entry().filter(|e| e.is_audio).map(|e| e.path.clone());
+        if let Some(p) = path {
+            // Explicit request: load even when auto-load is off.
+            self.last_cursor = Some(p.clone());
+            self.audition(&p, self.editor.prefs.auto_play);
+        }
+    }
+
+    pub(super) fn export(&mut self) {
+        if self.editor.current.is_none() {
+            return;
+        }
+        let tab = self.pane(Role::Dest).active_tab();
+        let (dest, to_dev) = (tab.cwd.clone(), tab.device);
+        let mono = self.editor.fold();
+        self.export_to(dest, to_dev, mono);
+    }
+
+    pub(super) fn export_to(&mut self, dest: PathBuf, to_dev: bool, mono: Option<Fold>) {
+        let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        if to_dev {
+            let dst = device::upload_target(&src, &dest);
+            let op = ops::Op { conflict: self.device_has(&dst), approx_bytes: 0, src, dst, is_dir: false };
+            let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
+            return self.offer(plan, PlanKind::DeviceExport { mono });
+        }
+        let dst = crate::audio::export::target_for(&src, &dest);
+        let op = ops::Op {
+            conflict: dst.exists(),
+            approx_bytes: 0,
+            src,
+            dst,
+            is_dir: false,
+        };
+        let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
+        self.offer(plan, PlanKind::Export { mono });
+    }
+
+    /// Write what you hear back over the open file (as `<stem>.wav` beside
+    /// it when it isn't a WAV). Folded to mono only if you're listening so.
+    pub(super) fn save_in_place(&mut self) {
+        let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        if self.editor.exporting {
+            return;
+        }
+        let Some(dir) = src.parent() else { return };
+        let target = crate::audio::export::target_for(&src, dir);
+        self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
+        let mono = self.editor.fold();
+        self.editor.export(target, mono);
+    }
+
+    /// Do what the unsaved-edits question interrupted.
+    pub(super) fn finish_leave(&mut self, leave: Leave) {
+        match leave {
+            Leave::Audition(p, play) => self.audition(&p, play),
+            Leave::LoadEditor(p) => self.load_into_editor(&p),
+            Leave::Quit => {
+                // Closed from `ui` once no job (an upload of the saved edit)
+                // is running.
+                self.allow_close = true;
+                self.close_when_idle = true;
+                if !self.active_jobs.is_empty() {
+                    self.status = "Quitting once the transfer finishes…".to_owned();
+                }
+            }
+        }
+    }
+
+    pub(super) fn answer_leave(&mut self, leave: Leave, choice: LeaveChoice) {
+        match choice {
+            LeaveChoice::Cancel => {
+                self.status = "Kept editing — the edits are still unsaved".to_owned();
+            }
+            LeaveChoice::Discard => {
+                self.editor.discard();
+                self.finish_leave(leave);
+            }
+            LeaveChoice::SaveInPlace => {
+                self.leave_after_save = Some(leave);
+                self.save_in_place();
+            }
+            LeaveChoice::Commit => {
+                self.leave_after_save = Some(leave);
+                self.export();
+            }
+        }
+    }
+
+    pub(super) fn perform_editor(&mut self, a: EdAction, wave: Option<egui::Rect>) {
+        let ed = &mut self.editor;
+        let frames = ed.frames();
+        // Points set while playing land where you hear them.
+        let here = if self.engine.is_playing() && self.voice_path.as_deref() == ed.path() {
+            self.engine.position().min(frames)
+        } else {
+            ed.playhead
+        };
+        match a {
+            EdAction::TogglePlay => self.toggle_play(),
+            EdAction::TogglePlayAlt => {
+                if self.playing_current() {
+                    self.engine.stop();
+                } else {
+                    self.start_play_from(!self.editor.prefs.play_from_in);
+                }
+            }
+            EdAction::ToggleFollow => ed.prefs.follow_playback = !ed.prefs.follow_playback,
+            EdAction::ToggleSnap => {
+                ed.prefs.snap_zero = !ed.prefs.snap_zero;
+                if ed.prefs.snap_zero {
+                    ed.snap_selection();
+                }
+            }
+            EdAction::InZero(dir) | EdAction::OutZero(dir) => {
+                if matches!(a, EdAction::InZero(_)) {
+                    ed.step_in(dir);
+                } else {
+                    ed.step_out(dir);
+                }
+                let f = if matches!(a, EdAction::InZero(_)) { ed.sel.0 } else { ed.sel.1 };
+                if let Some(r) = wave {
+                    editor_view::ensure_visible(ed, r.width(), f);
+                }
+            }
+            EdAction::Crop => ed.crop_to_selection(),
+            EdAction::Uncrop => ed.uncrop(),
+            EdAction::Undo => ed.undo(),
+            EdAction::Redo => ed.redo(),
+            EdAction::Stop => self.engine.stop(),
+            EdAction::SetIn => ed.set_in(here),
+            EdAction::SetOut => ed.set_out(here),
+            EdAction::ToggleLoop => ed.prefs.looping = !ed.prefs.looping,
+            EdAction::ToggleMono => {
+                ed.toggle_mono();
+            }
+            EdAction::Nudge(n, dir) => {
+                let px = ed.view.fpp.round().max(1.0) as isize;
+                let step = match n {
+                    Nudge::Pixel => px,
+                    Nudge::TenPixels => px * 10,
+                    Nudge::Frame => 1,
+                };
+                ed.playhead = (ed.playhead as isize + step * dir as isize).clamp(0, frames as isize) as usize;
+                if let Some(r) = wave {
+                    editor_view::ensure_visible(ed, r.width(), ed.playhead);
+                }
+            }
+            EdAction::JumpIn | EdAction::JumpOut => {
+                ed.playhead = if a == EdAction::JumpIn { ed.sel.0 } else { ed.sel.1.saturating_sub(1) };
+                if let Some(r) = wave {
+                    editor_view::ensure_visible(ed, r.width(), ed.playhead);
+                }
+            }
+            EdAction::ZoomIn | EdAction::ZoomOut => {
+                if let Some(r) = wave {
+                    let factor = if a == EdAction::ZoomIn { 0.5 } else { 2.0 };
+                    // Zoom around the playhead when it's on screen.
+                    let xp = r.left() + ((ed.playhead as f64 - ed.view.start) / ed.view.fpp) as f32;
+                    let anchor = if r.x_range().contains(xp) { xp } else { r.center().x };
+                    editor_view::zoom_at(ed, r, anchor, factor);
+                }
+            }
+            EdAction::ZoomFit => ed.view.fit_pending = true,
+            EdAction::ZoomRegion => {
+                if let Some(r) = wave {
+                    let len = (ed.sel.1 - ed.sel.0).max(1) as f64;
+                    ed.view.fpp = len * 1.1 / r.width().max(1.0) as f64;
+                    ed.view.start = ed.sel.0 as f64 - len * 0.05;
+                    editor_view::clamp_view(ed, r.width());
+                }
+            }
+            EdAction::SelectAll => ed.select_all(),
+            EdAction::Normalize => ed.normalize(),
+            EdAction::Export => self.export(),
+            EdAction::Delete => {
+                if !ed.delete() {
+                    self.status = "Can't delete everything — select part of the file first".to_owned();
+                }
+            }
+            EdAction::SaveInPlace => self.save_in_place(),
+            EdAction::NextFile => self.step_file(1),
+            EdAction::PrevFile => self.step_file(-1),
+            EdAction::SwitchPane => {
+                self.editor_focused = false;
+                self.focused = Role::Dest;
+            }
+        }
+    }
+
+    /// Ask before fetching a device file for the editor: it's slow.
+    pub(super) fn ask_device_load(&mut self, path: PathBuf) {
+        let bytes = self.device_entry(&path).map_or(0, |e| e.len);
+        self.device_load_pending = Some((path, bytes));
+    }
+
+    /// Download a device file to a temp folder; it opens in the editor when done.
+    pub(super) fn start_device_load(&mut self, src: PathBuf, bytes: u64) {
+        // Mirror the device path, so same-named files in different folders
+        // don't overwrite each other.
+        let rel = src.parent().and_then(|p| p.strip_prefix("/").ok()).unwrap_or(Path::new(""));
+        let dir = std::env::temp_dir().join("sample_manager_device").join(rel);
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let local = dir.join(device::wav_name(&name));
+        let task = device::Task::Transfer {
+            dir: device::Dir::Download,
+            items: vec![(src, dir)],
+            policy: Policy::Replace,
+            mono: None,
+            total_bytes: bytes,
+        };
+        let id = self.run_device(task, &format!("Loading {name}"), 1, bytes);
+        self.device_load = Some((id, local));
+        self.status = format!("Fetching {name} from the device…");
+    }
+
+    /// Open a local file in the editor, re-reading it if it's already open
+    /// (a fresh download over the same temp file).
+    pub(super) fn load_into_editor(&mut self, path: &Path) {
+        let play = self.editor.prefs.auto_play;
+        if self.editor.is_dirty() {
+            self.leave_pending = Some(Leave::LoadEditor(path.to_path_buf()));
+            return;
+        }
+        if self.editor.path() == Some(path) {
+            if self.voice_path.as_deref() == Some(path) {
+                self.engine.stop();
+            }
+            self.editor.play_when_loaded = play;
+            self.editor.reload();
+        } else {
+            self.audition(path, play);
+        }
+    }
+    pub(super) fn absorb_editor(&mut self) {
+        for o in self.editor.drain() {
+            match o {
+                Outcome::Loaded => {
+                    if std::mem::take(&mut self.editor.play_when_loaded) {
+                        self.start_play();
+                    }
+                }
+                Outcome::Exported(p) if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) => {
+                    let s = self.staged_upload.take().expect("checked above");
+                    let leave = self.leave_after_save.take();
+                    let task = device::Task::Transfer {
+                        dir: device::Dir::Upload,
+                        items: vec![(s.staged, s.dest_dir)],
+                        policy: s.policy,
+                        mono: None,
+                        total_bytes: std::fs::metadata(&p).map_or(0, |m| m.len()),
+                    };
+                    self.status = "Sending to the device…".to_owned();
+                    self.run_device(task, "", 1, 0);
+                    if let Some(l) = leave {
+                        self.finish_leave(l);
+                    }
+                }
+                Outcome::Exported(p) => {
+                    self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
+                    // Replaced the file that's open: show what's on disk now.
+                    if self.editor.path() == Some(p.as_path()) {
+                        if self.voice_path.as_deref() == Some(p.as_path()) {
+                            self.engine.stop();
+                        }
+                        self.editor.reload();
+                    }
+                    if let Some(dir) = p.parent() {
+                        self.sizes.invalidate_subtree(dir);
+                        self.reload_showing(dir, false);
+                    }
+                    if let Some(l) = self.leave_after_save.take() {
+                        self.finish_leave(l);
+                    }
+                }
+                Outcome::BatchExported(dir, n) => {
+                    self.status = format!("Folded {n} file(s) to mono");
+                    self.sizes.invalidate_subtree(&dir);
+                    self.reload_showing(&dir, false);
+                }
+                Outcome::Error(e) => {
+                    // A failed render never reaches the upload, and the
+                    // edits it was saving are still unsaved: stay put.
+                    self.staged_upload = None;
+                    self.leave_after_save = None;
+                    self.errors.push(e);
+                }
+            }
+        }
+    }
+
+    pub(super) fn show_editor(&mut self, ui: &mut egui::Ui) {
+        let pv = PlayView {
+            playing: self.playing_current(),
+            pos: self.engine.position(),
+        };
+        let can_export = !self.pane(Role::Dest).active_tab().loading;
+        let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export);
+        for i in intents {
+            match i {
+                EdIntent::TookFocus => self.editor_focused = true,
+                EdIntent::TogglePlay => {
+                    self.editor_focused = true;
+                    self.toggle_play();
+                }
+                EdIntent::Seek(f) => self.engine.seek(f),
+                EdIntent::Export => self.export(),
+                EdIntent::SaveInPlace => self.save_in_place(),
+            }
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.label(egui::RichText::new(keymap::EDITOR_HELP).weak().small());
+        });
+    }
+}
