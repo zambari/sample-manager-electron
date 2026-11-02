@@ -53,6 +53,8 @@ pub enum Task {
     Rename { from: PathBuf, to: PathBuf },
     Mkdir { path: PathBuf },
     Trash { paths: Vec<PathBuf> },
+    /// Delete outright, folders with everything in them.
+    Delete { paths: Vec<PathBuf> },
 }
 
 enum Cmd {
@@ -472,7 +474,7 @@ impl Worker {
         // Tells the UI this job is now running rather than waiting in line.
         let items = match &task {
             Task::Transfer { items, .. } => items.len(),
-            Task::Trash { paths } => paths.len(),
+            Task::Trash { paths } | Task::Delete { paths } => paths.len(),
             _ => 1,
         };
         let total = match &task {
@@ -535,6 +537,23 @@ impl Worker {
                 self.job = None;
                 touch(&mut touched_dev, &trash);
                 touch(&mut touched_dev, Path::new("/"));
+            }
+            Task::Delete { paths } => {
+                self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
+                for (i, p) in paths.into_iter().enumerate() {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Some(j) = self.job.as_mut() {
+                        j.item = i;
+                    }
+                    let res = self.stat(&p).and_then(|e| self.remove(&p, e.is_dir, cancel));
+                    if let Err(e) = res {
+                        errors.push(e);
+                    }
+                    touch(&mut touched_dev, p.parent().unwrap_or(Path::new("/")));
+                }
+                self.job = None;
             }
             Task::Transfer { dir, items, policy, mono, total_bytes } => {
                 let n = items.len();
@@ -627,6 +646,25 @@ impl Worker {
         let policy = if entry.is_dir && policy == Policy::Replace { Policy::KeepBoth } else { policy };
         let Some((target, _)) = self.place_on_device(dst_dir, &name, entry.is_dir, policy)? else { return Ok(()) };
         self.relocate(src, &target, entry.is_dir, entry.size as u64, cancel)
+    }
+
+    /// Delete `p` from the device; a folder is emptied first, since the
+    /// device only removes empty ones.
+    fn remove(&mut self, p: &Path, is_dir: bool, cancel: &AtomicBool) -> Result<(), String> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        self.progress(&Self::short(p), 0);
+        if is_dir {
+            let kids = self.with_conn(|c| c.list(p))?;
+            for k in kids {
+                // Stop at the first failure, leaving the rest in place.
+                self.remove(&p.join(&k.name), k.is_dir, cancel)?;
+            }
+            self.with_conn(|c| c.rmdir(p))
+        } else {
+            self.with_conn(|c| c.delete_file(p))
+        }
     }
 
     /// `parent/name` of a device path, for the status bar.

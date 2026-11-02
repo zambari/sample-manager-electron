@@ -87,11 +87,12 @@ pub fn conflicts(ctx: &Context, plan: &Plan) -> Option<Decision> {
 }
 
 /// Confirm moving `paths` to the Trash (`device`: the Digitakt's /trash
-/// folder). `Some(true)` = go ahead, `Some(false)` = cancelled, `None` =
-/// still open.
-pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool) -> Option<bool> {
+/// folder), or with `permanent`, deleting them outright. `Some(true)` = go
+/// ahead, `Some(false)` = cancelled, `None` = still open.
+pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool, permanent: bool) -> Option<bool> {
     let mut answer = None;
     let bin = if device { "/trash" } else { "Trash" };
+    let verb = |what: &str| if permanent { format!("Delete {what} now?") } else { format!("Move {what} to {bin}?") };
     Modal::new(Id::unique("trash_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
         let n = paths.len();
@@ -100,9 +101,9 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool) 
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            ui.heading(format!("Move \"{name}\" to {bin}?"));
+            ui.heading(verb(&format!("\"{name}\"")));
         } else {
-            ui.heading(format!("Move {n} items to {bin}?"));
+            ui.heading(verb(&format!("{n} items")));
             ui.add_space(6.0);
             egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                 for p in paths {
@@ -118,7 +119,9 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool) 
             });
         }
         ui.add_space(6.0);
-        let note = if device {
+        let note = if permanent {
+            "They are deleted from the Digitakt straight away, folders with everything in them. This can't be undone."
+        } else if device {
             "They go to the /trash folder on the Digitakt; move them back from there."
         } else {
             "You can restore them from the Trash."
@@ -131,8 +134,8 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool) 
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(RichText::new(format!("Move to {bin}")).color(ui.visuals().error_fg_color))
-                    .on_hover_text("↩")
+                    .button(RichText::new(if permanent { "Delete".to_owned() } else { format!("Move to {bin}") }).color(ui.visuals().error_fg_color))
+                    .on_hover_text(if permanent { "" } else { "↩" })
                     .clicked()
                 {
                     answer = Some(true);
@@ -143,7 +146,7 @@ pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool) 
     ctx.input(|i| {
         if i.key_pressed(egui::Key::Escape) {
             answer = Some(false);
-        } else if i.key_pressed(egui::Key::Enter) {
+        } else if !permanent && i.key_pressed(egui::Key::Enter) {
             answer = Some(true);
         }
     });

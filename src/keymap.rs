@@ -26,6 +26,8 @@ pub enum Action {
     /// Start a recursive size walk for the selection.
     ComputeSize,
     Trash,
+    /// Delete from the Digitakt right away, skipping /trash.
+    DeleteNow,
     SelectAll,
     /// Add/remove the cursor row from the selection without moving it.
     ToggleSelect,
@@ -97,6 +99,7 @@ impl Keymap {
             (cmd(Key::ArrowDown), Action::OpenDir),
             (cmd(Key::ArrowUp), Action::GoUp),
             (cmd(Key::Backspace), Action::Trash),
+            (Chord { key: Key::Backspace, mods: Modifiers { alt: true, ..Modifiers::COMMAND } }, Action::DeleteNow),
             (cmd(Key::CloseBracket), Action::NextTab),
             (cmd(Key::OpenBracket), Action::PrevTab),
         ]);
@@ -110,6 +113,7 @@ impl Keymap {
             (plain(Key::F5), Action::Refresh),
             (plain(Key::Backspace), Action::GoUp),
             (plain(Key::Delete), Action::Trash),
+            (shift(Key::Delete), Action::DeleteNow),
             (Chord { key: Key::Tab, mods: Modifiers::CTRL }, Action::NextTab),
             (
                 Chord {

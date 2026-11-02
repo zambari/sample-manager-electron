@@ -99,6 +99,8 @@ pub struct App {
     /// Paths waiting on the "move to Trash?" confirmation; `true` if they
     /// are on the device.
     trash_pending: Option<(bool, Vec<PathBuf>)>,
+    /// Digitakt paths waiting on the "delete now?" confirmation.
+    delete_pending: Option<Vec<PathBuf>>,
     /// Duplicate groups waiting on the "trash duplicates?" confirmation.
     dupes_pending: Option<Vec<crate::jobs::DupGroup>>,
     /// Paths cut or copied in a file pane, waiting for Paste.
@@ -246,6 +248,7 @@ impl App {
             show_hidden: saved.as_ref().is_some_and(|s| s.show_hidden),
             pending: None,
             trash_pending: None,
+            delete_pending: None,
             clipboard: None,
             dupes_pending: None,
             active_jobs: Vec::new(),
@@ -824,7 +827,7 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
         let renaming = self.pane(self.focused).active_tab().renaming.is_some();
-        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
+        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.trash_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -1305,6 +1308,15 @@ impl App {
                     self.trash_pending = Some((tab.device, sel));
                 }
             }
+            Action::DeleteNow => {
+                let tab = self.pane(role).active_tab();
+                let sel = tab.effective_selection();
+                if !tab.device {
+                    self.status = "Delete now is only for the Digitakt; files on the computer go to the Trash".to_owned();
+                } else if !sel.is_empty() {
+                    self.delete_pending = Some(sel);
+                }
+            }
             Action::SelectAll => self.pane_mut(role).active_tab_mut().select_all(),
             Action::ToggleSelect => {
                 let tab = self.pane_mut(role).active_tab_mut();
@@ -1607,13 +1619,24 @@ impl eframe::App for App {
         }
 
         if let Some((on_dev, paths)) = &self.trash_pending {
-            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, *on_dev) {
+            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, *on_dev, false) {
                 let (on_dev, paths) = self.trash_pending.take().expect("checked above");
                 if yes && on_dev {
                     let n = paths.len();
                     self.run_device(device::Task::Trash { paths }, "Moving to /trash", n, 0);
                 } else if yes {
                     self.jobs.trash(paths);
+                } else {
+                    self.status = "Delete cancelled".to_owned();
+                }
+            }
+        }
+        if let Some(paths) = &self.delete_pending {
+            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, true, true) {
+                let paths = self.delete_pending.take().expect("checked above");
+                if yes {
+                    let n = paths.len();
+                    self.run_device(device::Task::Delete { paths }, "Deleting", n, 0);
                 } else {
                     self.status = "Delete cancelled".to_owned();
                 }
@@ -1899,20 +1922,34 @@ impl App {
         }
 
         ui.horizontal(|ui| {
-            let tab = self.pane(self.focused).active_tab();
-            let n_sel = tab.selected.len();
-            let sel_bytes: u64 = tab
-                .entries
-                .iter()
-                .filter(|e| tab.selected.contains(&e.path))
-                .map(|e| if e.is_dir { 0 } else { e.len })
-                .sum();
-            ui.label(format!(
-                "{} · {} items · {n_sel} selected ({})",
-                if self.editor_focused { "Editor" } else { self.focused.label() },
-                tab.entries.len(),
-                fs_model::human_bytes(sel_bytes)
-            ));
+            // Both panes' counts, always Source then Destination, so they can
+            // be compared at a glance. Selection info goes with the focused one.
+            for (i, role) in [Role::Source, Role::Dest].into_iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                let tab = self.pane(role).active_tab();
+                let mut text = format!("{} · {} items", role.label(), tab.entries.len());
+                if role == self.focused {
+                    let sel_bytes: u64 = tab
+                        .entries
+                        .iter()
+                        .filter(|e| tab.selected.contains(&e.path))
+                        .map(|e| if e.is_dir { 0 } else { e.len })
+                        .sum();
+                    text += &format!(
+                        " · {} selected ({})",
+                        tab.selected.len(),
+                        fs_model::human_bytes(sel_bytes)
+                    );
+                }
+                let strong = role == self.focused && !self.editor_focused;
+                ui.label(if strong {
+                    egui::RichText::new(text).strong()
+                } else {
+                    egui::RichText::new(text)
+                });
+            }
 
             if let Some(p) = self.preview.playing() {
                 ui.separator();
@@ -1963,7 +2000,9 @@ impl App {
             }
             ui.separator();
             let cwd = self.pane(role).active_tab().cwd.display().to_string();
-            ui.add(egui::Label::new(egui::RichText::new(cwd).weak().small()).truncate());
+            let size = egui::TextStyle::Small.resolve(ui.style()).size + 1.0;
+            let color = ui.visuals().text_color();
+            ui.add(egui::Label::new(egui::RichText::new(cwd).size(size).color(color)).truncate());
         });
 
         self.tab_strip(ui, role);
@@ -2051,18 +2090,20 @@ impl App {
                         self.trash_pending = Some((on_dev, paths));
                     }
                 }
+                Intent::DeleteNow(paths) => {
+                    if !paths.is_empty() && self.pane(role).active_tab().device {
+                        self.delete_pending = Some(paths);
+                    }
+                }
                 Intent::Dropped(payload) => {
                     let tab = self.pane(role).active_tab();
                     let (dest, to_dev) = (tab.cwd.clone(), tab.device);
-                    self.transfer(Kind::Copy, payload.device, payload.paths, to_dev, dest);
+                    let kind = self.drop_kind(ui, role, &payload, to_dev);
+                    self.transfer(kind, payload.device, payload.paths, to_dev, dest);
                 }
                 Intent::DroppedOn { dir, payload } => {
-                    // Within one pane it's a reshuffle, so move (like Finder on
-                    // one drive). From the other pane it stays a copy.
-                    let pane = self.pane(role);
-                    let same_pane = pane.tabs.iter().any(|t| t.id == payload.tab_id);
-                    let to_dev = pane.active_tab().device;
-                    let kind = if same_pane && payload.device == to_dev { Kind::Move } else { Kind::Copy };
+                    let to_dev = self.pane(role).active_tab().device;
+                    let kind = self.drop_kind(ui, role, &payload, to_dev);
                     self.transfer(kind, payload.device, payload.paths, to_dev, dir);
                 }
                 Intent::Cut(paths) => self.set_clipboard(Kind::Move, role, paths),
@@ -2158,6 +2199,18 @@ impl App {
         }
     }
 
+    /// Whether a drag dropped into `role` moves or copies. Like Finder: on the
+    /// same storage it moves, so the Digitakt to the Digitakt always moves
+    /// (whichever pane), and so does the computer within one pane. Across
+    /// storage it copies. Holding ⌥ forces a copy.
+    fn drop_kind(&self, ui: &egui::Ui, role: Role, payload: &DragPayload, to_dev: bool) -> Kind {
+        if ui.input(|i| i.modifiers.alt) || payload.device != to_dev {
+            return Kind::Copy;
+        }
+        let same_pane = self.pane(role).tabs.iter().any(|t| t.id == payload.tab_id);
+        if payload.device || same_pane { Kind::Move } else { Kind::Copy }
+    }
+
     /// The sub-tab strip. Each tab header is also a drop target, so you can
     /// drag onto a folder you have open without first switching to it.
     fn tab_strip(&mut self, ui: &mut egui::Ui, role: Role) {
@@ -2227,7 +2280,8 @@ impl App {
         if let Some((i, p)) = drop_on {
             if let Some(tab) = self.pane(role).tabs.get(i) {
                 let (dest, to_dev) = (tab.cwd.clone(), tab.device);
-                self.transfer(Kind::Copy, p.device, p.paths, to_dev, dest);
+                let kind = self.drop_kind(ui, role, &p, to_dev);
+                self.transfer(kind, p.device, p.paths, to_dev, dest);
             }
         }
         if new_tab || new_device_tab {

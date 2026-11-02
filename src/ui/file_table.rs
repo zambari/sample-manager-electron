@@ -47,6 +47,9 @@ pub enum Intent {
     AddFavourite(PathBuf),
     /// Move these to the Trash (after confirmation).
     Trash(Vec<PathBuf>),
+    /// Delete these from the Digitakt right away, skipping /trash (after
+    /// confirmation).
+    DeleteNow(Vec<PathBuf>),
     /// Put these on the clipboard to be moved on the next Paste.
     Cut(Vec<PathBuf>),
     /// Put these on the clipboard to be copied on the next Paste.
@@ -520,8 +523,19 @@ fn row(
             .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
             .clicked()
         {
-            intents.push(Intent::Trash(sel));
+            intents.push(Intent::Trash(sel.clone()));
             ui.close();
+        }
+        if !local {
+            let label = if sel.len() > 1 { format!("Delete {} items now", sel.len()) } else { "Delete now".to_owned() };
+            if ui
+                .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
+                .on_hover_text("Delete from the Digitakt right away, without going through /trash (⌥⌘⌫)")
+                .clicked()
+            {
+                intents.push(Intent::DeleteNow(sel));
+                ui.close();
+            }
         }
     });
 }
