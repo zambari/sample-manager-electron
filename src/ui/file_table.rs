@@ -64,6 +64,8 @@ pub enum Intent {
     NewFolder(PathBuf),
     /// Make a folder with this exact name in this directory.
     NewFolderNamed { dir: PathBuf, name: String },
+    /// Make a new folder in `dir`, move these into it, and start renaming it.
+    NewFolderWith { dir: PathBuf, paths: Vec<PathBuf> },
     /// Fetch this device file and open it in the editor (after a warning).
     LoadFromDevice(PathBuf),
 }
@@ -543,6 +545,14 @@ fn row(
         // Next to the row, i.e. in the folder the row sits in.
         if let Some(parent) = entry.path.parent() {
             new_folder_button(ui, cx, parent.to_path_buf(), intents);
+            if local {
+                let sel = tab.effective_selection();
+                let label = if sel.len() == 1 { "New folder with this item".to_owned() } else { format!("New folder with {} items", sel.len()) };
+                if ui.button(label).on_hover_text("Move the selection into a new subfolder and rename it").clicked() {
+                    intents.push(Intent::NewFolderWith { dir: parent.to_path_buf(), paths: sel });
+                    ui.close();
+                }
+            }
         }
         ui.separator();
         let sel = tab.effective_selection();

@@ -332,6 +332,54 @@ impl App {
         tab.renaming = Some((path, name));
     }
 
+    /// Make "<parent name> Subfolder" in `dir`, move `paths` into it, and
+    /// open the inline rename on the new folder. Local only; the moves stay
+    /// inside one folder, so they're plain renames.
+    pub(super) fn new_folder_with(&mut self, role: Role, dir: PathBuf, paths: Vec<PathBuf>) {
+        if paths.is_empty() || self.pane(role).active_tab().device {
+            return;
+        }
+        let parent_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "New".to_owned());
+        let folder = fs_model::unique_sibling(&dir.join(format!("{parent_name} Subfolder")));
+        if let Err(e) = std::fs::create_dir(&folder) {
+            self.errors.push(format!("{}: {e}", folder.display()));
+            return;
+        }
+        let mut pairs = Vec::new();
+        for src in paths {
+            let Some(name) = src.file_name() else { continue };
+            let dst = folder.join(name);
+            match std::fs::rename(&src, &dst) {
+                Ok(()) => {
+                    self.follow_rename(&src, &dst);
+                    if let Some(p) = src.parent() {
+                        self.sizes.invalidate_subtree(p);
+                    }
+                    pairs.push((src, dst));
+                }
+                Err(e) => self.errors.push(format!("{}: {e}", src.display())),
+            }
+        }
+        if pairs.is_empty() {
+            let _ = std::fs::remove_dir(&folder);
+            return;
+        }
+        let dirs: std::collections::BTreeSet<PathBuf> =
+            pairs.iter().filter_map(|(s, _)| s.parent().map(Path::to_path_buf)).chain([dir.clone()]).collect();
+        self.push_undo(undo::FileUndo::Grouped { folder: folder.clone(), pairs });
+        for d in dirs {
+            self.reload_showing(&d, false);
+        }
+        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.focused = role;
+        self.editor_focused = false;
+        let tab = self.pane_mut(role).active_tab_mut();
+        tab.selected.clear();
+        tab.selected.insert(folder.clone());
+        tab.cursor = None;
+        tab.renaming = Some((folder, name));
+    }
+
     /// Run the renames the multi-rename panel settled on, then close it.
     pub(super) fn apply_multi_rename(&mut self, role: Role, rows: &[crate::rename::Row]) {
         let tab = self.pane_mut(role).active_tab_mut();

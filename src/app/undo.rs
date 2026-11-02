@@ -13,6 +13,9 @@ pub(super) enum FileUndo {
     /// Items sent to the Trash: `(original, where it landed)`.
     Trashed(Vec<(PathBuf, PathBuf)>),
     NewFolder(PathBuf),
+    /// Items moved into a folder that was made for them: move them back,
+    /// then remove the folder.
+    Grouped { folder: PathBuf, pairs: Vec<(PathBuf, PathBuf)> },
 }
 
 /// What a running job is, so its `Ev::Applied` becomes the right undo step.
@@ -122,6 +125,14 @@ impl App {
                 let n = self.restore_trashed(&pairs);
                 self.status = format!("Undid move to Trash: {n} of {} item(s) put back", pairs.len());
             }
+            FileUndo::Grouped { folder, pairs } => {
+                let n = self.move_back(&pairs);
+                let _ = std::fs::remove_dir(&folder);
+                self.status = format!("Undid new folder: {n} of {} item(s) back", pairs.len());
+                if let Some(p) = folder.parent() {
+                    self.reload_showing(p, false);
+                }
+            }
             FileUndo::NewFolder(path) => {
                 match std::fs::remove_dir(&path) {
                     Ok(()) => self.status = format!("Undid new folder {}", path.display()),
@@ -205,7 +216,7 @@ impl App {
     }
 
     /// Paths the app remembers (opened, committed) follow a file that moved.
-    fn follow_rename(&mut self, from: &Path, to: &Path) {
+    pub(super) fn follow_rename(&mut self, from: &Path, to: &Path) {
         if self.opened.remove(from) {
             self.opened.insert(to.to_path_buf());
             self.opened_dirty = true;

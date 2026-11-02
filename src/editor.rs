@@ -739,7 +739,14 @@ impl Editor {
     /// Whether the selection can be doubled without running past the end.
     pub fn can_double_selection(&self) -> bool {
         let (a, b) = self.sel;
-        b > a && a + 2 * (b - a) <= self.frames()
+        b > a && a + 2 * (b - a) <= self.frames() + Self::double_slack(b - a)
+    }
+
+    /// How far a doubled loop may overshoot the file end and still count as
+    /// fitting: halving rounds odd lengths and snaps to zero crossings, so
+    /// repeated ½ then ×2 drifts a little. 1% of the loop, at least 64 frames.
+    fn double_slack(len: usize) -> usize {
+        (len / 50).max(64)
     }
 
     /// Halve (`factor` 0.5) or double (2.0) the selection length, keeping the
@@ -747,7 +754,13 @@ impl Editor {
     pub fn scale_selection(&mut self, factor: f64) {
         let (a, b) = self.sel;
         let len = ((b - a) as f64 * factor).round().max(1.0) as usize;
-        let out = self.snap((a + len).min(self.frames()));
+        let n = self.frames();
+        // Doubling to (nearly) the file end lands exactly on the end.
+        let out = if factor > 1.0 && (a + len).abs_diff(n) <= Self::double_slack(b - a) {
+            n
+        } else {
+            self.snap((a + len).min(n))
+        };
         if out > a {
             self.sel.1 = out;
         }

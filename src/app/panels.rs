@@ -558,6 +558,7 @@ impl App {
                 }
                 Intent::NewFolder(dir) => self.new_folder(role, dir, None),
                 Intent::NewFolderNamed { dir, name } => self.new_folder(role, dir, Some(name)),
+                Intent::NewFolderWith { dir, paths } => self.new_folder_with(role, dir, paths),
                 Intent::LoadFromDevice(p) => self.ask_device_load(p),
             }
         }
