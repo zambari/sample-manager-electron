@@ -284,7 +284,7 @@ fn find_duplicates(paths: &[PathBuf]) -> (Vec<DupGroup>, Vec<String>) {
 }
 
 /// Byte-for-byte comparison of two files already known to be the same size.
-fn same_contents(a: &Path, b: &Path) -> std::io::Result<bool> {
+pub fn same_contents(a: &Path, b: &Path) -> std::io::Result<bool> {
     let (mut fa, mut fb) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
     let (mut ba, mut bb) = (vec![0u8; CHUNK], vec![0u8; CHUNK]);
     loop {

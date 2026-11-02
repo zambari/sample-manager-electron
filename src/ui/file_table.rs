@@ -20,6 +20,8 @@ pub struct DragPayload {
     pub paths: Vec<PathBuf>,
     /// The paths are on the Digitakt.
     pub device: bool,
+    /// The tab the drag started in.
+    pub tab_id: u64,
 }
 
 /// Things the table can't do itself because they need app-wide state
@@ -34,6 +36,8 @@ pub enum Intent {
     CancelRename,
     /// Something was dropped onto this tab's list.
     Dropped(DragPayload),
+    /// Something was dropped onto a folder row.
+    DroppedOn { dir: PathBuf, payload: DragPayload },
     /// User wants the recursive size of these directories.
     WantSize(Vec<PathBuf>),
     /// The ".." row was activated.
@@ -53,6 +57,10 @@ pub enum Intent {
     Reveal(PathBuf),
     /// Find identical files among these and offer to trash the extras.
     RemoveDuplicates(Vec<PathBuf>),
+    /// Make a new folder in this directory and start renaming it.
+    NewFolder(PathBuf),
+    /// Fetch this device file and open it in the editor (after a warning).
+    LoadFromDevice(PathBuf),
 }
 
 pub struct TableCtx<'a> {
@@ -195,6 +203,7 @@ fn rows(
         intents.push(Intent::TookFocus);
     }
     bg.context_menu(|ui| {
+        new_folder_button(ui, tab.cwd.clone(), intents);
         paste_button(ui, cx, None, intents);
         if !tab.device {
             reveal_button(ui, tab.cwd.clone(), intents);
@@ -329,6 +338,22 @@ fn row(
         }
     }
 
+    // Folder rows take drops themselves; the list behind them only gets what
+    // lands elsewhere (the row claims the payload first).
+    if entry.is_dir {
+        let onto_self = |p: &DragPayload| p.device == tab.device && p.paths.contains(&entry.path);
+        if resp.dnd_hover_payload::<DragPayload>().is_some_and(|p| !onto_self(&p)) {
+            let stroke = Stroke::new(2.0, ui.visuals().selection.stroke.color);
+            ui.painter().rect_stroke(rect, 3.0, stroke, StrokeKind::Inside);
+        }
+        if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
+            if !onto_self(&p) {
+                intents.push(Intent::DroppedOn { dir: entry.path.clone(), payload: (*p).clone() });
+            }
+            return;
+        }
+    }
+
     // The arrow sits on top of the row, so it's checked after (egui gives the
     // later widget the hit).
     if let Some(r) = arrow_rect {
@@ -356,6 +381,7 @@ fn row(
         resp.dnd_set_drag_payload(DragPayload {
             paths: tab.effective_selection(),
             device: tab.device,
+            tab_id: tab.id,
         });
     }
 
@@ -413,6 +439,14 @@ fn row(
         if single && entry.is_dir && ui.button("Open").clicked() {
             intents.push(Intent::Open(entry.path.clone()));
             ui.close();
+        }
+        if single && !local && !entry.is_dir && ui.button("Load to editor…").clicked() {
+            intents.push(Intent::LoadFromDevice(entry.path.clone()));
+            ui.close();
+        }
+        // Next to the row, i.e. in the folder the row sits in.
+        if let Some(parent) = entry.path.parent() {
+            new_folder_button(ui, parent.to_path_buf(), intents);
         }
         ui.separator();
         let sel = tab.effective_selection();
@@ -561,6 +595,13 @@ fn paste_button(ui: &mut Ui, cx: &TableCtx<'_>, target: Option<PathBuf>, intents
     };
     if ui.add_enabled(cx.clipboard.is_some(), egui::Button::new(label)).clicked() {
         intents.push(Intent::Paste(target));
+        ui.close();
+    }
+}
+
+fn new_folder_button(ui: &mut Ui, dir: PathBuf, intents: &mut Vec<Intent>) {
+    if ui.button("New folder").clicked() {
+        intents.push(Intent::NewFolder(dir));
         ui.close();
     }
 }

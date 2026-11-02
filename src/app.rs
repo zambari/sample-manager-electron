@@ -124,6 +124,12 @@ pub struct App {
     /// Source / destination column widths from the last frame, used to keep
     /// the editor column from being squeezed below its minimum.
     side_widths: [f32; 2],
+    /// The window had focus last frame; regaining it re-lists local folders.
+    window_focused: bool,
+    /// Device file waiting on the "load to editor?" confirmation, with its size.
+    device_load_pending: Option<(PathBuf, u64)>,
+    /// Download job fetching a device file for the editor, and where it lands.
+    device_load: Option<(u64, PathBuf)>,
 }
 
 impl App {
@@ -200,6 +206,9 @@ impl App {
             hold_cursor_load: session.is_some(),
             last_stream_error: None,
             side_widths: [0.0; 2],
+            window_focused: true,
+            device_load_pending: None,
+            device_load: None,
             jobs,
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
@@ -330,6 +339,17 @@ impl App {
         for role in [Role::Source, Role::Dest] {
             for i in 0..self.pane(role).tabs.len() {
                 self.reload(role, i);
+            }
+        }
+    }
+
+    /// Re-list every local (non-device) tab.
+    fn reload_local(&mut self) {
+        for role in [Role::Source, Role::Dest] {
+            for i in 0..self.pane(role).tabs.len() {
+                if !self.pane(role).tabs[i].device {
+                    self.reload(role, i);
+                }
             }
         }
     }
@@ -525,7 +545,7 @@ impl App {
     }
 
     /// Hand `task` to the device worker as a job with a progress bar.
-    fn run_device(&mut self, task: device::Task, label: &str, total_items: usize, total_bytes: u64) {
+    fn run_device(&mut self, task: device::Task, label: &str, total_items: usize, total_bytes: u64) -> u64 {
         let (id, cancel) = self.jobs.register();
         self.device.run(id, cancel, task);
         self.active_job = Some(ActiveJob {
@@ -536,17 +556,43 @@ impl App {
             done_items: 0,
             total_items,
         });
+        id
     }
 
     /// Run `plan` now, or hold it and ask first if anything already exists.
-    fn offer(&mut self, plan: Plan, what: PlanKind) {
-
+    fn offer(&mut self, mut plan: Plan, what: PlanKind) {
         for (path, why) in &plan.rejected {
             self.errors.push(format!("{}: {why}", path.display()));
         }
         if plan.ops.is_empty() {
             self.status = "Nothing to transfer".to_owned();
             return;
+        }
+        // A local copy whose destination already holds the same bytes has
+        // nothing to do: drop it rather than asking about it. Mono folds are
+        // rendered, so their output can't be compared up front.
+        let same_ok = plan.kind == Kind::Copy && matches!(what, PlanKind::Transfer | PlanKind::Commit { .. });
+        if same_ok {
+            let fold = match &what {
+                PlanKind::Commit { fold, .. } => Some(fold),
+                _ => None,
+            };
+            let (same, keep): (Vec<ops::Op>, Vec<ops::Op>) = std::mem::take(&mut plan.ops).into_iter().partition(|o| {
+                o.conflict && !fold.is_some_and(|f| f.contains(&o.src)) && ops::already_there(&o.src, &o.dst)
+            });
+            plan.ops = keep;
+            if !same.is_empty() {
+                let n = same.len();
+                self.mark_committed(same.into_iter().map(|o| o.src));
+                self.status = if n == 1 {
+                    "Already at the destination (identical) — skipped".to_owned()
+                } else {
+                    format!("{n} items already at the destination (identical) — skipped")
+                };
+                if plan.ops.is_empty() {
+                    return;
+                }
+            }
         }
         if plan.conflicts() > 0 {
             // Hold the plan and let the modal decide. No bytes move until then.
@@ -703,6 +749,8 @@ impl App {
                     if self.active_job.as_ref().is_some_and(|a| a.id == job) {
                         self.active_job = None;
                     }
+                    let load = self.device_load.take_if(|(id, _)| *id == job).map(|(_, p)| p);
+                    let load = load.filter(|p| !cancelled && errors.is_empty() && p.is_file());
                     self.status = if cancelled {
                         "Cancelled".to_owned()
                     } else if errors.is_empty() {
@@ -724,6 +772,9 @@ impl App {
                     for dir in device_touched {
                         self.reload_showing(&dir, true);
                     }
+                    if let Some(p) = load {
+                        self.load_into_editor(&p);
+                    }
                 }
             }
         }
@@ -734,7 +785,7 @@ impl App {
     fn handle_keys(&mut self, ui: &egui::Ui) {
         // An open rename editor or modal owns the keyboard.
         let renaming = self.pane(self.focused).active_tab().renaming.is_some();
-        if renaming || self.pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
+        if renaming || self.pending.is_some() || self.device_load_pending.is_some() || self.mono_pending.is_some() || self.trash_pending.is_some() || self.dupes_pending.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -1184,6 +1235,87 @@ impl App {
         self.reload(role, i);
     }
 
+    /// Make "New Folder" (or "New Folder 2", ...) in `dir` and open the
+    /// inline rename on it.
+    fn new_folder(&mut self, role: Role, dir: PathBuf) {
+        let device = self.pane(role).active_tab().device;
+        const BASE: &str = "New Folder";
+        let path = if device {
+            let taken: std::collections::HashSet<String> = [&self.source, &self.dest]
+                .into_iter()
+                .flat_map(|p| p.tabs.iter())
+                .filter(|t| t.device)
+                .find_map(|t| t.listing_of(&dir))
+                .map(|l| l.iter().map(|e| e.name.clone()).collect())
+                .unwrap_or_default();
+            let name = std::iter::once(BASE.to_owned())
+                .chain((2..10_000).map(|n| format!("{BASE} {n}")))
+                .find(|n| !taken.contains(n))
+                .unwrap_or_else(|| BASE.to_owned());
+            let path = dir.join(name);
+            self.run_device(device::Task::Mkdir { path: path.clone() }, "Creating folder", 1, 0);
+            path
+        } else {
+            let path = fs_model::unique_sibling(&dir.join(BASE));
+            if let Err(e) = std::fs::create_dir(&path) {
+                self.errors.push(format!("{}: {e}", path.display()));
+                return;
+            }
+            self.reload_showing(&dir, false);
+            path
+        };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.focused = role;
+        self.editor_focused = false;
+        let tab = self.pane_mut(role).active_tab_mut();
+        // The row appears once the listing comes back; the cursor lands on it then.
+        tab.selected.clear();
+        tab.selected.insert(path.clone());
+        tab.cursor = None;
+        tab.renaming = Some((path, name));
+    }
+
+    /// Ask before fetching a device file for the editor: it's slow.
+    fn ask_device_load(&mut self, path: PathBuf) {
+        let bytes = self.device_entry(&path).map_or(0, |e| e.len);
+        self.device_load_pending = Some((path, bytes));
+    }
+
+    /// Download a device file to a temp folder; it opens in the editor when done.
+    fn start_device_load(&mut self, src: PathBuf, bytes: u64) {
+        // Mirror the device path, so same-named files in different folders
+        // don't overwrite each other.
+        let rel = src.parent().and_then(|p| p.strip_prefix("/").ok()).unwrap_or(Path::new(""));
+        let dir = std::env::temp_dir().join("sample_manager_device").join(rel);
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let local = dir.join(device::wav_name(&name));
+        let task = device::Task::Transfer {
+            dir: device::Dir::Download,
+            items: vec![(src, dir)],
+            policy: Policy::Replace,
+            mono: false,
+            total_bytes: bytes,
+        };
+        let id = self.run_device(task, &format!("Loading {name}"), 1, bytes);
+        self.device_load = Some((id, local));
+        self.status = format!("Fetching {name} from the device…");
+    }
+
+    /// Open a local file in the editor, re-reading it if it's already open
+    /// (a fresh download over the same temp file).
+    fn load_into_editor(&mut self, path: &Path) {
+        let play = self.editor.prefs.auto_play;
+        if self.editor.path() == Some(path) {
+            if self.voice_path.as_deref() == Some(path) {
+                self.engine.stop();
+            }
+            self.editor.play_when_loaded = play;
+            self.editor.reload();
+        } else {
+            self.audition(path, play);
+        }
+    }
+
     fn do_rename(&mut self, from: &Path, to: &str, device: bool) {
         let to = to.trim();
         if to.is_empty() || to.contains(std::path::MAIN_SEPARATOR) || to.contains('/') {
@@ -1197,7 +1329,8 @@ impl App {
         }
         if device {
             let task = device::Task::Rename { from: from.to_path_buf(), to: target };
-            return self.run_device(task, "Renaming", 1, 0);
+            self.run_device(task, "Renaming", 1, 0);
+            return;
         }
         if target.exists() {
             // Rename is not a transfer, so there's no plan to resolve -- just
@@ -1243,6 +1376,13 @@ impl eframe::App for App {
         if !events.is_empty() {
             self.absorb(events);
         }
+
+        // Back from another app: files may have changed under us.
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.window_focused {
+            self.reload_local();
+        }
+        self.window_focused = focused;
         self.absorb_editor();
 
         // Edits apply live to the running voice: drag an out point while the
@@ -1323,6 +1463,17 @@ impl eframe::App for App {
                         self.status = "Mono preview on — export again when it sounds right".to_owned();
                     }
                     MonoChoice::Cancel => self.status = "Export cancelled".to_owned(),
+                }
+            }
+        }
+
+        if let Some((path, bytes)) = &self.device_load_pending {
+            if let Some(yes) = dialogs::confirm_device_load(ui.ctx(), path, *bytes) {
+                let (path, bytes) = self.device_load_pending.take().expect("checked above");
+                if yes {
+                    self.start_device_load(path, bytes);
+                } else {
+                    self.status = "Load cancelled".to_owned();
                 }
             }
         }
@@ -1666,7 +1817,7 @@ impl App {
                     if is_dir {
                         self.open_in(role, p);
                     } else if on_dev {
-                        self.status = "Drag samples to a local folder to listen to them".to_owned();
+                        self.ask_device_load(p);
                     } else {
                         self.preview_toggle(&p);
                     }
@@ -1706,6 +1857,15 @@ impl App {
                     let (dest, to_dev) = (tab.cwd.clone(), tab.device);
                     self.transfer(Kind::Copy, payload.device, payload.paths, to_dev, dest);
                 }
+                Intent::DroppedOn { dir, payload } => {
+                    // Within one pane it's a reshuffle, so move (like Finder on
+                    // one drive). From the other pane it stays a copy.
+                    let pane = self.pane(role);
+                    let same_pane = pane.tabs.iter().any(|t| t.id == payload.tab_id);
+                    let to_dev = pane.active_tab().device;
+                    let kind = if same_pane && payload.device == to_dev { Kind::Move } else { Kind::Copy };
+                    self.transfer(kind, payload.device, payload.paths, to_dev, dir);
+                }
                 Intent::Cut(paths) => self.set_clipboard(Kind::Move, role, paths),
                 Intent::Copy(paths) => self.set_clipboard(Kind::Copy, role, paths),
                 Intent::Paste(target) => self.paste(role, target),
@@ -1714,6 +1874,8 @@ impl App {
                     self.status = format!("Checking {} files for duplicates…", paths.len());
                     self.jobs.find_duplicates(paths);
                 }
+                Intent::NewFolder(dir) => self.new_folder(role, dir),
+                Intent::LoadFromDevice(p) => self.ask_device_load(p),
             }
         }
     }

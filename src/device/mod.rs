@@ -51,6 +51,7 @@ pub enum Task {
         total_bytes: u64,
     },
     Rename { from: PathBuf, to: PathBuf },
+    Mkdir { path: PathBuf },
     Trash { paths: Vec<PathBuf> },
 }
 
@@ -461,6 +462,12 @@ impl Worker {
                     errors.push(e);
                 }
                 touch(&mut touched_dev, to.parent().unwrap_or(Path::new("/")));
+            }
+            Task::Mkdir { path } => {
+                if let Err(e) = self.with_conn(|c| c.mkdir(&path)) {
+                    errors.push(e);
+                }
+                touch(&mut touched_dev, path.parent().unwrap_or(Path::new("/")));
             }
             Task::Trash { paths } => {
                 let trash = PathBuf::from(TRASH);

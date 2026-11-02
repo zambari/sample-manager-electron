@@ -149,6 +149,37 @@ pub fn resolve(plan: &Plan, policy: Policy) -> Vec<Op> {
         .collect()
 }
 
+/// `dst` already holds exactly what copying `src` would put there: the same
+/// bytes for a file, or for a folder every file inside it present and
+/// identical (extra files at the destination don't matter). Read errors count
+/// as "no", so the user still gets asked.
+pub fn already_there(src: &Path, dst: &Path) -> bool {
+    let same_file = |a: &Path, b: &Path| -> bool {
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) if ma.is_file() && mb.is_file() && ma.len() == mb.len() => {
+                crate::jobs::same_contents(a, b).unwrap_or(false)
+            }
+            _ => false,
+        }
+    };
+    if !src.is_dir() {
+        return same_file(src, dst);
+    }
+    if !dst.is_dir() {
+        return false;
+    }
+    for e in walkdir::WalkDir::new(src).min_depth(1) {
+        let Ok(e) = e else { return false };
+        let Ok(rel) = e.path().strip_prefix(src) else { return false };
+        let there = dst.join(rel);
+        let ok = if e.file_type().is_dir() { there.is_dir() } else { same_file(e.path(), &there) };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

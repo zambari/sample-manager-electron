@@ -274,3 +274,40 @@ pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Op
     });
     answer
 }
+
+/// Confirm reading a sample off the device into the editor. Over USB MIDI
+/// that is slow, so say so first. `Some(true)` = go, `Some(false)` =
+/// cancelled, `None` = still open.
+pub fn confirm_device_load(ctx: &Context, path: &std::path::Path, bytes: u64) -> Option<bool> {
+    let mut answer = None;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Modal::new(Id::unique("device_load_modal")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading(format!("Load \"{name}\" into the editor?"));
+        ui.add_space(6.0);
+        let size = if bytes > 0 { format!(" ({})", human_bytes(bytes)) } else { String::new() };
+        ui.label(format!(
+            "The sample{size} has to be read from the device over USB MIDI first, \
+             which is slow — this can take a while. You can cancel it from the status bar."
+        ));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Load").on_hover_text("↩").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input(|i| {
+        if i.key_pressed(egui::Key::Escape) {
+            answer = Some(false);
+        } else if i.key_pressed(egui::Key::Enter) {
+            answer = Some(true);
+        }
+    });
+    answer
+}

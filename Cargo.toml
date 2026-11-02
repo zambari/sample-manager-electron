@@ -8,6 +8,7 @@ cpal = "0.18.2"
 eframe = { version = "0.37.0", features = ["persistence"] }
 egui = "0.37"
 hound = "3.5.1"
+midir = "0.11.1"
 serde = { version = "1.0.229", features = ["derive"] }
 symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
 trash = "5.2.9"
@@ -17,3 +18,10 @@ walkdir = "2.5.0"
 # Optimize dependencies even in dev; our own crate stays fast to rebuild.
 [profile.dev.package."*"]
 opt-level = 2
+
+# coremidi 0.9.2 makes a `&Packet` from CoreMIDI's packet list, which can sit
+# at an unaligned address. Debug builds check for that and abort mid-transfer
+# (large SysEx replies span several packets). Unaligned reads are fine on the
+# hardware, and release builds never checked, so skip the check here too.
+[profile.dev.package.coremidi]
+debug-assertions = false
