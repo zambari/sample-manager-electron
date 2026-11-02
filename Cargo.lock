@@ -3180,13 +3180,14 @@ dependencies = [
 
 [[package]]
 name = "sample_manager"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "eframe",
  "egui",
  "hound",
  "midir",
+ "objc2-foundation 0.3.2",
  "serde",
  "symphonia",
  "trash",

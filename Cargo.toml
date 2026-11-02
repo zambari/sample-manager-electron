@@ -1,6 +1,6 @@
 [package]
 name = "sample_manager"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
@@ -14,6 +14,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
 trash = "5.2.9"
 walkdir = "2.5.0"
+
+# Already pulled in by `trash`; used directly to learn where a trashed item
+# lands, so it can be put back on undo.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 # Decoding and drawing waveforms in an unoptimized build is painfully slow.
 # Optimize dependencies even in dev; our own crate stays fast to rebuild.
