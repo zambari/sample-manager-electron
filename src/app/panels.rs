@@ -781,10 +781,36 @@ impl App {
                 let changed = ui.data(|d| d.get_temp::<usize>(seen_id)) != Some(active);
                 ui.data_mut(|d| d.insert_temp(seen_id, active));
 
+                // Thin 1px orange scrollbar overlaid on the tab strip, so it
+                // doesn't cover the tabs. The tabs themselves keep the normal style.
+                let tab_style = ui.style().clone();
+                {
+                    let s = ui.style_mut();
+                    let sc = &mut s.spacing.scroll;
+                    sc.floating = true;
+                    sc.bar_width = 1.0;
+                    sc.floating_width = 1.0;
+                    sc.floating_allocated_width = 0.0;
+                    sc.bar_inner_margin = 0.0;
+                    sc.bar_outer_margin = 0.0;
+                    sc.foreground_color = false;
+                    sc.dormant_background_opacity = 0.0;
+                    sc.active_background_opacity = 0.0;
+                    sc.interact_background_opacity = 0.0;
+                    sc.dormant_handle_opacity = 1.0;
+                    sc.active_handle_opacity = 1.0;
+                    sc.interact_handle_opacity = 1.0;
+                    let w = &mut s.visuals.widgets;
+                    for v in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+                        v.bg_fill = crate::ui::theme::ACCENT_BRIGHT;
+                        v.corner_radius = egui::CornerRadius::ZERO;
+                    }
+                }
                 egui::ScrollArea::horizontal()
                     .id_salt(("tab_strip", role.label()))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        ui.set_style(tab_style.clone());
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             let titles: Vec<(usize, String, bool)> = self
@@ -848,6 +874,7 @@ impl App {
                             }
                         });
                     });
+                ui.set_style(tab_style);
             });
         });
 
