@@ -80,7 +80,7 @@ impl Device {
         let (tx, rx) = channel();
         let _ = std::thread::Builder::new()
             .name("device".into())
-            .spawn(move || Worker { conn: None, em, job: None, rx, later: VecDeque::new(), counted: HashMap::new(), counting: false }.run());
+            .spawn(move || Worker { conn: None, em, job: None, rx, later: VecDeque::new(), counted: HashMap::new(), counting: false, busy: Vec::new() }.run());
         Self { tx }
     }
 
@@ -482,6 +482,62 @@ struct Worker {
     counted: HashMap<u64, Vec<(usize, u64)>>,
     /// Counting parked jobs right now (counting serves pending commands too).
     counting: bool,
+    /// Device paths the running job reads or writes (see [`involved`]).
+    busy: Vec<PathBuf>,
+}
+
+/// Device paths `task` reads or writes: what a rename must not touch to run
+/// ahead of it.
+fn involved(task: &Task) -> Vec<PathBuf> {
+    match task {
+        Task::Transfer { dir, items, .. } => {
+            let mut v = Vec::new();
+            for (src, dst) in items {
+                if *dir != Dir::Upload {
+                    v.push(src.clone());
+                }
+                if *dir != Dir::Download {
+                    v.push(match dir {
+                        Dir::Upload => upload_target(src, dst),
+                        _ => dst.join(src.file_name().unwrap_or_default()),
+                    });
+                }
+            }
+            v
+        }
+        Task::Rename { from, to } => vec![from.clone(), to.clone()],
+        Task::Mkdir { path } => vec![path.clone()],
+        Task::Trash { paths } | Task::Delete { paths } => paths.clone(),
+    }
+}
+
+/// Whether `task` can run between the current job's steps: one or two quick
+/// requests, like a listing, that don't touch anything the running job or a
+/// waiting one is working on. Lets a new folder be made and named while a
+/// transfer runs.
+fn jumps_queue(task: &Task, busy: &[PathBuf], later: &VecDeque<Cmd>) -> bool {
+    match task {
+        Task::Mkdir { .. } => true,
+        Task::Rename { from, to } => {
+            let overlaps = |p: &PathBuf| [from, to].iter().any(|q| p.starts_with(q) || q.starts_with(p));
+            let queued = later.iter().flat_map(|c| match c {
+                Cmd::Job { task, .. } => involved(task),
+                _ => Vec::new(),
+            });
+            !busy.iter().cloned().chain(queued).any(|p| overlaps(&p))
+        }
+        _ => false,
+    }
+}
+
+/// Rename `from` to `to`, refusing to replace anything already there.
+fn rename_checked(c: &mut Conn, from: &Path, to: &Path) -> R<()> {
+    let parent = to.parent().unwrap_or(Path::new("/"));
+    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if c.list(parent)?.iter().any(|e| e.name == name) {
+        return refused(format!("{} already exists", dev_str(to)));
+    }
+    c.rename(from, to)
 }
 
 fn entries(path: &Path, v: Vec<DirEntry>) -> Vec<crate::fs_model::Entry> {
@@ -501,13 +557,24 @@ fn entries(path: &Path, v: Vec<DirEntry>) -> Vec<crate::fs_model::Entry> {
 /// Answer listings waiting in `rx` on `c`, mid-transfer; park anything else
 /// in `later`. A link failure is only reported to the listing: the transfer's
 /// next request hits it too and handles the reconnect.
-fn serve_lists(c: &mut Conn, rx: &Receiver<Cmd>, later: &mut VecDeque<Cmd>, em: &Emitter) {
+fn serve_lists(c: &mut Conn, rx: &Receiver<Cmd>, later: &mut VecDeque<Cmd>, busy: &[PathBuf], em: &Emitter) {
     c.probe();
     while let Ok(cmd) = rx.try_recv() {
         match cmd {
             Cmd::List { path, generation } => {
                 let result = c.list(&path).map(|v| entries(&path, v)).map_err(|e| e.to_string());
                 em.send(Ev::Listed { device: true, generation, path, result });
+            }
+            Cmd::Job { job, task, .. } if jumps_queue(&task, busy, later) => {
+                em.send(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: 1, file: None }.ev(""));
+                let (res, at) = match &task {
+                    Task::Mkdir { path } => (c.mkdir(path), path),
+                    Task::Rename { from, to } => (rename_checked(c, from, to), to),
+                    _ => unreachable!("jumps_queue only lets quick tasks through"),
+                };
+                let errors = res.err().map(|e| e.to_string()).into_iter().collect();
+                let parent = at.parent().unwrap_or(Path::new("/")).to_path_buf();
+                em.send(Ev::Finished { job, touched: Vec::new(), device_touched: vec![parent], errors, cancelled: false });
             }
             job => later.push_back(job),
         }
@@ -610,7 +677,11 @@ impl Worker {
             };
             match cmd {
                 Cmd::List { path, generation } => self.list_now(path, generation),
-                Cmd::Job { job, cancel, task } => self.job(job, &cancel, task),
+                Cmd::Job { job, cancel, task } => {
+                    self.busy = involved(&task);
+                    self.job(job, &cancel, task);
+                    self.busy.clear();
+                }
             }
         }
     }
@@ -644,6 +715,8 @@ impl Worker {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
                 Cmd::List { path, generation } => self.list_now(path, generation),
+                // Quick enough to run between the current job's steps.
+                Cmd::Job { job, cancel, task } if jumps_queue(&task, &self.busy, &self.later) => self.job(job, &cancel, task),
                 job => self.later.push_back(job),
             }
         }
@@ -782,14 +855,7 @@ impl Worker {
 
         match task {
             Task::Rename { from, to } => {
-                let res = self.with_conn(|c| {
-                    let parent = to.parent().unwrap_or(Path::new("/"));
-                    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if c.list(parent)?.iter().any(|e| e.name == name) {
-                        return refused(format!("{} already exists", dev_str(&to)));
-                    }
-                    c.rename(&from, &to)
-                });
+                let res = self.with_conn(|c| rename_checked(c, &from, &to));
                 if let Err(e) = res {
                     errors.push(e);
                 }
@@ -1155,9 +1221,9 @@ impl Worker {
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
-        let (em, rx, later) = (&self.em, &self.rx, &mut self.later);
+        let (em, rx, later, busy) = (&self.em, &self.rx, &mut self.later, &self.busy);
         let mut on = |c: &mut Conn, n: u64, file_total: u64| {
-            serve_lists(c, rx, later, em);
+            serve_lists(c, rx, later, busy, em);
             if let Some(p) = prog.as_mut() {
                 p.done += match worth {
                     Some(w) => w * (sent + n) / len - w * sent / len,
@@ -1224,9 +1290,9 @@ impl Worker {
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
-        let (em, rx, later) = (&self.em, &self.rx, &mut self.later);
+        let (em, rx, later, busy) = (&self.em, &self.rx, &mut self.later, &self.busy);
         let mut on = |c: &mut Conn, n: u64, file_total: u64| {
-            serve_lists(c, rx, later, em);
+            serve_lists(c, rx, later, busy, em);
             if let Some(p) = prog.as_mut() {
                 p.done += if half { n / 2 } else { n };
                 let file_done = p.file.filter(|f| f.0 == "reading").map_or(0, |f| f.1) + n;
