@@ -23,6 +23,13 @@ impl App {
         let show_hidden = self.show_hidden;
         let pane = self.pane_mut(role);
         if let Some(tab) = pane.tabs.get_mut(tab_idx) {
+            // Folder deleted or renamed behind our back: fall back to the
+            // nearest ancestor that still exists instead of showing an error.
+            if !tab.device && !tab.cwd.is_dir() {
+                if let Some(up) = tab.cwd.ancestors().skip(1).find(|p| p.is_dir()) {
+                    tab.navigate_to(up.to_path_buf());
+                }
+            }
             let generation = tab.begin_reload();
             let device = tab.device;
             let mut requests = vec![(tab.cwd.clone(), generation)];
