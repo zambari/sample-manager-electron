@@ -61,6 +61,46 @@ the original stays untouched. *Move* does the same but moves the files.
 **Top bar.** Audio output device and its sample rate, and a toggle for
 showing hidden files.
 
+### Slice kits
+
+A slice kit is a second file kept next to the sample in the editor. It
+collects the bits you cut out of many samples, one after another, into a
+single file (handy for chains of drum hits).
+
+- Select part of a sample and press **K** (or click the arrow button) to
+  add it to the end of the kit, as you hear it (trimmed, gain and mono
+  applied).
+- The first time, you're asked to name the new kit. It's created in the
+  active destination tab when that's a local folder. To keep adding to a
+  file you already have, open it and choose *Use as kit*.
+- Press **B** to switch the editor between the sample and the kit. Moving
+  to another file in the browser always brings you back to the sample.
+- Press **⌘S** while showing the kit to save it. The kit stays open between
+  launches, and quitting asks about unsaved kit changes.
+
+### Drag and drop
+
+- Drag files and folders between panes, onto folder rows, or onto a tab.
+  Within the same drive a drop moves; hold **⌥** or **Ctrl** to copy
+  instead (the cursor shows a copy badge). Drops between the computer and
+  the Digitakt always copy.
+- Drag files out to **Finder / Explorer**, or drag them in from there
+  (dragging in always copies).
+- Drop folders onto a tab bar to open each one as a new tab.
+
+### Tabs and file operations
+
+- Right-click a tab to **move or copy it to the other pane**. A long tab
+  row scrolls sideways.
+- Click an already-selected item again to rename it, Finder style.
+- *New folder with selection* puts the selected items into a new folder
+  and opens rename straight away.
+- When a transfer hits an existing folder, *Merge* adds new files and skips
+  identical ones.
+- Transfers to and from the Digitakt run in a queue. Creating and renaming
+  folders jumps ahead of queued file transfers, so the folder is ready
+  before the files arrive.
+
 ## Building
 
 Install Rust from <https://rustup.rs>, then:
@@ -97,7 +137,8 @@ code.
 
 Sample Manager uses these third-party Rust crates, each under its own
 licence: `eframe`/`egui` (UI), `cpal` (audio output), `symphonia`
-(decoding), `hound` (WAV writing), `midir` (MIDI), `serde`, `trash` and
+(decoding), `hound` (WAV writing), `midir` (MIDI), `drag` and `mouse_position` (drag and drop with
+Finder / Explorer), `serde`, `trash` and
 `walkdir`. Almost all of the dependency tree is MIT and/or Apache-2.0
 licensed. Exceptions: `symphonia` is MPL-2.0 (file-level copyleft; we use
 it unmodified), and egui's bundled default fonts are under the SIL Open Font
