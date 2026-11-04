@@ -738,10 +738,48 @@ impl App {
     }
 
     /// Whether a drop moves or copies. On the same storage (computer to
-    /// computer, device to device) it moves, whichever pane; holding ⌥ makes
-    /// it a copy. Between the computer and the device it always copies.
+    /// computer, device to device) it moves, whichever pane; holding ⌥ or
+    /// Ctrl makes it a copy. Between the computer and the device, and from
+    /// Finder / Explorer, it always copies.
     pub(super) fn drop_kind(&self, ui: &egui::Ui, payload: &DragPayload, to_dev: bool) -> Kind {
-        if ui.input(|i| i.modifiers.alt) || payload.device != to_dev { Kind::Copy } else { Kind::Move }
+        if payload.external || copy_held(ui.ctx()) || payload.device != to_dev { Kind::Copy } else { Kind::Move }
+    }
+
+    /// Whether `p` (from a drag payload) is a folder. Device paths are looked
+    /// up in the listings we already have, since there's no disk to ask.
+    fn payload_is_dir(&self, p: &std::path::Path, device: bool) -> bool {
+        if !device {
+            return p.is_dir();
+        }
+        [Role::Source, Role::Dest].iter().any(|&r| {
+            self.pane(r)
+                .tabs
+                .iter()
+                .filter(|t| t.device)
+                .any(|t| t.entries.iter().any(|e| e.is_dir && e.path == p))
+        })
+    }
+
+    /// Open each folder in `payload` as a new tab in this pane.
+    fn open_dropped_as_tabs(&mut self, role: Role, payload: DragPayload) {
+        let dirs: Vec<PathBuf> = payload
+            .paths
+            .into_iter()
+            .filter(|p| self.payload_is_dir(p, payload.device))
+            .collect();
+        if dirs.is_empty() {
+            self.status = "Drop folders on the tab bar to open them as tabs".to_owned();
+            return;
+        }
+        for dir in dirs {
+            let id = self.new_tab_id();
+            let tab = if payload.device { DirTab::new_device(id, dir) } else { DirTab::new(id, dir) };
+            self.pane_mut(role).add_tab(tab);
+            let i = self.pane(role).active;
+            self.reload(role, i);
+        }
+        self.focused = role;
+        self.editor_focused = false;
     }
 
     /// The sub-tab strip. Each tab header is also a drop target, so you can
@@ -754,7 +792,13 @@ impl App {
         let other_label = role.other().label();
         let mut new_tab = false;
         let mut drop_on: Option<(usize, DragPayload)> = None;
+        let mut drop_new_tab: Option<DragPayload> = None;
         let mut new_device_tab = false;
+
+        // Show a copy cursor while a drag would copy because of the modifier.
+        if copy_held(ui.ctx()) && egui::DragAndDrop::has_payload_of_type::<DragPayload>(ui.ctx()) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
+        }
 
         // One row: tabs scroll sideways when they outgrow the pane, while the
         // +/🎹/× buttons stay pinned on the right.
@@ -821,6 +865,7 @@ impl App {
                                 .map(|(i, t)| (i, t.title(), t.loading))
                                 .collect();
 
+                            let mut tab_h = ui.spacing().interact_size.y;
                             for (i, title, loading) in titles {
                                 let label = if loading { format!("{title} …") } else { title };
                                 let (inner, payload) =
@@ -828,6 +873,7 @@ impl App {
                                         ui.add(theme::pane_tab(&label, i == active))
                                     });
                                 let resp = inner.inner;
+                                tab_h = resp.rect.height();
                                 if i == active && changed {
                                     resp.scroll_to_me(None);
                                 }
@@ -872,6 +918,16 @@ impl App {
                                     drop_on = Some((i, (*p).clone()));
                                 }
                             }
+                            // The empty rest of the strip: dropping folders
+                            // here opens them as new tabs.
+                            let w = ui.available_width().max(40.0);
+                            let (_, payload) =
+                                ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
+                                    ui.allocate_exact_size(egui::vec2(w, tab_h), egui::Sense::hover())
+                                });
+                            if let Some(p) = payload {
+                                drop_new_tab = Some((*p).clone());
+                            }
                         });
                     });
                 ui.set_style(tab_style);
@@ -889,6 +945,9 @@ impl App {
                 let kind = self.drop_kind(ui, &p, to_dev);
                 self.transfer(kind, p.device, p.paths, to_dev, dest);
             }
+        }
+        if let Some(p) = drop_new_tab {
+            self.open_dropped_as_tabs(role, p);
         }
         if new_tab || new_device_tab {
             let cur = self.pane(role).active_tab();
@@ -943,6 +1002,11 @@ impl App {
             }
         }
     }
+}
+
+/// ⌥ or Ctrl held: a drop copies instead of moving.
+fn copy_held(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.modifiers.alt || i.modifiers.ctrl)
 }
 
 /// Turn what was typed into the path bar into a path: trims whitespace and

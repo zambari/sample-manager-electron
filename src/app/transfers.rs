@@ -258,6 +258,20 @@ impl App {
         self.offer(plan, PlanKind::Device { dir, mono });
     }
 
+    /// `src` going into `dst_dir` is already part of a queued or running
+    /// device transfer: as an item of its own, or inside a queued folder.
+    fn device_queued_has(&self, dir: device::Dir, src: &Path, dst_dir: &Path) -> bool {
+        self.device_queued.values().filter(|(d, _)| *d == dir).flat_map(|(_, items)| items).any(|(qs, qd)| {
+            if qs == src {
+                return qd == dst_dir;
+            }
+            // Inside queued folder `qs`: it lands in the same spot under
+            // `qd/<folder name>`.
+            let (Ok(rel), Some(name)) = (src.parent().unwrap_or(src).strip_prefix(qs), qs.file_name()) else { return false };
+            qd.join(name).join(rel) == dst_dir
+        })
+    }
+
     /// A device item as last listed by any device tab.
     pub(super) fn device_entry(&self, path: &Path) -> Option<fs_model::Entry> {
         let parent = path.parent()?;
@@ -298,6 +312,20 @@ impl App {
         if plan.ops.is_empty() {
             self.status = "Nothing to transfer".to_owned();
             return;
+        }
+        // Committing again while the first transfer is still queued: those
+        // items are on their way already (and not at the destination yet, so
+        // they wouldn't show as conflicts).
+        if let PlanKind::Device { dir, .. } = what {
+            let before = plan.ops.len();
+            plan.ops.retain(|o| o.dst.parent().is_none_or(|d| !self.device_queued_has(dir, &o.src, d)));
+            let n = before - plan.ops.len();
+            if n > 0 {
+                self.status = format!("{n} item(s) already queued for there — skipped");
+                if plan.ops.is_empty() {
+                    return;
+                }
+            }
         }
         // A local copy whose destination already holds the same bytes has
         // nothing to do: drop it rather than asking about it. Mono folds are
@@ -351,7 +379,9 @@ impl App {
                 }
                 let total_bytes = plan.total_bytes();
                 let n = items.len();
-                self.run_device(device::Task::Transfer { dir, items, policy, mono, total_bytes }, "", n, total_bytes);
+                let queued = items.clone();
+                let id = self.run_device(device::Task::Transfer { dir, items, policy, mono, total_bytes }, "", n, total_bytes);
+                self.device_queued.insert(id, (dir, queued));
                 return;
             }
             PlanKind::DeviceExport { mono } => {
@@ -575,6 +605,7 @@ impl App {
                 } => {
                     self.jobs.forget(job);
                     self.undo_jobs.remove(&job);
+                    self.device_queued.remove(&job);
                     if let Some(a) = self.active_jobs.iter().find(|a| a.id == job) {
                         self.batch.absorb(a, cancelled);
                     }

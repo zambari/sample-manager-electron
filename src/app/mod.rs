@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 mod actions;
 mod editing;
+mod os_dnd;
 mod panels;
 mod transfers;
 mod undo;
@@ -105,6 +106,7 @@ struct Batch {
 }
 
 pub struct App {
+    os_dnd: os_dnd::OsDnd,
     jobs: Jobs,
     device: Device,
     /// Last connection news from the device worker.
@@ -124,6 +126,10 @@ pub struct App {
     rename_after: Option<(u64, Vec<PathBuf>)>,
     /// A local job's summary to show instead of a plain "Done".
     finish_note: Option<(u64, String)>,
+    /// Device transfers queued or running: their direction and `(source,
+    /// destination folder)` items, so committing the same files again
+    /// doesn't queue them twice.
+    device_queued: std::collections::HashMap<u64, (device::Dir, Vec<(PathBuf, PathBuf)>)>,
     /// Digitakt paths waiting on the "delete now?" confirmation.
     delete_pending: Option<Vec<PathBuf>>,
     /// Duplicate groups waiting on the "trash duplicates?" confirmation.
@@ -253,6 +259,7 @@ impl App {
         let jobs = Jobs::new(ctx);
         let device = Device::new(jobs.emitter());
         let mut app = Self {
+            os_dnd: Default::default(),
             device,
             device_status: None,
             staged_upload: None,
@@ -298,6 +305,7 @@ impl App {
             undo_jobs: Default::default(),
             rename_after: None,
             finish_note: None,
+            device_queued: Default::default(),
             path_edit: None,
             volumes: None,
             dupes_pending: None,
@@ -388,7 +396,15 @@ impl eframe::App for App {
         state::SAVE_INTERVAL
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.os_dnd_input(ctx, raw_input);
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(target_os = "macos")]
+        self.os_drag_out(ctx, frame);
+        #[cfg(not(target_os = "macos"))]
+        let _ = frame;
         // eframe only autosaves on a frame. After a change, make sure one
         // happens once the interval has passed, even if the app goes idle.
         let snap = self.snapshot(false);
@@ -477,12 +493,16 @@ impl eframe::App for App {
 
         // Modal last, so it paints over both panes.
         if let Some(p) = &self.pending {
-            let can_merge = matches!(p.what, PlanKind::Transfer | PlanKind::Commit { .. })
+            // A device move is a rename, which can't merge folders.
+            let can_merge = matches!(p.what, PlanKind::Transfer | PlanKind::Commit { .. } | PlanKind::Device { dir: device::Dir::Upload | device::Dir::Download | device::Dir::Copy, .. })
                 && p.plan.ops.iter().any(|o| o.conflict && o.is_dir);
             if let Some(decision) = dialogs::conflicts(ui.ctx(), &p.plan, can_merge) {
                 let pending = self.pending.take().expect("checked above");
                 match decision {
                     Decision::Proceed(policy) => self.launch(&pending.plan, pending.what, policy),
+                    Decision::Merge if matches!(pending.what, PlanKind::Device { .. }) => {
+                        self.launch(&pending.plan, pending.what, Policy::Merge)
+                    }
                     Decision::Merge => self.launch_merge(&pending.plan, pending.what),
                     Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
                 }

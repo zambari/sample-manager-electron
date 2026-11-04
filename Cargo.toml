@@ -9,6 +9,7 @@ cpal = "0.18.2"
 eframe = { version = "0.37.0", features = ["persistence"] }
 egui = "0.37"
 hound = "3.5.1"
+mouse_position = "0.1.4"
 midir = "0.11.1"
 serde = { version = "1.0.229", features = ["derive"] }
 symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
@@ -18,6 +19,7 @@ walkdir = "2.5.0"
 # Already pulled in by `trash`; used directly to learn where a trashed item
 # lands, so it can be put back on undo.
 [target.'cfg(target_os = "macos")'.dependencies]
+drag = "2.1.1"
 objc2-foundation = { version = "0.3.2", features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 
 # Decoding and drawing waveforms in an unoptimized build is painfully slow.

@@ -17,7 +17,7 @@
 use crate::audio::decode::Sample;
 use std::path::Path;
 
-const HEADER_LEN: usize = 64;
+pub const HEADER_LEN: usize = 64;
 
 /// Encode a decoded sample for the device. The source rate goes in the
 /// header as-is: the Digitakt resamples on its own. More than two channels

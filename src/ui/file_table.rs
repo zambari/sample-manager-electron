@@ -20,6 +20,8 @@ pub struct DragPayload {
     pub paths: Vec<PathBuf>,
     /// The paths are on the device.
     pub device: bool,
+    /// Dragged in from Finder / Explorer.
+    pub external: bool,
 }
 
 /// Things the table can't do itself because they need app-wide state
@@ -462,6 +464,7 @@ fn row(
         resp.dnd_set_drag_payload(DragPayload {
             paths: tab.effective_selection(),
             device: tab.device,
+            external: false,
         });
     }
 

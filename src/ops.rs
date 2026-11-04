@@ -59,6 +59,10 @@ pub enum Policy {
     Replace,
     KeepBoth,
     Skip,
+    /// Device transfers only (local merges go through [`merge`]): combine
+    /// folders, skip files already there at the expected size, leave
+    /// same-name files of another size alone.
+    Merge,
 }
 
 impl Policy {
@@ -67,6 +71,7 @@ impl Policy {
             Self::Replace => "Replace",
             Self::KeepBoth => "Keep both",
             Self::Skip => "Skip",
+            Self::Merge => "Merge",
         }
     }
 }
@@ -137,7 +142,7 @@ pub fn resolve(plan: &Plan, policy: Policy) -> Vec<Op> {
                 return Some(op.clone());
             }
             match policy {
-                Policy::Skip => None,
+                Policy::Skip | Policy::Merge => None,
                 Policy::Replace => Some(Op { conflict: false, ..op.clone() }),
                 Policy::KeepBoth => Some(Op {
                     dst: unique_sibling(&op.dst),
