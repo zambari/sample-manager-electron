@@ -9,7 +9,7 @@ impl App {
         // An open rename editor or modal owns the keyboard.
         let tab = self.pane(self.focused).active_tab();
         let renaming = tab.renaming.is_some() || tab.multi_rename.is_some();
-        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() {
+        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() || self.kit_naming.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -51,6 +51,19 @@ impl App {
                 let a = if shift_space { EdAction::TogglePlayAlt } else { EdAction::TogglePlay };
                 self.perform_editor(a, self.editor.wave_rect);
             }
+        }
+
+        // K / B work from the file panes too, so you can arrow through
+        // samples and pick slices without clicking into the editor.
+        let (k, b) = ui.input(|i| {
+            let none = !i.modifiers.any();
+            (none && i.key_pressed(egui::Key::K), none && i.key_pressed(egui::Key::B))
+        });
+        if k {
+            self.add_slice();
+        }
+        if b {
+            self.show_kit(!self.showing_kit);
         }
 
         let actions = ui.input(|i| self.keymap.actions(i));

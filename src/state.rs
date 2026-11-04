@@ -68,6 +68,9 @@ pub struct AppState {
     /// File loaded in the editor with its in/out, playhead, gain and crop.
     #[serde(default)]
     pub session: Option<crate::editor::Session>,
+    /// The slice kit's editor slot, same as `session`.
+    #[serde(default)]
+    pub kit_session: Option<crate::editor::Session>,
 }
 
 fn default_focus() -> Role {

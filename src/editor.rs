@@ -961,6 +961,52 @@ impl Editor {
         true
     }
 
+    /// The selection as you hear it (gain, and mono when it's on), for a
+    /// slice kit. Leaves the clipboard alone.
+    pub fn slice(&self) -> Option<AudioClip> {
+        let s = self.sample()?;
+        let (a, b) = self.sel;
+        if b <= a {
+            return None;
+        }
+        let g = self.gain();
+        let channels = match self.fold() {
+            Some(f) => vec![stats::fold_region(&s.channels, a, b, f).into_iter().map(|x| x * g).collect()],
+            None => s.channels.iter().map(|c| c[a..b].iter().map(|x| x * g).collect()).collect(),
+        };
+        Some(AudioClip { rate: s.rate, channels })
+    }
+
+    /// Add `clip` after the end of the whole file (uncropping first), then
+    /// show all of it.
+    pub fn append(&mut self, clip: &AudioClip) {
+        let Some(full) = &self.full else { return };
+        let (rate, nch) = (full.sample.rate, full.sample.channels.len());
+        self.uncrop();
+        let ins = clip.adapt(rate, nch);
+        let end = self.frames();
+        self.splice(end, end, &ins);
+        self.view.fit_pending = true;
+    }
+
+    /// Start a file that isn't on disk yet: `clip` at `path`, unsaved.
+    pub fn start_new(&mut self, path: PathBuf, clip: &AudioClip, bits: Option<u32>) {
+        self.generation += 1; // drop any load still on its way
+        self.loading = None;
+        self.play_when_loaded = false;
+        self.memos.remove(&path);
+        let sample = Sample { path, rate: clip.rate, channels: clip.channels.clone(), bits, format: "WAV".into(), file_len: 0 };
+        self.install(Loaded::new(sample));
+        self.clean_rev = 0; // nothing written yet
+    }
+
+    /// Empty the editor, keeping prefs and the clipboard.
+    pub fn close(&mut self) {
+        let clip = self.clip.take();
+        *self = Editor::new(self.ctx.clone(), self.prefs.clone());
+        self.clip = clip;
+    }
+
     pub fn can_paste(&self) -> bool {
         self.current.is_some() && self.clip.as_ref().is_some_and(|c| c.frames() > 0)
     }

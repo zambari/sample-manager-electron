@@ -47,6 +47,8 @@ impl App {
 
     /// Load `path` into the editor, optionally starting playback once it's in.
     pub(super) fn audition(&mut self, path: &Path, play: bool) {
+        // Browsing always happens in the sample slot, not the kit.
+        self.show_kit(false);
         if self.editor.path() == Some(path) {
             if play {
                 self.start_play();
@@ -166,6 +168,11 @@ impl App {
             return;
         }
         let Some(dir) = src.parent() else { return };
+        // A kit is saved whole, whatever part of it is selected.
+        if self.showing_kit {
+            self.editor.uncrop();
+            self.editor.select_all();
+        }
         let target = crate::audio::export::target_for(&src, dir);
         self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
         let mono = self.editor.fold();
@@ -177,6 +184,11 @@ impl App {
         match leave {
             Leave::Audition(p, play) => self.audition(&p, play),
             Leave::LoadEditor(p) => self.load_into_editor(&p),
+            Leave::Quit if self.other.is_dirty() => {
+                // The hidden slot has unsaved edits too: ask about those next.
+                self.swap_slots();
+                self.leave_pending = Some(Leave::Quit);
+            }
             Leave::Quit => {
                 // Closed from `ui` once no job (an upload of the saved edit)
                 // is running.
@@ -303,6 +315,8 @@ impl App {
             EdAction::SaveInPlace => self.save_in_place(),
             EdAction::NextFile => self.step_file(1),
             EdAction::PrevFile => self.step_file(-1),
+            EdAction::AddSlice => self.add_slice(),
+            EdAction::ToggleKit => self.show_kit(!self.showing_kit),
             EdAction::SwitchPane => {
                 self.editor_focused = false;
                 self.focused = Role::Dest;
@@ -339,6 +353,7 @@ impl App {
     /// Open a local file in the editor, re-reading it if it's already open
     /// (a fresh download over the same temp file).
     pub(super) fn load_into_editor(&mut self, path: &Path) {
+        self.show_kit(false);
         let play = self.editor.prefs.auto_play;
         if self.editor.is_dirty() {
             self.leave_pending = Some(Leave::LoadEditor(path.to_path_buf()));
@@ -354,10 +369,16 @@ impl App {
             self.audition(path, play);
         }
     }
-    pub(super) fn absorb_editor(&mut self) {
+    /// `is_kit`: `editor` is the kit slot right now.
+    pub(super) fn absorb_editor(&mut self, is_kit: bool) {
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
+                    if let (true, Some(c)) = (is_kit, self.kit_pending.take()) {
+                        self.editor.append(&c);
+                        let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+                        self.status = format!("Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it");
+                    }
                     if std::mem::take(&mut self.editor.play_when_loaded) {
                         self.start_play();
                     }
@@ -417,7 +438,13 @@ impl App {
             pos: self.engine.position(),
         };
         let can_export = !self.pane(Role::Dest).active_tab().loading;
-        let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export);
+        let slots = editor_view::Slots {
+            showing_kit: self.showing_kit,
+            kit_name: self.kit_name(),
+            kit_dirty: self.kit().is_dirty(),
+            sample_name: self.browser().path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
+        };
+        let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export, &slots);
         for i in intents {
             match i {
                 EdIntent::TookFocus => self.editor_focused = true,
@@ -428,6 +455,10 @@ impl App {
                 EdIntent::Seek(f) => self.engine.seek(f),
                 EdIntent::Export => self.export(),
                 EdIntent::SaveInPlace => self.save_in_place(),
+                EdIntent::ShowKit(on) => self.show_kit(on),
+                EdIntent::AddSlice => self.add_slice(),
+                EdIntent::UseAsKit => self.use_as_kit(),
+                EdIntent::CloseKit => self.close_kit(),
             }
         }
     }

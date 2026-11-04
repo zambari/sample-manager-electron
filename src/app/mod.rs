@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 mod actions;
 mod editing;
+mod kit;
 mod os_dnd;
 mod panels;
 mod transfers;
@@ -155,7 +156,16 @@ pub struct App {
     /// Last state seen by `logic`, to notice changes that need saving.
     last_state: Option<state::AppState>,
     engine: Engine,
+    /// The editor slot on screen: the sample being browsed, or the slice kit
+    /// when `showing_kit`.
     editor: Editor,
+    /// The hidden editor slot (see [`kit`]).
+    other: Editor,
+    showing_kit: bool,
+    /// Slice to add once the kit file finishes loading.
+    kit_pending: Option<crate::editor::AudioClip>,
+    /// Waiting on the "name the slice kit" question.
+    kit_naming: Option<kit::KitNaming>,
     /// The editor column has the keyboard. `focused` then remembers which
     /// file pane had it last, so ↑/↓ in the editor still steps through files.
     editor_focused: bool,
@@ -251,6 +261,10 @@ impl App {
         if let Some(s) = &session {
             editor.restore_session(s);
         }
+        let mut other = Editor::new(ctx.clone(), editor.prefs.clone());
+        if let Some(s) = saved.as_ref().and_then(|s| s.kit_session.clone()).filter(|s| s.path.is_file()) {
+            other.restore_session(&s);
+        }
         let mut errors = Vec::new();
         if let Some(e) = &engine.open_error {
             errors.push(format!("audio output: {e}"));
@@ -265,6 +279,10 @@ impl App {
             staged_upload: None,
             engine,
             editor,
+            other,
+            showing_kit: false,
+            kit_pending: None,
+            kit_naming: None,
             editor_focused: false,
             devices: Engine::devices(),
             output_device,
@@ -361,7 +379,8 @@ impl App {
             } else {
                 Vec::new()
             },
-            session: self.editor.session(),
+            session: self.browser().session(),
+            kit_session: self.kit().session(),
         }
     }
 
@@ -434,7 +453,7 @@ impl eframe::App for App {
             self.engine.stop();
         }
         self.window_focused = focused;
-        self.absorb_editor();
+        self.absorb_editors();
 
         // Edits apply live to the running voice: drag an out point while the
         // loop plays and you hear the seam move.
@@ -545,11 +564,26 @@ impl eframe::App for App {
             }
         }
 
+        if let Some(n) = &mut self.kit_naming {
+            if let Some(ok) = dialogs::name_kit(ui.ctx(), &mut n.name, &n.dir) {
+                let n = self.kit_naming.take().expect("checked above");
+                if ok {
+                    self.start_kit(n);
+                } else {
+                    self.status = "No kit started".to_owned();
+                }
+            }
+        }
+
         // Closing the window with unsaved audio edits: ask first.
         let close = ui.ctx().input(|i| i.viewport().close_requested());
-        if close && self.editor.is_dirty() && !self.allow_close {
+        if close && (self.editor.is_dirty() || self.other.is_dirty()) && !self.allow_close {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.leave_pending.is_none() && self.leave_after_save.is_none() {
+                // Ask about whichever slot has the unsaved edits.
+                if !self.editor.is_dirty() {
+                    self.swap_slots();
+                }
                 self.leave_pending = Some(Leave::Quit);
             }
         }
@@ -591,13 +625,14 @@ impl eframe::App for App {
         let (busy_ptr, now) = ui.input(|i| (i.pointer.any_down(), i.time));
         let busy = busy_ptr || self.editor.drag.is_some() || ui.ctx().text_edit_focused();
         self.editor.track_history(busy, now);
+        self.other.track_history(false, now);
 
         // Buttons and toggles take keyboard focus when clicked, after which
         // egui would turn Space/Enter into clicks on them and arrows into
         // focus moves. This app drives everything from its own keymaps, so
         // only text fields get to keep focus.
         let ctx = ui.ctx().clone();
-        if !ctx.text_edit_focused() {
+        if !ctx.text_edit_focused() && self.kit_naming.is_none() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
@@ -622,6 +657,10 @@ fn reveal(path: &Path) {
         c
     };
     let _ = cmd.spawn();
+}
+
+pub(crate) fn short_name(s: &str, n: usize) -> String {
+    truncate(s, n)
 }
 
 fn truncate(s: &str, n: usize) -> String {

@@ -334,3 +334,48 @@ pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str
     }
     choice
 }
+
+/// Name a new slice kit, saved as `<name>.wav` in `dir`. A name that's
+/// already a file there adds to that file instead. `Some(true)` = go,
+/// `Some(false)` = cancelled, `None` = still open.
+pub fn name_kit(ctx: &Context, name: &mut String, dir: &std::path::Path) -> Option<bool> {
+    let mut answer = None;
+    Modal::new(Id::unique("name_kit_modal")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("New slice kit");
+        ui.add_space(6.0);
+        ui.label(format!(
+            "Each K adds the selection to the end of the kit. It goes in {}. \
+             Use the name of a file already there to add to that one.",
+            dir.display()
+        ));
+        ui.add_space(8.0);
+        let id = Id::unique("name_kit_field");
+        let resp = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(f32::INFINITY));
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            answer = Some(true);
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Start kit").on_hover_text("↩").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(false);
+        } else if answer == Some(true) {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        }
+    });
+    answer
+}

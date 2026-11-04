@@ -25,6 +25,20 @@ pub enum EdIntent {
     Seek(usize),
     Export,
     SaveInPlace,
+    /// Show the slice kit (`true`) or the browsed sample.
+    ShowKit(bool),
+    AddSlice,
+    UseAsKit,
+    CloseKit,
+}
+
+/// What the header needs to know about the two editor slots.
+pub struct Slots {
+    pub showing_kit: bool,
+    pub kit_name: Option<String>,
+    pub kit_dirty: bool,
+    /// File in the sample slot, shown or not.
+    pub sample_name: Option<String>,
 }
 
 const RULER_H: f32 = 18.0;
@@ -44,11 +58,12 @@ const PLAY_COLOR: Color32 = Color32::from_rgb(245, 200, 70);
 const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
 const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
 
-pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_export: bool) -> Vec<EdIntent> {
+pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_export: bool, slots: &Slots) -> Vec<EdIntent> {
     let mut out = Vec::new();
 
     header(ui, ed, focused, &mut out);
-    toolbar(ui, ed, &pv, can_export, &mut out);
+    slot_bar(ui, ed, slots, &mut out);
+    toolbar(ui, ed, &pv, can_export, slots.showing_kit, &mut out);
 
     if ed.current.is_none() {
         let msg = if let Some(p) = &ed.loading {
@@ -218,6 +233,64 @@ fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) 
     panel_toggles(ui, &mut ed.prefs.panels);
 }
 
+/// Sample / Kit switch, plus the kit's own buttons.
+fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let sample = s.sample_name.as_deref().unwrap_or("—");
+        if ui
+            .selectable_label(!s.showing_kit, format!("Sample: {}", crate::app::short_name(sample, 28)))
+            .on_hover_text("B — the sample you're browsing. Moving the file cursor always loads here.")
+            .clicked()
+        {
+            out.push(EdIntent::ShowKit(false));
+        }
+        match &s.kit_name {
+            Some(k) => {
+                let mut label = format!("Kit: {}", crate::app::short_name(k, 28));
+                if s.kit_dirty {
+                    label.push_str(" ●");
+                }
+                if ui
+                    .selectable_label(s.showing_kit, label)
+                    .on_hover_text("B — the slice kit. K adds the sample's selection to its end. ⌘S here saves the whole kit.")
+                    .clicked()
+                {
+                    out.push(EdIntent::ShowKit(true));
+                }
+                if !s.showing_kit
+                    && ui
+                        .add_enabled(ed.current.is_some(), egui::Button::new("+ Add selection").small())
+                        .on_hover_text(format!("K — add the selection (as you hear it) to the end of {k}"))
+                        .clicked()
+                {
+                    out.push(EdIntent::AddSlice);
+                }
+                if ui
+                    .add_enabled(!s.kit_dirty, egui::Button::new("✕").small())
+                    .on_hover_text(if s.kit_dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close the kit (the file stays)" })
+                    .clicked()
+                {
+                    out.push(EdIntent::CloseKit);
+                }
+            }
+            None => {
+                ui.label(RichText::new("No kit — K starts one").weak());
+            }
+        }
+        if !s.showing_kit && ed.current.is_some() {
+            ui.separator();
+            if ui
+                .small_button("Use as kit")
+                .on_hover_text("Make this file the slice kit, to add slices to its end")
+                .clicked()
+            {
+                out.push(EdIntent::UseAsKit);
+            }
+        }
+    });
+}
+
 /// Right-aligned chips that show / hide each editor panel. Saved with the prefs.
 fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
     section_header(ui, "Show");
@@ -240,7 +313,7 @@ fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
     });
 }
 
-fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, out: &mut Vec<EdIntent>) {
+fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, showing_kit: bool, out: &mut Vec<EdIntent>) {
     let playing = pv.playing;
     let has = ed.current.is_some();
     let pn = ed.prefs.panels.clone();
@@ -425,6 +498,14 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, out: &
                 .clicked()
             {
                 out.push(EdIntent::Export);
+            }
+            if !showing_kit
+                && ui
+                    .add_enabled(ed.current.is_some(), egui::Button::new("+ Slice → Kit"))
+                    .on_hover_text("K — add the selection (as you hear it) to the end of the slice kit")
+                    .clicked()
+            {
+                out.push(EdIntent::AddSlice);
             }
         });
     });

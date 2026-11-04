@@ -248,6 +248,10 @@ pub enum EdAction {
     /// sample without leaving the editor.
     NextFile,
     PrevFile,
+    /// Add the selection to the end of the slice kit.
+    AddSlice,
+    /// Show the slice kit / back to the sample.
+    ToggleKit,
     SwitchPane,
 }
 
@@ -306,6 +310,8 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     hit(Key::S, m.command_only(), A::SaveInPlace);
     hit(Key::ArrowDown, none, A::NextFile);
     hit(Key::ArrowUp, none, A::PrevFile);
+    hit(Key::K, none, A::AddSlice);
+    hit(Key::B, none, A::ToggleKit);
     hit(Key::Tab, none, A::SwitchPane);
     out.extend(zero);
     out
@@ -315,4 +321,4 @@ pub const EDITOR_HELP: &str = "Space play/stop (⇧ from the other start) · I /
 S snap to zero · V follow playback · [ / ] step in point (to zero crossings when snapping), ⇧ for out point · C crop to region, ⇧C uncrop · \
 ⌘Z undo, ⇧⌘Z redo · ←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
 ⌘X / ⌘C / ⌘V cut / copy / paste (paste goes in at the playhead, or over a selection; works across files) · ⌫ delete selection · ⌘S save in place · \
-N normalize · ↩ export · ↑/↓ next/prev sample · Tab next column";
+N normalize · K add selection to slice kit · B show kit / sample · ↩ export · ↑/↓ next/prev sample · Tab next column";
