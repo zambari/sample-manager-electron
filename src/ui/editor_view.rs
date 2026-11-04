@@ -260,7 +260,7 @@ fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
                 }
                 if !s.showing_kit
                     && ui
-                        .add_enabled(ed.current.is_some(), egui::Button::new("+ Add selection").small())
+                        .add_enabled(ed.current.is_some(), egui::Button::new("→").small())
                         .on_hover_text(format!("K — add the selection (as you hear it) to the end of {k}"))
                         .clicked()
                 {
