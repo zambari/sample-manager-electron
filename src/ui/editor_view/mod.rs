@@ -1,0 +1,264 @@
+//! Drawing and mouse handling for the sample editor column.
+//!
+//! Mouse: click parks the playhead, drag on empty space selects a region,
+//! drag near the in/out lines moves them, drag the ruler bar between them
+//! slides the whole region, double-click on an in/out line
+//! parks the playhead there, double-click elsewhere selects all (in a kit:
+//! the slice between the markers around it; click near a slice marker parks
+//! the playhead exactly on it), wheel
+//! zooms around the pointer, horizontal scroll / middle-drag / ⌥-drag pans.
+//! Keys are handled in the app (see `App::perform_editor`).
+
+use crate::audio::stats::{self, Fold, Stats};
+use crate::editor::{Drag, Editor};
+use crate::ui::theme::{SECTION_H, section_header, vis_toggle};
+use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, vec2};
+mod levels;
+mod overview;
+mod scope;
+mod toolbar;
+mod waveform;
+
+use levels::stats_table;
+use overview::overview;
+use scope::scope;
+use toolbar::{header, positions, slot_bar, toolbar};
+use waveform::{draw_lanes, draw_ruler, marker, slice_marks, waveform};
+
+
+pub struct PlayView {
+    /// True when the engine is playing *this* sample.
+    pub playing: bool,
+    pub pos: usize,
+}
+
+pub enum EdIntent {
+    TookFocus,
+    TogglePlay,
+    /// Playhead was moved while playing: jump the voice there.
+    Seek(usize),
+    Export,
+    SaveInPlace,
+    /// Show the slice kit (`true`) or the browsed sample.
+    ShowKit(bool),
+    AddSlice,
+    UseAsKit,
+    CloseKit,
+}
+
+/// What the header needs to know about the two editor slots.
+pub struct Slots {
+    pub showing_kit: bool,
+    pub kit_name: Option<String>,
+    pub kit_dirty: bool,
+    /// File in the sample slot, shown or not.
+    pub sample_name: Option<String>,
+}
+
+const RULER_H: f32 = 18.0;
+const OVERVIEW_H: f32 = 30.0;
+const SCOPE_H: f32 = 110.0;
+/// Width of the scope strip's fixed window, in seconds.
+const SCOPE_SECS: f64 = 0.040;
+const GRAB_PX: f32 = 6.0;
+const MIN_FPP: f64 = 1.0 / 48.0;
+/// Below this many frames per pixel, draw the waveform as a smooth filled
+/// curve through the samples instead of per-column min/max bars.
+const SOLID_CURVE_FPP: f64 = 4.0;
+
+pub const IN_COLOR: Color32 = Color32::from_rgb(90, 200, 120);
+pub const OUT_COLOR: Color32 = Color32::from_rgb(235, 115, 90);
+const PLAY_COLOR: Color32 = Color32::from_rgb(245, 200, 70);
+const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
+const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
+const MARK_COLOR: Color32 = Color32::from_rgb(200, 140, 245);
+
+pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_export: bool, slots: &Slots) -> Vec<EdIntent> {
+    let mut out = Vec::new();
+
+    header(ui, ed, focused, &mut out);
+    slot_bar(ui, ed, slots, &mut out);
+    toolbar(ui, ed, &pv, can_export, slots.showing_kit, &mut out);
+
+    if ed.current.is_none() {
+        let msg = if let Some(p) = &ed.loading {
+            format!("Loading {} …", p.file_name().unwrap_or_default().to_string_lossy())
+        } else if let Some(e) = &ed.error {
+            e.clone()
+        } else {
+            "Move the cursor onto a sample in Source or Destination to load it here.".to_owned()
+        };
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| ui.label(RichText::new(msg).weak()));
+        let resp = ui.interact(ui.max_rect(), ui.scope_id().with("empty"), Sense::click());
+        if resp.clicked() {
+            out.push(EdIntent::TookFocus);
+        }
+        return out;
+    }
+
+    let pn = ed.prefs.panels.clone();
+
+    // The waveform takes whatever height the other shown panels leave.
+    let avail = ui.available_size();
+    let phase = pn.stats && ed.is_multichannel();
+    let sec = SECTION_H + ui.spacing().item_spacing.y;
+    let mut reserved = 0.0;
+    if pn.wave {
+        reserved += sec;
+    }
+    if pn.nums {
+        reserved += ui.spacing().interact_size.y + sec;
+    }
+    if pn.scalpel {
+        reserved += SCOPE_H + sec;
+    }
+    if pn.minimap {
+        reserved += OVERVIEW_H + sec;
+    }
+    if phase {
+        reserved += 20.0;
+    }
+    if pn.stats {
+        reserved += 150.0 + sec;
+    }
+    // Measure the wrapped help text so the waveform leaves room for it.
+    let help_font = egui::TextStyle::Small.resolve(ui.style());
+    let help_h = if pn.help {
+        let g = ui.fonts_mut(|f| f.layout(crate::keymap::EDITOR_HELP.to_owned(), help_font.clone(), egui::Color32::WHITE, avail.x));
+        g.size().y + sec
+    } else {
+        0.0
+    };
+    reserved += help_h;
+
+    if pn.wave {
+        section_header(ui, "Wave");
+        let wave_h = (avail.y - reserved - 12.0).max(80.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
+        waveform(ui, ed, &pv, rect, focused, &mut out);
+    }
+
+    if pn.nums {
+        section_header(ui, "Nums");
+        positions(ui, ed, &pv);
+    }
+
+    if pn.scalpel {
+        section_header(ui, "Scalpel");
+        let (srect, _) = ui.allocate_exact_size(vec2(avail.x, SCOPE_H), Sense::hover());
+        scope(ui, ed, &pv, srect, &mut out);
+    }
+
+    if pn.minimap {
+        section_header(ui, "Map");
+        let (orect, _) = ui.allocate_exact_size(vec2(avail.x, OVERVIEW_H), Sense::hover());
+        overview(ui, ed, &pv, orect, &mut out);
+    }
+
+    if pn.stats {
+        section_header(ui, "Stats");
+    }
+    if phase {
+        phase_meter(ui, ed, &pv);
+    }
+
+    if pn.stats {
+        stats_table(ui, ed);
+    }
+
+    if pn.help {
+        section_header(ui, "Help");
+        ui.label(RichText::new(crate::keymap::EDITOR_HELP).weak().small());
+    }
+    out
+}
+
+/// L/R correlation bar: −1 (cancels in mono) … 0 (unrelated) … +1 (mono).
+/// Live around the play cursor while playing, else over the region.
+fn phase_meter(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
+    let live = pv.playing;
+    let ph = if live { ed.phase_at(pv.pos) } else { ed.region_phase() };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Phase").weak()).on_hover_text(
+            "L/R correlation. +1: both sides the same (mono-safe). 0: unrelated / very wide. \
+             Below 0: out of phase — those parts cancel when folded to mono.",
+        );
+        let (rect, _) = ui.allocate_exact_size(vec2(180.0, 12.0), Sense::hover());
+        let vis = ui.visuals().clone();
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 2.0, vis.extreme_bg_color);
+        let mid = rect.center().x;
+        let left = Rect::from_x_y_ranges(rect.left()..=mid, rect.y_range());
+        p.rect_filled(left, 2.0, CLIP_COLOR.gamma_multiply(0.18));
+        for t in [-0.5f32, 0.0, 0.5] {
+            let x = mid + t * rect.width() / 2.0;
+            let h = if t == 0.0 { 0.0 } else { 3.0 };
+            p.line_segment([Pos2::new(x, rect.top() + h), Pos2::new(x, rect.bottom() - h)], Stroke::new(1.0, vis.weak_text_color().gamma_multiply(0.6)));
+        }
+        // Ease the needle so the live reading is readable rather than jittery.
+        let target = ph.corr.unwrap_or(0.0);
+        let c = ui.ctx().animate_value_with_time(ui.scope_id().with("phase_needle"), target, if live { 0.12 } else { 0.0 });
+        if ph.corr.is_some() {
+            let x = mid + c * rect.width() / 2.0;
+            let col = if c < 0.0 { CLIP_COLOR } else if c < 0.3 { vis.warn_fg_color } else { IN_COLOR };
+            p.rect_filled(Rect::from_x_y_ranges(mid.min(x)..=mid.max(x), rect.shrink(3.0).y_range()), 1.0, col.gamma_multiply(0.5));
+            p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(2.0, col));
+        }
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, vis.widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+        let corr = ph.corr.map_or("  —  ".to_owned(), |c| format!("{c:+.2}"));
+        ui.monospace(corr);
+        ui.separator();
+        let loss = RichText::new(format!("mono sum {}", stats::fmt_db(ph.mono_loss_db))).monospace();
+        ui.label(if ph.mono_loss_db < -4.0 { loss.color(vis.warn_fg_color) } else { loss.weak() })
+            .on_hover_text("Level of the mono fold relative to the stereo signal. ~0 dB: nothing lost. ~−3 dB: wide/unrelated sides. Much lower: cancellation.");
+        ui.label(RichText::new(if live { "live" } else { "region" }).weak().small());
+    });
+}
+
+// ---- view math --------------------------------------------------------------
+
+struct Map {
+    rect: Rect,
+    start: f64,
+    fpp: f64,
+    frames: usize,
+}
+
+impl Map {
+    fn x(&self, frame: f64) -> f32 {
+        self.rect.left() + ((frame - self.start) / self.fpp) as f32
+    }
+    fn frame(&self, x: f32) -> usize {
+        let f = self.start + (x - self.rect.left()) as f64 * self.fpp;
+        f.round().clamp(0.0, self.frames as f64) as usize
+    }
+}
+
+pub fn clamp_view(ed: &mut Editor, width: f32) {
+    let frames = ed.frames() as f64;
+    let w = width.max(1.0) as f64;
+    let max_fpp = (frames / w).max(MIN_FPP);
+    ed.view.fpp = ed.view.fpp.clamp(MIN_FPP, max_fpp);
+    let max_start = (frames - w * ed.view.fpp).max(0.0);
+    ed.view.start = ed.view.start.clamp(0.0, max_start);
+}
+
+/// Zoom by `factor` (<1 zooms in) keeping `anchor_x` fixed on screen.
+pub fn zoom_at(ed: &mut Editor, rect: Rect, anchor_x: f32, factor: f64) {
+    let anchor = ed.view.start + (anchor_x - rect.left()) as f64 * ed.view.fpp;
+    ed.view.fpp *= factor;
+    clamp_view(ed, rect.width());
+    ed.view.start = anchor - (anchor_x - rect.left()) as f64 * ed.view.fpp;
+    clamp_view(ed, rect.width());
+}
+
+/// Scroll so `frame` is on screen, leaving a margin, if it isn't already.
+pub fn ensure_visible(ed: &mut Editor, width: f32, frame: usize) {
+    let w = width as f64 * ed.view.fpp;
+    let f = frame as f64;
+    if f < ed.view.start || f > ed.view.start + w {
+        ed.view.start = f - w * 0.25;
+        clamp_view(ed, width);
+    }
+}

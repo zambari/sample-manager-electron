@@ -28,10 +28,12 @@ use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
 use std::path::{Path, PathBuf};
 
 mod actions;
+mod bars;
 mod editing;
 mod kit;
+mod nav;
 mod os_dnd;
-mod panels;
+mod pane_view;
 mod transfers;
 mod undo;
 
