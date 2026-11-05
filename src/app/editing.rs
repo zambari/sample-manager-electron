@@ -168,11 +168,7 @@ impl App {
             return;
         }
         let Some(dir) = src.parent() else { return };
-        // A kit is saved whole, whatever part of it is selected.
-        if self.showing_kit {
-            self.editor.uncrop();
-            self.editor.select_all();
-        }
+        // A kit is saved whole (see `Editor::export`), whatever is selected.
         let target = crate::audio::export::target_for(&src, dir);
         self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
         let mono = self.editor.fold();
@@ -306,6 +302,9 @@ impl App {
             }
             EdAction::SelectAll => ed.select_all(),
             EdAction::Normalize => ed.normalize(),
+            EdAction::InsertSilence => {
+                ed.insert_silence(0.1);
+            }
             EdAction::Export => self.export(),
             EdAction::Delete => {
                 if !ed.delete() {
@@ -401,6 +400,8 @@ impl App {
                 }
                 Outcome::Exported(p) => {
                     self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
+                    // A kit exported somewhere new: name it right away.
+                    let rename = is_kit && self.editor.path() != Some(p.as_path());
                     // Replaced the file that's open: show what's on disk now.
                     if self.editor.path() == Some(p.as_path()) {
                         if self.voice_path.as_deref() == Some(p.as_path()) {
@@ -411,6 +412,10 @@ impl App {
                     if let Some(dir) = p.parent() {
                         self.sizes.invalidate_subtree(dir);
                         self.reload_showing(dir, false);
+                    }
+                    if rename {
+                        self.status += " — type a name for it, ↩ to rename";
+                        self.rename_kept(vec![p.clone()]);
                     }
                     if let Some(l) = self.leave_after_save.take() {
                         self.finish_leave(l);

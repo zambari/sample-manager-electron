@@ -239,6 +239,8 @@ pub enum EdAction {
     ZoomRegion,
     SelectAll,
     Normalize,
+    /// Insert 100 ms of silence before the playhead.
+    InsertSilence,
     Export,
     /// Remove the selection from the audio (no clipboard).
     Delete,
@@ -304,6 +306,7 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     hit(Key::Z, none, A::ZoomRegion);
     hit(Key::A, m.command_only(), A::SelectAll);
     hit(Key::N, none, A::Normalize);
+    hit(Key::G, none, A::InsertSilence);
     hit(Key::Enter, none, A::Export);
     hit(Key::Backspace, none, A::Delete);
     hit(Key::Delete, none, A::Delete);
@@ -321,4 +324,5 @@ pub const EDITOR_HELP: &str = "Space play/stop (⇧ from the other start) · I /
 S snap to zero · V follow playback · [ / ] step in point (to zero crossings when snapping), ⇧ for out point · C crop to region, ⇧C uncrop · \
 ⌘Z undo, ⇧⌘Z redo · ←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
 ⌘X / ⌘C / ⌘V cut / copy / paste (paste goes in at the playhead, or over a selection; works across files) · ⌫ delete selection · ⌘S save in place · \
-N normalize · K add selection to slice kit · B show kit / sample · ↩ export · ↑/↓ next/prev sample · Tab next column";
+N normalize · G insert 100 ms of silence before the playhead · K add selection to slice kit · B show kit / sample · \
+in a kit: click near a slice marker parks the playhead on it, double-click selects that slice, ↩ exports the whole kit · ↩ export · ↑/↓ next/prev sample · Tab next column";

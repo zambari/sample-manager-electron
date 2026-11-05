@@ -1,6 +1,7 @@
 //! Everything that touches sample data: decoding, playback, analysis, export.
 //! No egui in here.
 
+pub mod cues;
 pub mod decode;
 pub mod engine;
 pub mod export;

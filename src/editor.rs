@@ -3,6 +3,7 @@
 //! [`crate::audio::engine`]. Decoding and export run on worker threads and
 //! report back through [`Editor::drain`], same pattern as [`crate::jobs`].
 
+use crate::audio::cues;
 use crate::audio::decode::{self, Sample};
 use crate::audio::export::{self, Render};
 use crate::audio::peaks::ChannelPeaks;
@@ -184,6 +185,7 @@ struct EditState {
     /// The whole edited file and its content revision (cut / paste).
     full: Option<Loaded>,
     rev: u64,
+    markers: Vec<usize>,
 }
 
 const CH_IN: u8 = 1;
@@ -192,6 +194,7 @@ const CH_PLAYHEAD: u8 = 4;
 const CH_GAIN: u8 = 8;
 const CH_CROP: u8 = 16;
 const CH_AUDIO: u8 = 32;
+const CH_MARKS: u8 = 64;
 
 impl EditState {
     /// Which fields differ, as a CH_* mask.
@@ -215,6 +218,9 @@ impl EditState {
         if self.rev != o.rev {
             m |= CH_AUDIO;
         }
+        if self.markers != o.markers {
+            m |= CH_MARKS;
+        }
         m
     }
 }
@@ -236,7 +242,8 @@ const UNDO_LIMIT: usize = 300;
 const COALESCE_SECS: f64 = 0.6;
 
 enum Ev {
-    Loaded { generation: u64, path: PathBuf, result: Result<Loaded, String> },
+    /// `cues`: slice markers stored in the file, for a kit.
+    Loaded { generation: u64, path: PathBuf, result: Result<Loaded, String>, cues: Vec<usize> },
     /// `rev` is the content revision that was rendered.
     Exported { rev: u64, result: Result<PathBuf, String> },
     BatchExported { dest_dir: PathBuf, done: usize, errors: Vec<String> },
@@ -301,6 +308,12 @@ pub struct Editor {
     pub exporting: bool,
     /// Start playing once the pending load lands.
     pub play_when_loaded: bool,
+    /// This slot holds the slice kit: export writes the whole file with its
+    /// slice markers, and the markers are drawn and edited.
+    pub is_kit: bool,
+    /// Kit slice starts, in whole-file frames, sorted, strictly inside the
+    /// file (0 and the end are implied).
+    markers: Vec<usize>,
     memos: HashMap<PathBuf, Memo>,
     stats_key: Option<(usize, usize, u32, usize, Option<Fold>)>,
     /// Content revision: bumped by every cut / paste. Unique per edit so undo
@@ -340,6 +353,8 @@ impl Editor {
             wave_rect: None,
             exporting: false,
             play_when_loaded: false,
+            is_kit: false,
+            markers: Vec::new(),
             memos: HashMap::new(),
             stats_key: None,
             rev: 0,
@@ -412,7 +427,8 @@ impl Editor {
         let path = path.to_path_buf();
         let _ = std::thread::Builder::new().name("decode".into()).spawn(move || {
             let result = decode::decode(&path).map(Loaded::new);
-            let _ = tx.send(Ev::Loaded { generation, path, result });
+            let cues = cues::read(&path);
+            let _ = tx.send(Ev::Loaded { generation, path, result, cues });
             ctx.request_repaint();
         });
     }
@@ -421,7 +437,7 @@ impl Editor {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Ev::Loaded { generation, path, result } => {
+                Ev::Loaded { generation, path, result, cues } => {
                     if generation != self.generation {
                         continue; // the cursor moved on
                     }
@@ -429,7 +445,7 @@ impl Editor {
                     match result {
                         Ok(loaded) => {
                             self.remember();
-                            self.install(loaded);
+                            self.install(loaded, cues);
                             out.push(Outcome::Loaded);
                         }
                         Err(e) => {
@@ -495,8 +511,9 @@ impl Editor {
         self.request(&s.path);
     }
 
-    fn install(&mut self, loaded: Loaded) {
+    fn install(&mut self, loaded: Loaded, cues: Vec<usize>) {
         let frames = loaded.sample.frames();
+        self.markers = if self.is_kit { cues.into_iter().filter(|&m| m > 0 && m < frames).collect() } else { Vec::new() };
         let memo = self.memos.get(&loaded.sample.path).copied();
         self.file_stats = stats::compute(&loaded.sample.channels, 0, frames, 1.0);
         self.full = Some(loaded.clone());
@@ -592,6 +609,7 @@ impl Editor {
             shown: self.current.clone(),
             full: self.full.clone(),
             rev: self.rev,
+            markers: self.markers.clone(),
         }
     }
 
@@ -610,6 +628,7 @@ impl Editor {
         self.sel = st.sel;
         self.playhead = st.playhead;
         self.gain_db = st.gain_db;
+        self.markers = st.markers;
         self.stats_key = None;
     }
 
@@ -631,7 +650,7 @@ impl Editor {
             h.committed = Some(prev);
             return;
         }
-        let coalesce = mask == h.last_mask && mask & (CH_CROP | CH_AUDIO) == 0 && now - h.last_time < COALESCE_SECS;
+        let coalesce = mask == h.last_mask && mask & (CH_CROP | CH_AUDIO | CH_MARKS) == 0 && now - h.last_time < COALESCE_SECS;
         if !coalesce {
             h.undo.push(prev);
             if h.undo.len() > UNDO_LIMIT {
@@ -986,6 +1005,10 @@ impl Editor {
         let ins = clip.adapt(rate, nch);
         let end = self.frames();
         self.splice(end, end, &ins);
+        // The new slice starts where the file used to end.
+        if self.is_kit && end > 0 && end < self.frames() {
+            self.add_marker(end);
+        }
         self.view.fit_pending = true;
     }
 
@@ -996,15 +1019,17 @@ impl Editor {
         self.play_when_loaded = false;
         self.memos.remove(&path);
         let sample = Sample { path, rate: clip.rate, channels: clip.channels.clone(), bits, format: "WAV".into(), file_len: 0 };
-        self.install(Loaded::new(sample));
+        self.install(Loaded::new(sample), Vec::new());
         self.clean_rev = 0; // nothing written yet
     }
 
     /// Empty the editor, keeping prefs and the clipboard.
     pub fn close(&mut self) {
         let clip = self.clip.take();
+        let is_kit = self.is_kit;
         *self = Editor::new(self.ctx.clone(), self.prefs.clone());
         self.clip = clip;
+        self.is_kit = is_kit;
     }
 
     pub fn can_paste(&self) -> bool {
@@ -1026,16 +1051,66 @@ impl Editor {
         } else {
             self.sel
         };
-        self.splice(a, b, &ins);
+        let (fa, n) = self.splice(a, b, &ins);
+        // In a kit, what was pasted is a slice of its own.
+        if self.is_kit {
+            self.add_marker(fa);
+            self.add_marker(fa + n);
+        }
         true
+    }
+
+    /// Insert `secs` of silence just before the playhead. Everything after
+    /// it, slice markers included, moves later; the playhead stays on the
+    /// audio it was on.
+    pub fn insert_silence(&mut self, secs: f64) -> bool {
+        let Some(s) = self.sample() else { return false };
+        let n = (secs * s.rate as f64).round() as usize;
+        if n == 0 {
+            return false;
+        }
+        let zeros = vec![vec![0.0f32; n]; s.channels.len()];
+        let p = self.playhead.min(self.frames());
+        self.splice(p, p, &zeros);
+        true
+    }
+
+    // ---- kit markers -------------------------------------------------------
+
+    fn add_marker(&mut self, f: usize) {
+        let total = self.full.as_ref().map_or(0, |l| l.sample.frames());
+        if f == 0 || f >= total {
+            return;
+        }
+        if let Err(i) = self.markers.binary_search(&f) {
+            self.markers.insert(i, f);
+        }
+    }
+
+    /// Slice markers in shown-sample frames (inside the crop, if any).
+    pub fn marks(&self) -> Vec<usize> {
+        let off = self.crop_offset();
+        let n = self.frames();
+        self.markers.iter().filter(|&&m| m >= off && m - off <= n).map(|&m| m - off).collect()
+    }
+
+    /// The slice around `frame`: from the marker at or before it to the next
+    /// one (or the ends of what's shown).
+    pub fn slice_at(&self, frame: usize) -> (usize, usize) {
+        let n = self.frames();
+        let marks = self.marks();
+        let a = marks.iter().copied().filter(|&m| m <= frame).max().unwrap_or(0);
+        let b = marks.iter().copied().filter(|&m| m > frame).min().unwrap_or(n);
+        (a, b.max(a + 1).min(n.max(1)))
     }
 
     /// Replace `[a, b)` of the shown sample with `ins` (one Vec per channel).
     /// The edit goes into the whole file; a crop around it grows or shrinks
     /// with it. Afterwards nothing is selected and the playhead sits at the
     /// end of what went in.
-    fn splice(&mut self, a: usize, b: usize, ins: &[Vec<f32>]) {
-        let Some(full) = &self.full else { return };
+    /// Returns where the new audio went in, in whole-file frames, and its length.
+    fn splice(&mut self, a: usize, b: usize, ins: &[Vec<f32>]) -> (usize, usize) {
+        let Some(full) = &self.full else { return (0, 0) };
         let off = self.crop_offset();
         let (fa, fb) = (a + off, b + off);
         let n = ins.first().map_or(0, Vec::len);
@@ -1063,6 +1138,24 @@ impl Editor {
             file_len: fs.file_len,
         };
         let total = sample.frames();
+        // Markers before the edit stay, ones inside what was replaced go,
+        // the rest move with the audio after it.
+        let mut marks: Vec<usize> = self
+            .markers
+            .iter()
+            .filter_map(|&m| {
+                if m < fb && m <= fa {
+                    Some(m)
+                } else if m >= fb {
+                    Some(m - (fb - fa) + n)
+                } else {
+                    None
+                }
+            })
+            .filter(|&m| m > 0 && m < total)
+            .collect();
+        marks.dedup();
+        self.markers = marks;
         let new_full = Loaded::new(sample);
         self.full = Some(new_full.clone());
         self.next_rev += 1;
@@ -1090,23 +1183,33 @@ impl Editor {
                 self.playhead = caret.min(total);
             }
         }
+        (fa, n)
     }
 
     // ---- export -----------------------------------------------------------
 
     /// Write the edited region to exactly `target` (overwriting it).
+    /// A kit ignores in / out and the crop: the whole file goes out, with its
+    /// slice markers as cue points.
     pub fn export(&mut self, target: PathBuf, mono: Option<Fold>) {
-        let Some(sample) = self.sample().cloned() else { return };
+        let kit = self.is_kit;
+        let shown = if kit { self.full.as_ref().map(|l| &l.sample) } else { self.sample() };
+        let Some(sample) = shown.cloned() else { return };
         if self.exporting {
             return;
         }
         self.exporting = true;
-        let r = Render { start: self.sel.0, end: self.sel.1, gain: self.gain(), mono };
+        let r = if kit {
+            Render { start: 0, end: sample.frames(), gain: self.gain(), mono }
+        } else {
+            Render { start: self.sel.0, end: self.sel.1, gain: self.gain(), mono }
+        };
+        let marks = if kit { self.markers.clone() } else { Vec::new() };
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let rev = self.rev;
         let _ = std::thread::Builder::new().name("export".into()).spawn(move || {
-            let result = export::write_wav(&sample, &r, &target);
+            let result = export::write_wav(&sample, &r, &target).and_then(|p| cues::append(&p, &marks).map(|_| p));
             let _ = tx.send(Ev::Exported { rev, result });
             ctx.request_repaint();
         });

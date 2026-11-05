@@ -3,7 +3,9 @@
 //! Mouse: click parks the playhead, drag on empty space selects a region,
 //! drag near the in/out lines moves them, drag the ruler bar between them
 //! slides the whole region, double-click on an in/out line
-//! parks the playhead there, double-click elsewhere selects all, wheel
+//! parks the playhead there, double-click elsewhere selects all (in a kit:
+//! the slice between the markers around it; click near a slice marker parks
+//! the playhead exactly on it), wheel
 //! zooms around the pointer, horizontal scroll / middle-drag / ⌥-drag pans.
 //! Keys are handled in the app (see `App::perform_editor`).
 
@@ -57,6 +59,7 @@ pub const OUT_COLOR: Color32 = Color32::from_rgb(235, 115, 90);
 const PLAY_COLOR: Color32 = Color32::from_rgb(245, 200, 70);
 const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
 const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
+const MARK_COLOR: Color32 = Color32::from_rgb(200, 140, 245);
 
 pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_export: bool, slots: &Slots) -> Vec<EdIntent> {
     let mut out = Vec::new();
@@ -245,37 +248,33 @@ fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
         {
             out.push(EdIntent::ShowKit(false));
         }
-        match &s.kit_name {
-            Some(k) => {
-                let mut label = format!("Kit: {}", crate::app::short_name(k, 28));
-                if s.kit_dirty {
-                    label.push_str(" ●");
-                }
-                if ui
-                    .selectable_label(s.showing_kit, label)
-                    .on_hover_text("B — the slice kit. K adds the sample's selection to its end. ⌘S here saves the whole kit.")
-                    .clicked()
-                {
-                    out.push(EdIntent::ShowKit(true));
-                }
-                if !s.showing_kit
-                    && ui
-                        .add_enabled(ed.current.is_some(), egui::Button::new("→").small())
-                        .on_hover_text(format!("K — add the selection (as you hear it) to the end of {k}"))
-                        .clicked()
-                {
-                    out.push(EdIntent::AddSlice);
-                }
-                if ui
-                    .add_enabled(!s.kit_dirty, egui::Button::new("✕").small())
-                    .on_hover_text(if s.kit_dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close the kit (the file stays)" })
-                    .clicked()
-                {
-                    out.push(EdIntent::CloseKit);
-                }
+        // No kit yet: nothing to show until K starts one.
+        if let Some(k) = &s.kit_name {
+            let mut label = format!("Kit: {}", crate::app::short_name(k, 28));
+            if s.kit_dirty {
+                label.push_str(" ●");
             }
-            None => {
-                ui.label(RichText::new("No kit — K starts one").weak());
+            if ui
+                .selectable_label(s.showing_kit, label)
+                .on_hover_text("B — the slice kit. K adds the sample's selection to its end. ⌘S here saves the whole kit.")
+                .clicked()
+            {
+                out.push(EdIntent::ShowKit(true));
+            }
+            if !s.showing_kit
+                && ui
+                    .add_enabled(ed.current.is_some(), egui::Button::new("→").small())
+                    .on_hover_text(format!("K — add the selection (as you hear it) to the end of {k}"))
+                    .clicked()
+            {
+                out.push(EdIntent::AddSlice);
+            }
+            if ui
+                .add_enabled(!s.kit_dirty, egui::Button::new("✕").small())
+                .on_hover_text(if s.kit_dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close the kit (the file stays)" })
+                .clicked()
+            {
+                out.push(EdIntent::CloseKit);
             }
         }
         if !s.showing_kit && ed.current.is_some() {
@@ -412,6 +411,13 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, showin
                 ed.paste();
             }
             if ui
+                .button("+100 ms")
+                .on_hover_text("G — insert 100 ms of silence just before the playhead, pushing everything after it (slice markers too) later")
+                .clicked()
+            {
+                ed.insert_silence(0.1);
+            }
+            if ui
                 .add_enabled(ed.is_dirty() && !ed.exporting, egui::Button::new("Save"))
                 .on_hover_text("⌘S — write what you hear back over the original file")
                 .clicked()
@@ -483,6 +489,8 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, showin
             }
             let label = if ed.exporting {
                 "Exporting…"
+            } else if showing_kit {
+                if ed.exports_mono() { "Export kit (mono)" } else { "Export kit" }
             } else if ed.exports_mono() {
                 match ed.fold() {
                     Some(Fold::Left) => "Export mono (L) → Destination",
@@ -492,9 +500,14 @@ fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, showin
             } else {
                 "Export → Destination"
             };
+            let tip = if showing_kit {
+                "↩ — write the whole kit (in / out ignored), with its slice markers, into the active destination tab, then name it"
+            } else {
+                "↩ — write the trimmed, gained region as a new WAV into the active destination tab"
+            };
             if ui
                 .add_enabled(can_export && !ed.exporting, egui::Button::new(label))
-                .on_hover_text("↩ — write the trimmed, gained region as a new WAV into the active destination tab")
+                .on_hover_text(tip)
                 .clicked()
             {
                 out.push(EdIntent::Export);
@@ -634,9 +647,20 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     let m = Map { rect, start: ed.view.start, fpp: ed.view.fpp, frames };
     let x_in = m.x(ed.sel.0 as f64);
     let x_out = m.x(ed.sel.1 as f64);
+    let marks = if ed.is_kit { ed.marks() } else { Vec::new() };
 
     // ---- mouse ----
     let near = |x: f32, p: Pos2| (p.x - x).abs() <= GRAB_PX;
+    // The kit slice marker under the pointer, if any (nearest wins).
+    let mark_at = |p: Pos2| {
+        marks
+            .iter()
+            .copied()
+            .map(|f| (f, (m.x(f as f64) - p.x).abs()))
+            .filter(|&(_, d)| d <= GRAB_PX)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(f, _)| f)
+    };
     // Range bar: the ruler strip between the markers drags the whole region.
     let on_bar = |p: Pos2| {
         p.y >= rect.top() && p.y <= rect.top() + RULER_H && p.x > x_in + GRAB_PX && p.x < x_out - GRAB_PX
@@ -702,18 +726,22 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
     if resp.clicked() {
         out.push(EdIntent::TookFocus);
         if let Some(p) = resp.interact_pointer_pos() {
-            ed.playhead = m.frame(p.x);
+            // Near a kit slice marker: land exactly on it.
+            ed.playhead = mark_at(p).unwrap_or_else(|| m.frame(p.x));
             if pv.playing {
                 out.push(EdIntent::Seek(ed.playhead));
             }
         }
     }
     if resp.double_clicked() {
-        // On a marker: park the playhead exactly on it. Elsewhere: select all.
+        // On a marker: park the playhead exactly on it. Elsewhere: select
+        // the kit slice there, or everything.
         let p = resp.interact_pointer_pos();
         let target = p.and_then(|p| {
             let (di, dout) = ((p.x - x_in).abs(), (p.x - x_out).abs());
-            if near(x_in, p) && di <= dout {
+            if let Some(f) = mark_at(p) {
+                Some(f)
+            } else if near(x_in, p) && di <= dout {
                 Some(ed.sel.0)
             } else if near(x_out, p) {
                 Some(ed.sel.1.saturating_sub(1))
@@ -726,6 +754,12 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
                 ed.playhead = f;
                 if pv.playing {
                     out.push(EdIntent::Seek(f));
+                }
+            }
+            None if ed.is_kit => {
+                if let Some(p) = p {
+                    let (a, b) = ed.slice_at(m.frame(p.x));
+                    ed.sel = (a, b);
                 }
             }
             None => ed.select_all(),
@@ -779,6 +813,7 @@ fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bo
         painter.rect_filled(Rect::from_x_y_ranges(x_out.max(rect.left())..=rect.right(), lanes.y_range()), 0.0, dim);
     }
 
+    slice_marks(&painter, &m, rect, RULER_H, &marks);
     marker(&painter, rect, x_in, IN_COLOR, true);
     marker(&painter, rect, x_out, OUT_COLOR, false);
 
@@ -941,6 +976,23 @@ fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: Rect, vis: &
     }
 }
 
+/// Kit slice starts: a line down the whole view, a tab in the ruler and the
+/// slice number beside it.
+fn slice_marks(painter: &egui::Painter, m: &Map, rect: Rect, ruler_h: f32, marks: &[usize]) {
+    for (i, &f) in marks.iter().enumerate() {
+        let x = m.x(f as f64);
+        if !(rect.left() - 1.0..=rect.right() + 1.0).contains(&x) {
+            continue;
+        }
+        painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, MARK_COLOR.gamma_multiply(0.85)));
+        if ruler_h > 0.0 {
+            let r = Rect::from_min_size(Pos2::new(x, rect.top()), vec2(4.0, ruler_h));
+            painter.rect_filled(r, 0.0, MARK_COLOR);
+            painter.text(Pos2::new(x + 6.0, rect.top() + ruler_h + 2.0), Align2::LEFT_TOP, format!("{}", i + 2), FontId::monospace(10.0), MARK_COLOR);
+        }
+    }
+}
+
 fn marker(painter: &egui::Painter, rect: Rect, x: f32, col: Color32, is_in: bool) {
     if !(rect.left() - 1.0..=rect.right() + 1.0).contains(&x) {
         return;
@@ -1099,6 +1151,9 @@ fn scope(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, out: &mut Vec<
     if x_out < rect.right() {
         painter.rect_filled(Rect::from_x_y_ranges(x_out.max(rect.left())..=rect.right(), lanes.y_range()), 0.0, dim);
     }
+    if ed.is_kit {
+        slice_marks(&painter, &m, rect, 0.0, &ed.marks());
+    }
     marker(&painter, rect, x_in, IN_COLOR, true);
     marker(&painter, rect, x_out, OUT_COLOR, false);
 
@@ -1171,6 +1226,12 @@ fn overview(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, out: &mut V
         rect.y_range(),
     );
     painter.rect_stroke(vw, 2.0, Stroke::new(1.0, vis.strong_text_color()), egui::StrokeKind::Inside);
+    if ed.is_kit {
+        for f in ed.marks() {
+            let xx = x(f as f64);
+            painter.line_segment([Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())], Stroke::new(1.0, MARK_COLOR.gamma_multiply(0.7)));
+        }
+    }
     for (f, c) in [(ed.sel.0, IN_COLOR), (ed.sel.1, OUT_COLOR)] {
         let xx = x(f as f64);
         painter.line_segment([Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())], Stroke::new(1.0, c));

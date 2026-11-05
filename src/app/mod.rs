@@ -262,6 +262,8 @@ impl App {
             editor.restore_session(s);
         }
         let mut other = Editor::new(ctx.clone(), editor.prefs.clone());
+        // The hidden slot starts out as the kit; `close` keeps the flag.
+        other.is_kit = true;
         if let Some(s) = saved.as_ref().and_then(|s| s.kit_session.clone()).filter(|s| s.path.is_file()) {
             other.restore_session(&s);
         }

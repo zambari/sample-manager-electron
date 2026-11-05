@@ -496,7 +496,7 @@ impl App {
 
     /// Select the "Keep both" copies a finished job made and, for a single
     /// one, open the inline rename on it, in a pane showing its folder.
-    fn rename_kept(&mut self, paths: Vec<PathBuf>) {
+    pub(super) fn rename_kept(&mut self, paths: Vec<PathBuf>) {
         let paths: Vec<PathBuf> = paths.into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok()).collect();
         let Some(first) = paths.first() else { return };
         let Some(dir) = first.parent().map(Path::to_path_buf) else { return };
