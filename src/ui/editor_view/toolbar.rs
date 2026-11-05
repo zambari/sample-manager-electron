@@ -59,6 +59,7 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             {
                 out.push(EdIntent::ShowKit(true));
             }
+            grid_picker(ui, s.kit_grid, out);
             if !s.showing_kit
                 && ui
                     .add_enabled(ed.current.is_some(), egui::Button::new("→").small())
@@ -86,6 +87,27 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             }
         }
     });
+}
+
+/// Free / 4 / 8 / 16 switch for the kit's layout.
+fn grid_picker(ui: &mut Ui, cur: Option<usize>, out: &mut Vec<EdIntent>) {
+    let label = |g: Option<usize>| g.map_or("Free".to_owned(), |n| format!("{n} slots"));
+    egui::ComboBox::from_id_salt("kit_grid")
+        .selected_text(label(cur))
+        .width(70.0)
+        .show_ui(ui, |ui| {
+            for g in std::iter::once(None).chain(crate::editor::GRID_SIZES.map(Some)) {
+                if ui.selectable_label(cur == g, label(g)).clicked() && cur != g {
+                    out.push(EdIntent::SetGrid(g));
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "Free: slices go end to end, wherever they fall.\n\
+             N slots: the kit is split into N equal parts (what Digitakt 1 can slice), each slice at the start of \
+             its slot, padded with silence to the longest one. K fills the next free slot; cuts and pastes snap back onto the grid.",
+        );
 }
 
 /// Right-aligned chips that show / hide each editor panel. Saved with the prefs.

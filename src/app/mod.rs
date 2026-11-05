@@ -165,7 +165,9 @@ pub struct App {
     other: Editor,
     showing_kit: bool,
     /// Slice to add once the kit file finishes loading.
-    kit_pending: Option<crate::editor::AudioClip>,
+    kit_pending: Option<(crate::editor::AudioClip, Option<usize>)>,
+    /// Grid picked last time, offered for the next new kit.
+    kit_grid: Option<usize>,
     /// Waiting on the "name the slice kit" question.
     kit_naming: Option<kit::KitNaming>,
     /// The editor column has the keyboard. `focused` then remembers which
@@ -286,6 +288,7 @@ impl App {
             other,
             showing_kit: false,
             kit_pending: None,
+            kit_grid: saved.as_ref().and_then(|s| s.kit_grid),
             kit_naming: None,
             editor_focused: false,
             devices: Engine::devices(),
@@ -385,6 +388,7 @@ impl App {
             },
             session: self.browser().session(),
             kit_session: self.kit().session(),
+            kit_grid: self.kit_grid,
         }
     }
 
@@ -569,7 +573,7 @@ impl eframe::App for App {
         }
 
         if let Some(n) = &mut self.kit_naming {
-            if let Some(ok) = dialogs::name_kit(ui.ctx(), &mut n.name, &n.dir) {
+            if let Some(ok) = dialogs::name_kit(ui.ctx(), &mut n.name, &n.dir, &mut n.grid) {
                 let n = self.kit_naming.take().expect("checked above");
                 if ok {
                     self.start_kit(n);

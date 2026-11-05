@@ -44,6 +44,8 @@ pub enum EdIntent {
     AddSlice,
     UseAsKit,
     CloseKit,
+    /// Lay the kit out on this many equal slots, or free it.
+    SetGrid(Option<usize>),
 }
 
 /// What the header needs to know about the two editor slots.
@@ -51,6 +53,7 @@ pub struct Slots {
     pub showing_kit: bool,
     pub kit_name: Option<String>,
     pub kit_dirty: bool,
+    pub kit_grid: Option<usize>,
     /// File in the sample slot, shown or not.
     pub sample_name: Option<String>,
 }

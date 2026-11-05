@@ -71,6 +71,9 @@ pub struct AppState {
     /// The slice kit's editor slot, same as `session`.
     #[serde(default)]
     pub kit_session: Option<crate::editor::Session>,
+    /// Grid slots last picked for a new kit (`None` = free).
+    #[serde(default)]
+    pub kit_grid: Option<usize>,
 }
 
 fn default_focus() -> Role {

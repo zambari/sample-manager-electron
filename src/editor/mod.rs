@@ -14,7 +14,10 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 mod clip;
+mod grid;
 mod history;
+
+pub use grid::GRID_SIZES;
 mod selection;
 
 use history::History;
@@ -252,6 +255,10 @@ pub struct Editor {
     /// Kit slice starts, in whole-file frames, sorted, strictly inside the
     /// file (0 and the end are implied).
     markers: Vec<usize>,
+    /// Kit laid out on this many equal slots (see [`grid`]), or free.
+    pub grid: Option<usize>,
+    /// Something the app should show in the status bar.
+    pub notice: Option<String>,
     memos: HashMap<PathBuf, Memo>,
     stats_key: Option<(usize, usize, u32, usize, Option<Fold>)>,
     /// Content revision: bumped by every cut / paste. Unique per edit so undo
@@ -293,6 +300,8 @@ impl Editor {
             play_when_loaded: false,
             is_kit: false,
             markers: Vec::new(),
+            grid: None,
+            notice: None,
             memos: HashMap::new(),
             stats_key: None,
             rev: 0,
@@ -481,6 +490,7 @@ impl Editor {
         self.loaded_rev = self.rev;
         self.clean_rev = self.rev;
         self.history = History { committed: Some(self.state()), ..History::default() };
+        self.grid = self.infer_grid();
     }
 
     // ---- crop -------------------------------------------------------------

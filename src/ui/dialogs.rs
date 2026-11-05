@@ -338,17 +338,27 @@ pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str
 /// Name a new slice kit, saved as `<name>.wav` in `dir`. A name that's
 /// already a file there adds to that file instead. `Some(true)` = go,
 /// `Some(false)` = cancelled, `None` = still open.
-pub fn name_kit(ctx: &Context, name: &mut String, dir: &std::path::Path) -> Option<bool> {
+pub fn name_kit(ctx: &Context, name: &mut String, dir: &std::path::Path, grid: &mut Option<usize>) -> Option<bool> {
     let mut answer = None;
     Modal::new(Id::unique("name_kit_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
         ui.heading("New slice kit");
         ui.add_space(6.0);
         ui.label(format!(
-            "Each K adds the selection to the end of the kit. It goes in {}. \
+            "Each K adds the selection to the kit. It goes in {}. \
              Use the name of a file already there to add to that one.",
             dir.display()
         ));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Layout:");
+            ui.selectable_value(grid, None, "Free").on_hover_text("Slices end to end, markers wherever they fall");
+            for n in crate::editor::GRID_SIZES {
+                ui.selectable_value(grid, Some(n), format!("{n} slots")).on_hover_text(format!(
+                    "{n} equal slots (Digitakt 1 style): each slice starts a slot, padded with silence to the longest"
+                ));
+            }
+        });
         ui.add_space(8.0);
         let id = Id::unique("name_kit_field");
         let resp = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(f32::INFINITY));

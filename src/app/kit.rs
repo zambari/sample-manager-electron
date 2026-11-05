@@ -12,6 +12,8 @@ pub(super) struct KitNaming {
     pub bits: Option<u32>,
     pub name: String,
     pub dir: PathBuf,
+    /// Equal slots to lay the kit out on, or free.
+    pub grid: Option<usize>,
 }
 
 impl App {
@@ -78,9 +80,16 @@ impl App {
         }
         if self.other.current.is_some() {
             let secs = clip.frames() as f64 / clip.rate.max(1) as f64;
-            self.other.append(&clip);
+            if let Err(e) = self.other.append(&clip) {
+                self.status = e;
+                return;
+            }
+            let where_ = match self.other.grid {
+                Some(n) => format!("slot {}/{n} of", self.other.sel.0 / self.other.frames().div_ceil(n).max(1) + 1),
+                None => "the end of".to_owned(),
+            };
             self.status = format!(
-                "Added {secs:.3}s to {} ({:.2}s) — B shows the kit, ⌘S there saves it",
+                "Added {secs:.3}s to {where_} {} ({:.2}s) — B shows the kit, ⌘S there saves it",
                 self.kit_name().unwrap_or_default(),
                 self.other.sample().map_or(0.0, |s| s.seconds(s.frames())),
             );
@@ -90,7 +99,7 @@ impl App {
         let src = self.editor.path().map(Path::to_path_buf).unwrap_or_default();
         let folder = src.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let name = folder.map_or_else(|| "slice kit".to_owned(), |f| format!("{f} kit"));
-        self.kit_naming = Some(KitNaming { clip, bits, name, dir: self.kit_dir(&src) });
+        self.kit_naming = Some(KitNaming { clip, bits, name, dir: self.kit_dir(&src), grid: self.kit_grid });
     }
 
     /// New kits go in the active destination tab when it's a local folder,
@@ -114,15 +123,17 @@ impl App {
         }
         let path = n.dir.join(format!("{name}.wav"));
         let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        self.kit_grid = n.grid;
         self.kit_mut().close();
         if path.is_file() {
-            self.kit_pending = Some(n.clip);
+            self.kit_pending = Some((n.clip, n.grid));
             self.kit_mut().request(&path);
-            self.status = format!("{file} already exists — adding the slice to its end…");
+            self.status = format!("{file} already exists — adding the slice to it…");
         } else {
             self.kit_pending = None;
-            self.kit_mut().start_new(path, &n.clip, n.bits);
-            self.status = format!("Started {file} (not saved yet) — K adds more, B shows it, ⌘S there saves it");
+            self.kit_mut().start_new(path, &n.clip, n.bits, n.grid);
+            let grid = n.grid.map_or(String::new(), |g| format!(" on a {g}-slot grid"));
+            self.status = format!("Started {file}{grid} (not saved yet) — K adds more, B shows it, ⌘S there saves it");
         }
     }
 
@@ -147,6 +158,26 @@ impl App {
         self.status = format!("{name} is the slice kit — K adds the selection of whatever sample you're on");
     }
 
+    /// Lay the kit out on `n` equal slots, or free it.
+    pub(super) fn set_kit_grid(&mut self, n: Option<usize>) {
+        if self.kit().grid == n {
+            return;
+        }
+        if self.showing_kit && self.engine.is_playing() {
+            self.engine.stop();
+        }
+        match self.kit_mut().set_grid(n) {
+            Ok(()) => {
+                self.kit_grid = n;
+                self.status = match n {
+                    Some(n) => format!("Kit laid out on {n} equal slots, padded to the longest slice — K fills the next free slot"),
+                    None => "Grid off — K adds slices to the end of the kit again (the audio stays as it is)".to_owned(),
+                };
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
     pub(super) fn close_kit(&mut self) {
         if self.kit().is_dirty() {
             self.status = "The kit has unsaved slices — save it (⌘S) first".to_owned();
@@ -165,5 +196,10 @@ impl App {
         std::mem::swap(&mut self.editor, &mut self.other);
         self.absorb_editor(!self.showing_kit);
         std::mem::swap(&mut self.editor, &mut self.other);
+        for ed in [&mut self.editor, &mut self.other] {
+            if let Some(n) = ed.notice.take() {
+                self.status = n;
+            }
+        }
     }
 }

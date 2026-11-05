@@ -102,6 +102,7 @@ impl Editor {
         self.gain_db = st.gain_db;
         self.markers = st.markers;
         self.stats_key = None;
+        self.grid = self.infer_grid();
     }
 
     /// Record an undo step if anything changed since the last one. Call once

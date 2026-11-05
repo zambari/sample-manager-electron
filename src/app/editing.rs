@@ -373,10 +373,17 @@ impl App {
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
-                    if let (true, Some(c)) = (is_kit, self.kit_pending.take()) {
-                        self.editor.append(&c);
+                    if let (true, Some((c, grid))) = (is_kit, self.kit_pending.take()) {
                         let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
-                        self.status = format!("Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it");
+                        // A grid was asked for and the file isn't on it yet.
+                        let regrid = match grid {
+                            Some(_) if self.editor.grid != grid => self.editor.set_grid(grid),
+                            _ => Ok(()),
+                        };
+                        self.status = match regrid.and_then(|()| self.editor.append(&c)) {
+                            Ok(()) => format!("Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it"),
+                            Err(e) => format!("{name}: {e}"),
+                        };
                     }
                     if std::mem::take(&mut self.editor.play_when_loaded) {
                         self.start_play();
@@ -447,6 +454,7 @@ impl App {
             showing_kit: self.showing_kit,
             kit_name: self.kit_name(),
             kit_dirty: self.kit().is_dirty(),
+            kit_grid: self.kit().grid,
             sample_name: self.browser().path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
         };
         let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export, &slots);
@@ -464,6 +472,7 @@ impl App {
                 EdIntent::AddSlice => self.add_slice(),
                 EdIntent::UseAsKit => self.use_as_kit(),
                 EdIntent::CloseKit => self.close_kit(),
+                EdIntent::SetGrid(n) => self.set_kit_grid(n),
             }
         }
     }

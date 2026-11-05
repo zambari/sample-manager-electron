@@ -38,6 +38,7 @@ impl Editor {
         }
         let (a, b) = self.sel;
         self.splice(a, b, &[]);
+        self.settle_grid();
         true
     }
 
@@ -58,9 +59,12 @@ impl Editor {
     }
 
     /// Add `clip` after the end of the whole file (uncropping first), then
-    /// show all of it.
-    pub fn append(&mut self, clip: &AudioClip) {
-        let Some(full) = &self.full else { return };
+    /// show all of it. A grid kit puts it in its next free slot instead.
+    pub fn append(&mut self, clip: &AudioClip) -> Result<(), String> {
+        if let Some(n) = self.grid {
+            return self.append_on_grid(clip, n);
+        }
+        let Some(full) = &self.full else { return Err("No kit loaded".to_owned()) };
         let (rate, nch) = (full.sample.rate, full.sample.channels.len());
         self.uncrop();
         let ins = clip.adapt(rate, nch);
@@ -71,16 +75,24 @@ impl Editor {
             self.add_marker(end);
         }
         self.view.fit_pending = true;
+        Ok(())
     }
 
-    /// Start a file that isn't on disk yet: `clip` at `path`, unsaved.
-    pub fn start_new(&mut self, path: PathBuf, clip: &AudioClip, bits: Option<u32>) {
+    /// Start a file that isn't on disk yet: `clip` at `path`, unsaved,
+    /// laid out on `grid` slots if given.
+    pub fn start_new(&mut self, path: PathBuf, clip: &AudioClip, bits: Option<u32>, grid: Option<usize>) {
         self.generation += 1; // drop any load still on its way
         self.loading = None;
         self.play_when_loaded = false;
         self.memos.remove(&path);
         let sample = Sample { path, rate: clip.rate, channels: clip.channels.clone(), bits, format: "WAV".into(), file_len: 0 };
         self.install(Loaded::new(sample), Vec::new());
+        if grid.is_some() && self.set_grid(grid).is_ok() {
+            self.sel = (0, self.markers.first().copied().unwrap_or(self.frames()));
+            self.playhead = 0;
+            // The layout is where the kit starts, not an undo step.
+            self.history = History { committed: Some(self.state()), ..History::default() };
+        }
         self.clean_rev = 0; // nothing written yet
     }
 
@@ -118,6 +130,7 @@ impl Editor {
             self.add_marker(fa);
             self.add_marker(fa + n);
         }
+        self.settle_grid();
         true
     }
 
@@ -133,6 +146,7 @@ impl Editor {
         let zeros = vec![vec![0.0f32; n]; s.channels.len()];
         let p = self.playhead.min(self.frames());
         self.splice(p, p, &zeros);
+        self.settle_grid();
         true
     }
 
