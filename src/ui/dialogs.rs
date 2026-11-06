@@ -301,7 +301,7 @@ pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str
         });
         ui.add_space(6.0);
         ui.label(
-            RichText::new("Saving writes what you hear: the trimmed region, with gain. Files that aren't WAV are saved as a WAV beside the original.")
+            RichText::new("Saving writes what you hear, with gain (you'll be asked whether to trim to the selection). Files that aren't WAV are saved as a WAV beside the original.")
                 .weak(),
         );
         ui.add_space(10.0);
@@ -335,6 +335,109 @@ pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str
     choice
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum SaveScope {
+    Cancel,
+    Trim,
+    Whole,
+}
+
+/// Saving over the open file while in / out (or a crop) leave part of it
+/// out: write just the selection, or the whole file with the gain?
+/// `sel` and `whole` are lengths in seconds.
+pub fn save_scope(ctx: &Context, name: &str, sel: f64, whole: f64) -> Option<SaveScope> {
+    let mut choice = None;
+    Modal::new(Id::unique("save_scope_modal")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading(format!("Save \"{name}\""));
+        ui.add_space(6.0);
+        ui.label(format!(
+            "The selection ({sel:.3}s) is only part of the file ({whole:.3}s). Write just the selection, or the whole file?"
+        ));
+        ui.add_space(6.0);
+        ui.label(RichText::new("Either way gain is applied and the original file is overwritten.").weak());
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                choice = Some(SaveScope::Cancel);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Save whole file").on_hover_text("W — ignore in / out, keep all of it").clicked() {
+                    choice = Some(SaveScope::Whole);
+                }
+                if ui.button("Trim to selection").on_hover_text("↩ / T — keep only the in / out region").clicked() {
+                    choice = Some(SaveScope::Trim);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            choice = Some(SaveScope::Cancel);
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) || i.consume_key(egui::Modifiers::NONE, egui::Key::T) {
+            choice = Some(SaveScope::Trim);
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::W) {
+            choice = Some(SaveScope::Whole);
+        }
+    });
+    choice
+}
+
+/// Export ("save as") found a file of that name in `dir`: pick another.
+/// `name` has no extension. `Some(true)` = go, `Some(false)` = cancelled,
+/// `None` = still open.
+pub fn name_export(ctx: &Context, name: &mut String, dir: &std::path::Path, taken: &str) -> Option<bool> {
+    let mut answer = None;
+    let clean = name.trim();
+    let valid = !clean.is_empty() && !clean.contains('/');
+    let exists = valid && dir.join(format!("{clean}.wav")).exists();
+    Modal::new(Id::unique("name_export_modal")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Export as");
+        ui.add_space(6.0);
+        ui.label(format!("\"{taken}\" is already in {}. Save the export under a new name:", dir.display()));
+        ui.add_space(8.0);
+        let id = Id::unique("name_export_field");
+        let resp = ui
+            .horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(ui.available_width() - 40.0));
+                ui.label(".wav");
+                r
+            })
+            .inner;
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+            answer = Some(true);
+        }
+        if exists {
+            ui.add_space(4.0);
+            ui.label(RichText::new("That file exists too — exporting will overwrite it.").color(ui.visuals().warn_fg_color));
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if exists { "Overwrite" } else { "Export" };
+                if ui.add_enabled(valid, egui::Button::new(label)).on_hover_text("↩").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(false);
+        } else if answer == Some(true) {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        }
+    });
+    answer
+}
+
 /// Name a new slice kit, saved as `<name>.wav` in `dir`. A name that's
 /// already a file there adds to that file instead. `Some(true)` = go,
 /// `Some(false)` = cancelled, `None` = still open.
@@ -353,6 +456,8 @@ pub fn name_kit(ctx: &Context, name: &mut String, dir: &std::path::Path, grid: &
         ui.horizontal(|ui| {
             ui.label("Layout:");
             ui.selectable_value(grid, None, "Free").on_hover_text("Slices end to end, markers wherever they fall");
+            ui.selectable_value(grid, Some(crate::editor::AUTO_GRID), "Auto")
+                .on_hover_text("Equal slots: 4, growing to 8 then 16 as you add slices");
             for n in crate::editor::GRID_SIZES {
                 ui.selectable_value(grid, Some(n), format!("{n} slots")).on_hover_text(format!(
                     "{n} equal slots (Digitakt 1 style): each slice starts a slot, padded with silence to the longest"

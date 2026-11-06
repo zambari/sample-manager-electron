@@ -103,6 +103,7 @@ impl Editor {
         self.markers = st.markers;
         self.stats_key = None;
         self.grid = self.infer_grid();
+        self.auto_grid &= self.grid.is_some();
     }
 
     /// Record an undo step if anything changed since the last one. Call once

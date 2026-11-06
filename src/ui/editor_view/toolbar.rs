@@ -40,7 +40,7 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
         ui.spacing_mut().item_spacing.x = 4.0;
         let sample = s.sample_name.as_deref().unwrap_or("—");
         if ui
-            .selectable_label(!s.showing_kit, format!("Sample: {}", crate::app::short_name(sample, 28)))
+            .selectable_label(!s.showing_kit, crate::app::short_name(sample, 28))
             .on_hover_text("B — the sample you're browsing. Moving the file cursor always loads here.")
             .clicked()
         {
@@ -53,14 +53,14 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             grid_picker(ui, s.kit_grid, out);
             if !s.showing_kit
                 && ui
-                    .add_enabled(ed.current.is_some(), egui::Button::new("→").small())
+                    .add_enabled(ed.current.is_some(), egui::Button::new(RichText::new("→").size(20.0).strong()).min_size(egui::vec2(36.0, 0.0)))
                     .on_hover_text(format!("K — add the selection (as you hear it) to the end of {k}"))
                     .clicked()
             {
                 out.push(EdIntent::AddSlice);
             }
             if ui
-                .add_enabled(!s.kit_dirty, egui::Button::new("✕").small())
+                .add_enabled(!s.kit_dirty, egui::Button::new("×").small())
                 .on_hover_text(if s.kit_dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close the kit (the file stays)" })
                 .clicked()
             {
@@ -70,7 +70,7 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
         if !s.showing_kit && ed.current.is_some() {
             ui.separator();
             if ui
-                .small_button("Use as kit")
+                .small_button("Start kit")
                 .on_hover_text("Make this file the slice kit, to add slices to its end")
                 .clicked()
             {
@@ -108,12 +108,17 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
             buf = None;
         }
     } else {
-        let mut label = format!("Kit: {}", crate::app::short_name(k, 28));
+        let count = match s.kit_fill {
+            (n, Some(g)) => format!("[{n}/{g}]"),
+            (n, None) => format!("[{n}]"),
+        };
+        let mut label = format!("{count} {}", crate::app::short_name(k, 28));
         if s.kit_dirty {
             label.push_str(" ●");
         }
         let resp = ui.selectable_label(s.showing_kit, label).on_hover_text(
-            "B — the slice kit. K adds the sample's selection to its end. ⌘S here saves the whole kit.\n\
+            "B — the slice kit. [n] = slices so far; [n/8] = slots used of the grid's 8.\n\
+             K adds the sample's selection to its end. ⌘S here saves the whole kit.\n\
              Click again (or double-click) to rename it — a saved kit's file is renamed too.",
         );
         if resp.double_clicked() || (resp.clicked() && s.showing_kit) {
@@ -165,17 +170,22 @@ fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
         }
     })
     .response
-    .on_hover_text("Open kits — pick the one K adds to. Right-click a file → Use as kit to open another.");
+    .on_hover_text("Open kits — pick the one K adds to. Right-click a file → Start kit to open another.");
 }
 
 /// Free / 4 / 8 / 16 switch for the kit's layout.
 fn grid_picker(ui: &mut Ui, cur: Option<usize>, out: &mut Vec<EdIntent>) {
-    let label = |g: Option<usize>| g.map_or("Free".to_owned(), |n| format!("{n} slots"));
+    use crate::editor::AUTO_GRID;
+    let label = |g: Option<usize>| match g {
+        None => "Free".to_owned(),
+        Some(AUTO_GRID) => "Auto".to_owned(),
+        Some(n) => format!("{n} slots"),
+    };
     egui::ComboBox::from_id_salt("kit_grid")
         .selected_text(label(cur))
         .width(70.0)
         .show_ui(ui, |ui| {
-            for g in std::iter::once(None).chain(crate::editor::GRID_SIZES.map(Some)) {
+            for g in [None, Some(AUTO_GRID)].into_iter().chain(crate::editor::GRID_SIZES.map(Some)) {
                 if ui.selectable_label(cur == g, label(g)).clicked() && cur != g {
                     out.push(EdIntent::SetGrid(g));
                 }
@@ -185,7 +195,8 @@ fn grid_picker(ui: &mut Ui, cur: Option<usize>, out: &mut Vec<EdIntent>) {
         .on_hover_text(
             "Free: slices go end to end, wherever they fall.\n\
              N slots: the kit is split into N equal parts (what Digitakt 1 can slice), each slice at the start of \
-             its slot, padded with silence to the longest one. K fills the next free slot; cuts and pastes snap back onto the grid.",
+             its slot, padded with silence to the longest one. K fills the next free slot; cuts and pastes snap back onto the grid.\n\
+             Auto: 4 slots, growing to 8 then 16 as you add slices, and shrinking back when you cut them.",
         );
 }
 
@@ -321,13 +332,6 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
             {
                 ed.insert_silence(0.1);
             }
-            if ui
-                .add_enabled(ed.is_dirty() && !ed.exporting, egui::Button::new("Save"))
-                .on_hover_text("⌘S — write what you hear back over the original file")
-                .clicked()
-            {
-                out.push(EdIntent::SaveInPlace);
-            }
             ui.separator();
             if ui
                 .button("✂ Crop")
@@ -419,6 +423,19 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
                 .clicked()
             {
                 out.push(EdIntent::Export);
+            }
+            // Save over the open file, no overwrite question. A kit that
+            // lives in the destination already gets that from the button above.
+            if !save_kit {
+                let tip = if showing_kit {
+                    "⌘S — write the whole kit back over its file"
+                } else {
+                    "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file"
+                };
+                let can = !ed.exporting && if showing_kit { ed.is_dirty() } else { ed.can_save() };
+                if ui.add_enabled(can, egui::Button::new("Save in place")).on_hover_text(tip).clicked() {
+                    out.push(EdIntent::SaveInPlace);
+                }
             }
             if !showing_kit
                 && ui

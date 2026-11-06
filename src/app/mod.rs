@@ -22,7 +22,7 @@ use crate::sizes::SizeCache;
 use crate::audio::stats::Fold;
 use crate::state;
 use crate::tab::DirTab;
-use crate::ui::dialogs::{self, Decision, LeaveChoice};
+use crate::ui::dialogs::{self, Decision, LeaveChoice, SaveScope};
 use crate::ui::theme;
 use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
 use std::path::{Path, PathBuf};
@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 mod actions;
 mod bars;
 mod editing;
+use editing::ExportNaming;
 mod kit;
 mod nav;
 mod os_dnd;
@@ -50,8 +51,6 @@ enum PlanKind {
     /// A commit: ops whose source is in `fold` are mono-folded exports, the
     /// rest are plain copies.
     Commit { fold: std::collections::HashSet<PathBuf>, dest_dir: PathBuf },
-    /// The editor's single-file export (one op).
-    Export { mono: Option<Fold> },
     /// Anything touching the device. Op destinations are only used to ask
     /// about conflicts; the device worker settles the final names.
     Device { dir: device::Dir, mono: Option<Fold> },
@@ -216,6 +215,10 @@ pub struct App {
     leave_pending: Option<Leave>,
     /// Chose to save first: carry on with this once the export lands.
     leave_after_save: Option<Leave>,
+    /// Save in place is waiting on "trim to selection or whole file?".
+    save_scope_pending: bool,
+    /// Export hit an existing file: waiting on a new name.
+    export_naming: Option<ExportNaming>,
     /// The user okayed closing the window with edits unsaved (or saved them).
     allow_close: bool,
     /// Close once the running job (an upload of the saved edit) finishes.
@@ -328,6 +331,8 @@ impl App {
             device_load: None,
             leave_pending: None,
             leave_after_save: None,
+            save_scope_pending: false,
+            export_naming: None,
             allow_close: false,
             close_when_idle: false,
             jobs,
@@ -629,9 +634,38 @@ impl eframe::App for App {
             }
         }
 
+        if let Some(n) = &mut self.export_naming {
+            if let Some(ok) = dialogs::name_export(ui.ctx(), &mut n.name, &n.dir, &n.taken) {
+                let n = self.export_naming.take().expect("checked above");
+                if ok {
+                    let dst = n.dir.join(format!("{}.wav", n.name.trim()));
+                    self.start_export(dst, n.mono);
+                } else {
+                    self.status = "Export cancelled".to_owned();
+                }
+            }
+        }
+
+        if self.save_scope_pending {
+            let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+            let secs = |n: usize| self.editor.sample().map_or(0.0, |s| s.seconds(n));
+            let sel = secs(self.editor.sel.1 - self.editor.sel.0);
+            let whole = self.editor.file_seconds();
+            if let Some(c) = dialogs::save_scope(ui.ctx(), &name, sel, whole) {
+                self.save_scope_pending = false;
+                match c {
+                    SaveScope::Cancel => self.status = "Not saved".to_owned(),
+                    SaveScope::Trim => self.save_in_place_as(false),
+                    SaveScope::Whole => self.save_in_place_as(true),
+                }
+            }
+        }
+
         // A save chosen in that dialog that never got going (its conflict or
         // mono question was cancelled, or everything was skipped): drop it.
         if self.leave_after_save.is_some()
+            && !self.save_scope_pending
+            && self.export_naming.is_none()
             && !self.editor.exporting
             && self.pending.is_none()
             && self.staged_upload.is_none()

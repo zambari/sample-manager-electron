@@ -568,7 +568,7 @@ fn row(
             && local
             && !entry.is_dir
             && crate::fs_model::is_audio_path(&entry.path)
-            && ui.button("Use as kit").on_hover_text("Open as a slice kit — K then adds selections to it").clicked()
+            && ui.button("Start kit").on_hover_text("Open as a slice kit — K then adds selections to it").clicked()
         {
             intents.push(Intent::UseAsKit(entry.path.clone()));
             ui.close();

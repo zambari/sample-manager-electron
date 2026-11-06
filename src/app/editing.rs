@@ -152,21 +152,57 @@ impl App {
             let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
             return self.offer(plan, PlanKind::DeviceExport { mono });
         }
-        let dst = crate::audio::export::target_for(&src, &dest);
-        let op = ops::Op {
-            conflict: dst.exists(),
-            approx_bytes: 0,
-            src,
-            dst,
-            is_dir: false,
-        };
-        let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
-        self.offer(plan, PlanKind::Export { mono });
+        let mut dst = crate::audio::export::target_for(&src, &dest);
+        // A grid kit exported somewhere new gets its slot count in the name.
+        if let (true, Some(n)) = (self.editor.is_kit, self.editor.grid) {
+            if dst != src {
+                dst = with_slot_count(&dst, n);
+            }
+        }
+        // Export is "save as": a name that's taken asks for another one
+        // instead of offering to overwrite.
+        if dst.exists() {
+            let free = crate::fs_model::unique_sibling(&dst);
+            let stem = |p: &Path| p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            self.export_naming = Some(ExportNaming {
+                dir: dest,
+                name: stem(&free),
+                taken: dst.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                mono,
+            });
+            return;
+        }
+        self.start_export(dst, mono);
+    }
+
+    /// Render the editor to exactly `dst`, overwriting it.
+    pub(super) fn start_export(&mut self, dst: PathBuf, mono: Option<Fold>) {
+        if self.editor.exporting {
+            return;
+        }
+        if let Some(p) = self.editor.path().map(Path::to_path_buf) {
+            self.mark_committed([p]);
+        }
+        self.status = format!("Exporting{} to {}…", mono.map_or(String::new(), |f| format!(" (mono {})", f.short())), dst.display());
+        self.editor.export(dst, mono);
     }
 
     /// Write what you hear back over the open file (as `<stem>.wav` beside
     /// it when it isn't a WAV). Folded to mono only if you're listening so.
+    /// When in / out leave part of the file out, ask whether to trim first.
     pub(super) fn save_in_place(&mut self) {
+        if self.editor.current.is_none() || self.editor.exporting {
+            return;
+        }
+        if self.editor.is_trimmed() {
+            self.save_scope_pending = true;
+        } else {
+            self.save_in_place_as(false);
+        }
+    }
+
+    /// `whole`: write the whole file (with gain), ignoring in / out and crop.
+    pub(super) fn save_in_place_as(&mut self, whole: bool) {
         let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
         if self.editor.exporting {
             return;
@@ -176,7 +212,7 @@ impl App {
         let target = crate::audio::export::target_for(&src, dir);
         self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
         let mono = self.editor.fold();
-        self.editor.export(target, mono);
+        self.editor.export_with(target, mono, whole);
     }
 
     /// Do what the unsaved-edits question interrupted.
@@ -378,7 +414,7 @@ impl App {
                         let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
                         // A grid was asked for and the file isn't on it yet.
                         let regrid = match grid {
-                            Some(_) if self.editor.grid != grid => self.editor.set_grid(grid),
+                            Some(_) if self.editor.grid_mode() != grid => self.editor.set_grid(grid),
                             _ => Ok(()),
                         };
                         self.status = match regrid.and_then(|()| self.editor.append(&c)) {
@@ -415,7 +451,7 @@ impl App {
                         if self.voice_path.as_deref() == Some(p.as_path()) {
                             self.engine.stop();
                         }
-                        self.editor.reload();
+                        self.editor.reload_saved();
                     }
                     if let Some(dir) = p.parent() {
                         self.sizes.invalidate_subtree(dir);
@@ -455,7 +491,8 @@ impl App {
             showing_kit: self.showing_kit,
             kit_name: self.kit_name(),
             kit_dirty: self.kit().is_dirty(),
-            kit_grid: self.kit().grid,
+            kit_grid: self.kit().grid_mode(),
+            kit_fill: (self.kit().kit_fill(), self.kit().grid),
             kits: self.kit_list(),
             kit_saves_here: self.kit_saves_here(),
             sample_name: self.browser().path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
@@ -486,4 +523,24 @@ impl App {
             }
         }
     }
+}
+
+/// Export found its file name taken and is waiting on a new one.
+pub(super) struct ExportNaming {
+    pub dir: PathBuf,
+    /// Without the extension.
+    pub name: String,
+    /// The name that was taken, for the message.
+    pub taken: String,
+    pub mono: Option<Fold>,
+}
+
+/// `[n] name.wav`, replacing a slot count already at the start of the name.
+fn with_slot_count(path: &Path, n: usize) -> PathBuf {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = match stem.trim_start().strip_prefix('[').and_then(|s| s.split_once(']')) {
+        Some((digits, rest)) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => rest.trim_start(),
+        _ => stem.trim_start(),
+    };
+    path.with_file_name(format!("[{n}] {base}.wav"))
 }

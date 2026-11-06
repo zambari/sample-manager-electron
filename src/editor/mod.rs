@@ -17,7 +17,7 @@ mod clip;
 mod grid;
 mod history;
 
-pub use grid::GRID_SIZES;
+pub use grid::{AUTO_GRID, GRID_SIZES};
 mod selection;
 
 use history::History;
@@ -100,6 +100,9 @@ impl Default for Prefs {
 pub struct Session {
     pub path: PathBuf,
     pub memo: Memo,
+    /// The kit was on an auto grid.
+    #[serde(default)]
+    pub auto_grid: bool,
 }
 
 #[derive(Clone)]
@@ -257,9 +260,16 @@ pub struct Editor {
     markers: Vec<usize>,
     /// Kit laid out on this many equal slots (see [`grid`]), or free.
     pub grid: Option<usize>,
+    /// Auto grid: `grid` grows 4 → 8 → 16 as slices are added and shrinks
+    /// back when they're cut.
+    pub auto_grid: bool,
+    /// Turn `auto_grid` back on when this file (from a saved session) loads.
+    auto_on_load: Option<PathBuf>,
     /// Something the app should show in the status bar.
     pub notice: Option<String>,
     memos: HashMap<PathBuf, Memo>,
+    /// The next load replaces a file just saved over: drop its memo.
+    forget_on_load: bool,
     stats_key: Option<(usize, usize, u32, usize, Option<Fold>)>,
     /// Content revision: bumped by every cut / paste. Unique per edit so undo
     /// and redo land back on a matching number.
@@ -301,8 +311,11 @@ impl Editor {
             is_kit: false,
             markers: Vec::new(),
             grid: None,
+            auto_grid: false,
+            auto_on_load: None,
             notice: None,
             memos: HashMap::new(),
+            forget_on_load: false,
             stats_key: None,
             rev: 0,
             next_rev: 0,
@@ -464,7 +477,7 @@ impl Editor {
     /// audio was cut or pasted into, forget them instead.
     fn remember(&mut self) {
         let Some(path) = self.path().map(Path::to_path_buf) else { return };
-        if self.rev != self.loaded_rev {
+        if self.rev != self.loaded_rev || std::mem::take(&mut self.forget_on_load) {
             self.memos.remove(&path);
             return;
         }
@@ -475,12 +488,13 @@ impl Editor {
     /// The loaded file and its edits, for saving.
     pub fn session(&self) -> Option<Session> {
         let memo = if self.rev == self.loaded_rev { self.memo() } else { Memo::FRESH };
-        Some(Session { path: self.path()?.to_path_buf(), memo })
+        Some(Session { path: self.path()?.to_path_buf(), memo, auto_grid: self.auto_grid })
     }
 
     /// Reload a saved session: the edits are re-applied once the file decodes.
     pub fn restore_session(&mut self, s: &Session) {
         self.memos.insert(s.path.clone(), s.memo);
+        self.auto_on_load = s.auto_grid.then(|| s.path.clone());
         self.request(&s.path);
     }
 
@@ -517,6 +531,9 @@ impl Editor {
         self.clean_rev = self.rev;
         self.history = History { committed: Some(self.state()), ..History::default() };
         self.grid = self.infer_grid();
+        let want = self.auto_on_load.take();
+        let restore_auto = want.is_some() && want.as_deref() == self.path();
+        self.auto_grid = restore_auto && self.grid.is_some();
     }
 
     // ---- crop -------------------------------------------------------------
@@ -632,6 +649,28 @@ impl Editor {
         self.clean_rev = self.rev;
     }
 
+    /// Length of the whole file (ignoring any crop), in seconds.
+    pub fn file_seconds(&self) -> f64 {
+        self.full.as_ref().map_or(0.0, |l| l.sample.seconds(l.sample.frames()))
+    }
+
+    /// In / out or a crop leave part of the file out of what you hear.
+    pub fn is_trimmed(&self) -> bool {
+        !self.is_kit && self.current.is_some() && (self.crop.is_some() || self.sel != (0, self.frames()))
+    }
+
+    /// Anything a save in place would change: cut / paste, gain or a trim.
+    pub fn can_save(&self) -> bool {
+        self.is_dirty() || (!self.is_kit && self.current.is_some() && self.is_edited())
+    }
+
+    /// Re-read the open file after a save replaced it. Its old in / out, gain
+    /// and crop are baked in now, so start fresh instead of re-applying them.
+    pub fn reload_saved(&mut self) {
+        self.forget_on_load = true;
+        self.reload();
+    }
+
     /// Audio was cut or pasted into and that hasn't been written anywhere yet.
     pub fn is_dirty(&self) -> bool {
         self.current.is_some() && self.rev != self.clean_rev
@@ -651,7 +690,13 @@ impl Editor {
     /// A kit ignores in / out and the crop: the whole file goes out, with its
     /// slice markers as cue points.
     pub fn export(&mut self, target: PathBuf, mono: Option<Fold>) {
-        let kit = self.is_kit;
+        self.export_with(target, mono, false);
+    }
+
+    /// Like [`Editor::export`]; `whole` writes the whole file (with gain),
+    /// ignoring in / out and the crop.
+    pub fn export_with(&mut self, target: PathBuf, mono: Option<Fold>, whole: bool) {
+        let kit = self.is_kit || whole;
         let shown = if kit { self.full.as_ref().map(|l| &l.sample) } else { self.sample() };
         let Some(sample) = shown.cloned() else { return };
         if self.exporting {
@@ -663,7 +708,7 @@ impl Editor {
         } else {
             Render { start: self.sel.0, end: self.sel.1, gain: self.gain(), mono }
         };
-        let marks = if kit { self.markers.clone() } else { Vec::new() };
+        let marks = if self.is_kit { self.markers.clone() } else { Vec::new() };
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let rev = self.rev;

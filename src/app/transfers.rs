@@ -418,15 +418,6 @@ impl App {
         }
         match what {
             PlanKind::Transfer | PlanKind::Device { .. } | PlanKind::DeviceExport { .. } => {}
-            PlanKind::Export { mono } => {
-                let op = resolved.remove(0);
-                if let Some(p) = self.editor.path().map(Path::to_path_buf) {
-                    self.mark_committed([p]);
-                }
-                self.status = format!("Exporting{} to {}…", mono.map_or(String::new(), |f| format!(" (mono {})", f.short())), op.dst.display());
-                self.editor.export(op.dst, mono);
-                return;
-            }
             PlanKind::Commit { fold, dest_dir } => {
                 let (folds, copies): (Vec<_>, Vec<_>) = resolved.into_iter().partition(|o| fold.contains(&o.src));
                 resolved = copies;

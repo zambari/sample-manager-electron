@@ -7,6 +7,8 @@
 //! the slice between the markers around it; click near a slice marker parks
 //! the playhead exactly on it), wheel
 //! zooms around the pointer, horizontal scroll / middle-drag / ⌥-drag pans.
+//! Clicks and drags within a few pixels of a slice marker or a file end land
+//! exactly on it; a click on an in/out line parks the playhead exactly there.
 //! Keys are handled in the app (see `App::perform_editor`).
 
 use crate::audio::stats::{self, Fold, Stats};
@@ -67,7 +69,10 @@ pub struct Slots {
     pub showing_kit: bool,
     pub kit_name: Option<String>,
     pub kit_dirty: bool,
+    /// As picked: free, [`crate::editor::AUTO_GRID`] or a slot count.
     pub kit_grid: Option<usize>,
+    /// Slices so far (free) or slots used (grid), and the slot count.
+    pub kit_fill: (usize, Option<usize>),
     /// The kit's file is already in the destination folder: exporting it
     /// would just overwrite it, so the button saves it in place instead.
     pub kit_saves_here: bool,
@@ -83,6 +88,8 @@ const SCOPE_H: f32 = 110.0;
 /// Width of the scope strip's fixed window, in seconds.
 const SCOPE_SECS: f64 = 0.040;
 const GRAB_PX: f32 = 6.0;
+/// Clicks and drags this close to a slice marker or a file end land on it.
+const SNAP_PX: f32 = 8.0;
 const MIN_FPP: f64 = 1.0 / 48.0;
 /// Below this many frames per pixel, draw the waveform as a smooth filled
 /// curve through the samples instead of per-column min/max bars.

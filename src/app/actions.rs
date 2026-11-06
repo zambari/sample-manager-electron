@@ -9,7 +9,7 @@ impl App {
         // An open rename editor or modal owns the keyboard.
         let tab = self.pane(self.focused).active_tab();
         let renaming = tab.renaming.is_some() || tab.multi_rename.is_some();
-        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() || self.kit_naming.is_some() {
+        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() || self.kit_naming.is_some() || self.save_scope_pending || self.export_naming.is_some() {
             return;
         }
         if ui.ctx().text_edit_focused() {

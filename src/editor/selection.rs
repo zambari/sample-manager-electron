@@ -151,7 +151,9 @@ impl Editor {
         let Some(s) = self.sample() else { return frame };
         let n = s.frames();
         let frame = frame.min(n);
-        if !self.prefs.snap_zero || n < 2 {
+        // File ends and slice markers are exact targets: zero-snapping
+        // must not pull them a few frames off.
+        if !self.prefs.snap_zero || n < 2 || frame == 0 || frame == n || self.marks().contains(&frame) {
             return frame;
         }
         let mono = |i: usize| -> f32 { s.channels.iter().map(|c| c[i]).sum() };

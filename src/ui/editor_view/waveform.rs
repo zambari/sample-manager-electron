@@ -60,6 +60,32 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(f, _)| f)
     };
+    // Forgive small misclicks: a point within SNAP_PX of a slice marker or
+    // either end of the file lands exactly on it (nearest wins), so a
+    // selection never loses a few frames at an edge by accident.
+    let snapped = |x: f32| {
+        marks
+            .iter()
+            .copied()
+            .chain([0, frames])
+            .map(|f| (f, (m.x(f as f64) - x).abs()))
+            .filter(|&(_, d)| d <= SNAP_PX)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or_else(|| m.frame(x), |(f, _)| f)
+    };
+    // The in or out point under the pointer (where the cursor shows the
+    // resize icon), nearest wins.
+    let sel = ed.sel;
+    let endpoint_at = |p: Pos2| {
+        let (di, dout) = ((p.x - x_in).abs(), (p.x - x_out).abs());
+        if near(x_in, p) && (!near(x_out, p) || di <= dout) {
+            Some(sel.0)
+        } else if near(x_out, p) {
+            Some(sel.1)
+        } else {
+            None
+        }
+    };
     // Range bar: the ruler strip between the markers drags the whole region.
     let on_bar = |p: Pos2| {
         p.y >= rect.top() && p.y <= rect.top() + RULER_H && p.x > x_in + GRAB_PX && p.x < x_out - GRAB_PX
@@ -92,18 +118,19 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
             } else if on_bar(o) {
                 Drag::Move(ed.sel, m.frame(o.x))
             } else {
-                Drag::Select(m.frame(o.x))
+                Drag::Select(snapped(o.x))
             }
         });
     }
     if resp.dragged() {
         if let (Some(d), Some(p)) = (ed.drag, resp.interact_pointer_pos()) {
-            let f = m.frame(p.x.clamp(rect.left(), rect.right()));
+            let px = p.x.clamp(rect.left(), rect.right());
+            let f = snapped(px);
             match d {
                 Drag::In => ed.set_in(f),
                 Drag::Out => ed.set_out(f),
                 Drag::Select(a) => ed.set_region(a, f),
-                Drag::Move(orig, grab) => ed.move_region(orig, f as i64 - grab as i64),
+                Drag::Move(orig, grab) => ed.move_region(orig, m.frame(px) as i64 - grab as i64),
                 Drag::Pan => ed.view.start -= resp.drag_delta().x as f64 * ed.view.fpp,
                 Drag::Scrub(..) => {}
             }
@@ -125,8 +152,9 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     if resp.clicked() {
         out.push(EdIntent::TookFocus);
         if let Some(p) = resp.interact_pointer_pos() {
-            // Near a kit slice marker: land exactly on it.
-            ed.playhead = mark_at(p).unwrap_or_else(|| m.frame(p.x));
+            // On the in/out point: land exactly on it; else snap to a slice
+            // marker or a file end when close.
+            ed.playhead = endpoint_at(p).unwrap_or_else(|| snapped(p.x));
             if pv.playing {
                 out.push(EdIntent::Seek(ed.playhead));
             }
@@ -136,18 +164,7 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
         // On a marker: park the playhead exactly on it. Elsewhere: select
         // the kit slice there, or everything.
         let p = resp.interact_pointer_pos();
-        let target = p.and_then(|p| {
-            let (di, dout) = ((p.x - x_in).abs(), (p.x - x_out).abs());
-            if let Some(f) = mark_at(p) {
-                Some(f)
-            } else if near(x_in, p) && di <= dout {
-                Some(ed.sel.0)
-            } else if near(x_out, p) {
-                Some(ed.sel.1.saturating_sub(1))
-            } else {
-                None
-            }
-        });
+        let target = p.and_then(|p| endpoint_at(p).or_else(|| mark_at(p)));
         match target {
             Some(f) => {
                 ed.playhead = f;

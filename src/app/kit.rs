@@ -115,7 +115,7 @@ impl App {
         }
         self.kit_pending = None;
         self.swap_with_parked(i);
-        self.kit_grid = self.kit().grid.or(self.kit_grid);
+        self.kit_grid = self.kit().grid_mode().or(self.kit_grid);
         self.status = format!("K now adds to {}", self.kit_name().unwrap_or_default());
     }
 
@@ -281,7 +281,11 @@ impl App {
         } else {
             self.kit_pending = None;
             self.kit_mut().start_new(path, &n.clip, n.bits, n.grid);
-            let grid = n.grid.map_or(String::new(), |g| format!(" on a {g}-slot grid"));
+            let grid = match n.grid {
+                None => String::new(),
+                Some(crate::editor::AUTO_GRID) => " on an auto grid".to_owned(),
+                Some(g) => format!(" on a {g}-slot grid"),
+            };
             self.status = format!("Started {file}{grid} (not saved yet) — K adds more, B shows it, click its tab there to rename, ⌘S saves it");
         }
     }
@@ -330,7 +334,7 @@ impl App {
         }
     }
 
-    /// "Use as kit": open `p` as a kit and make it the one K adds to. The
+    /// "Start kit": open `p` as a kit and make it the one K adds to. The
     /// kit open before stays in the kit list.
     pub(super) fn use_as_kit(&mut self, p: &Path) {
         let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -357,7 +361,7 @@ impl App {
 
     /// Lay the kit out on `n` equal slots, or free it.
     pub(super) fn set_kit_grid(&mut self, n: Option<usize>) {
-        if self.kit().grid == n {
+        if self.kit().grid_mode() == n {
             return;
         }
         if self.showing_kit && self.engine.is_playing() {
@@ -367,6 +371,10 @@ impl App {
             Ok(()) => {
                 self.kit_grid = n;
                 self.status = match n {
+                    Some(crate::editor::AUTO_GRID) => format!(
+                        "Auto grid — kit on {} slots now; grows to 8 and 16 as K adds slices, shrinks when you cut them",
+                        self.kit().grid.unwrap_or(4)
+                    ),
                     Some(n) => format!("Kit laid out on {n} equal slots, padded to the longest slice — K fills the next free slot"),
                     None => "Grid off — empty slots at the end trimmed; K adds slices to the end of the kit again".to_owned(),
                 };
