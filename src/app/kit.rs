@@ -88,16 +88,6 @@ impl App {
         v
     }
 
-    /// The kit is on disk in the active destination folder, so exporting it
-    /// there means saving over it.
-    pub(super) fn kit_saves_here(&self) -> bool {
-        let tab = self.pane(Role::Dest).active_tab();
-        let Some(p) = self.kit().path() else {
-            return false;
-        };
-        !tab.device && p.is_file() && p.parent() == Some(tab.cwd.as_path())
-    }
-
     /// Why the kit can't be swapped out right now, if it can't.
     fn kit_busy(&self) -> Option<&'static str> {
         let k = self.kit();

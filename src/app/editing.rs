@@ -151,10 +151,6 @@ impl App {
         if self.editor.current.is_none() {
             return;
         }
-        if self.showing_kit && self.kit_saves_here() {
-            self.save_in_place();
-            return;
-        }
         let tab = self.pane(Role::Dest).active_tab();
         let (dest, to_dev) = (tab.cwd.clone(), tab.device);
         let mono = self.editor.fold();
@@ -721,7 +717,6 @@ impl App {
             kit_grid: self.kit().grid_mode(),
             kit_fill: (self.kit().kit_fill(), self.kit().grid),
             kits: self.kit_list(),
-            kit_saves_here: self.kit_saves_here(),
             kit_on_disk: self.kit().path().is_some_and(Path::is_file),
             sample_name: self
                 .browser()

@@ -81,9 +81,6 @@ pub struct Slots {
     pub kit_grid: Option<usize>,
     /// Slices so far (free) or slots used (grid), and the slot count.
     pub kit_fill: (usize, Option<usize>),
-    /// The kit's file is already in the destination folder: exporting it
-    /// would just overwrite it, so the button saves it in place instead.
-    pub kit_saves_here: bool,
     /// The kit's file exists (it was exported or opened from disk).
     pub kit_on_disk: bool,
     /// Every open kit, sorted by name.

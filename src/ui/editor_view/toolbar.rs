@@ -334,7 +334,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
                 "Play, loop, follow, snap and auto-load / auto-play",
             ),
             (&mut p.gain, "Gain", "Gain and normalize"),
-            (&mut p.tools, "Tools", "Undo, crop, loop scaling, export"),
+            (&mut p.tools, "Tools", "Undo, cut / paste, crop, loop scaling, mono"),
             (
                 &mut p.nums,
                 "Nums",
@@ -369,6 +369,77 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
     });
 }
 
+/// Save and Export, always shown. Each button means the same thing in every
+/// state: Save writes over the open file, Export writes a new file into the
+/// destination tab.
+fn file_row(ui: &mut Ui, ed: &Editor, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
+    let showing_kit = slots.showing_kit;
+    let has = ed.current.is_some();
+    section_header(ui, "File");
+    ui.horizontal_wrapped(|ui| {
+        let mono = if ed.exports_mono() {
+            match ed.fold() {
+                Some(Fold::Left) => " (mono L)",
+                Some(Fold::Right) => " (mono R)",
+                _ => " (mono)",
+            }
+        } else {
+            ""
+        };
+        // Save: over the open file. A kit only has one once it's been exported.
+        let (can, tip) = if showing_kit {
+            if !slots.kit_on_disk {
+                (false, "Not saved yet — Export kit names it and writes it into the destination. After that, Save writes over that file. (⌘S on an unsaved kit runs Export.)".to_owned())
+            } else {
+                (ed.is_dirty(), "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)".to_owned())
+            }
+        } else {
+            (ed.can_save(), "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file".to_owned())
+        };
+        let label = if ed.exporting { "Saving…".to_owned() } else { format!("💾 Save{mono}") };
+        if ui
+            .add_enabled(has && can && !ed.exporting, egui::Button::new(label))
+            .on_hover_text(&tip)
+            .on_disabled_hover_text(&tip)
+            .clicked()
+        {
+            out.push(EdIntent::SaveInPlace);
+        }
+        // Export: always a new file in the destination ("save as").
+        let (label, tip) = if showing_kit {
+            (
+                format!("Export kit{mono} → Destination"),
+                "↩ — write the whole kit (in / out ignored), with its slice markers, as a new file in the active destination tab. A taken name asks for another one.",
+            )
+        } else {
+            (
+                format!("Export{mono} → Destination"),
+                "↩ — write the trimmed, gained region as a new WAV into the active destination tab",
+            )
+        };
+        if ui
+            .add_enabled(has && can_export && !ed.exporting, egui::Button::new(label))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            out.push(EdIntent::Export);
+        }
+        if let Some(home) = slots.device_home.as_ref().filter(|_| !showing_kit) {
+            let tip = format!(
+                "Upload what you hear as a new file next to {home} on the device, \
+                 with a name you pick. The original stays."
+            );
+            if ui
+                .add_enabled(has && !ed.exporting, egui::Button::new("⬆ To device as…"))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                out.push(EdIntent::SendToDevice);
+            }
+        }
+    });
+}
+
 pub(super) fn toolbar(
     ui: &mut Ui,
     ed: &mut Editor,
@@ -378,7 +449,7 @@ pub(super) fn toolbar(
     out: &mut Vec<EdIntent>,
 ) {
     let showing_kit = slots.showing_kit;
-    let save_kit = showing_kit && slots.kit_saves_here;
+    file_row(ui, ed, can_export, slots, out);
     let playing = pv.playing;
     let has = ed.current.is_some();
     let pn = ed.prefs.panels.clone();
@@ -556,63 +627,6 @@ pub(super) fn toolbar(
             }
             if changed {
                 ed.set_mono(mono);
-            }
-            let label = if ed.exporting {
-                if save_kit { "Saving…" } else { "Exporting…" }
-            } else if save_kit {
-                if ed.exports_mono() { "Save kit (mono)" } else { "Save kit" }
-            } else if showing_kit {
-                if ed.exports_mono() { "Export kit (mono)" } else { "Export kit" }
-            } else if ed.exports_mono() {
-                match ed.fold() {
-                    Some(Fold::Left) => "Export mono (L) → Destination",
-                    Some(Fold::Right) => "Export mono (R) → Destination",
-                    _ => "Export mono → Destination",
-                }
-            } else {
-                "Export → Destination"
-            };
-            let tip = if save_kit {
-                "↩ / ⌘S — write the whole kit back over its file (it's already in the destination folder)"
-            } else if showing_kit {
-                "↩ — write the whole kit (in / out ignored), with its slice markers, into the active destination tab, then name it"
-            } else {
-                "↩ — write the trimmed, gained region as a new WAV into the active destination tab"
-            };
-            if ui
-                .add_enabled(!ed.exporting && if save_kit { ed.is_dirty() } else { can_export }, egui::Button::new(label))
-                .on_hover_text(tip)
-                .clicked()
-            {
-                out.push(EdIntent::Export);
-            }
-            // Save over the open file, no overwrite question. A kit that
-            // lives in the destination already gets that from the button above.
-            if !save_kit {
-                let tip = if showing_kit && !slots.kit_on_disk {
-                    "The kit isn't saved anywhere yet — Export kit writes it to the destination first (⌘S does that too)"
-                } else if showing_kit {
-                    "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)"
-                } else {
-                    "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file"
-                };
-                let can = !ed.exporting && if showing_kit { slots.kit_on_disk && ed.is_dirty() } else { ed.can_save() };
-                if ui.add_enabled(can, egui::Button::new("Save in place")).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
-                    out.push(EdIntent::SaveInPlace);
-                }
-            }
-            if let Some(home) = slots.device_home.as_ref().filter(|_| !showing_kit) {
-                let tip = format!(
-                    "Upload what you hear as a new file next to {home} on the device, \
-                     with a name you pick. The original stays."
-                );
-                if ui
-                    .add_enabled(has && !ed.exporting, egui::Button::new("⬆ To device as…"))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    out.push(EdIntent::SendToDevice);
-                }
             }
             if !showing_kit
                 && ui
