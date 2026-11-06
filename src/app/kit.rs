@@ -20,6 +20,8 @@ pub(super) struct KitNaming {
     pub dir: PathBuf,
     /// Equal slots to lay the kit out on, or free.
     pub grid: Option<usize>,
+    /// The sample the slice came from; gets the committed check once added.
+    pub src: PathBuf,
 }
 
 impl App {
@@ -199,6 +201,9 @@ impl App {
                 self.status = e;
                 return;
             }
+            if let Some(src) = self.editor.path().map(Path::to_path_buf) {
+                self.mark_committed([src]);
+            }
             let where_ = match self.other.grid {
                 Some(n) => format!("slot {}/{n} of", self.other.sel.0 / self.other.frames().div_ceil(n).max(1) + 1),
                 None => "the end of".to_owned(),
@@ -236,7 +241,8 @@ impl App {
         let src = self.editor.path().map(Path::to_path_buf).unwrap_or_default();
         let folder = src.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let name = folder.map_or_else(|| "slice kit".to_owned(), |f| format!("{f} kit"));
-        self.kit_naming = Some(KitNaming { clip, bits, name, dir: self.kit_dir(&src), grid: self.kit_grid });
+        let dir = self.kit_dir(&src);
+        self.kit_naming = Some(KitNaming { clip, bits, name, dir, grid: self.kit_grid, src });
     }
 
     /// New kits go in the active destination tab when it's a local folder,
@@ -263,7 +269,10 @@ impl App {
         // Already open: switch to it and add the slice there.
         if self.switch_to_open(&path) {
             self.status = match self.kit_mut().append(&n.clip) {
-                Ok(()) => format!("Added the slice to {file} (not saved yet) — B shows it, ⌘S there saves it"),
+                Ok(()) => {
+                    self.mark_committed([n.src.clone()]);
+                    format!("Added the slice to {file} (not saved yet) — B shows it, ⌘S there saves it")
+                }
                 Err(e) => format!("{file}: {e}"),
             };
             return;
@@ -274,6 +283,9 @@ impl App {
         }
         self.kit_grid = n.grid;
         self.park_kit();
+        if !n.src.as_os_str().is_empty() {
+            self.mark_committed([n.src.clone()]);
+        }
         if path.is_file() {
             self.kit_pending = Some((n.clip, n.grid));
             self.kit_mut().request(&path);
