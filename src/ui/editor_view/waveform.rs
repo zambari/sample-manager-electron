@@ -682,16 +682,18 @@ fn trim_cues(
                 }
             }
         }
-        // The slot cut, with a grip at the top: drag any to move them all.
+        // The slot cut, in the theme's orange with a grip at the top: drag
+        // any to move them all.
         if let Some((c, hot)) = grip {
             let x = x_at(s.a + c);
             if lanes.x_range().contains(x) {
+                let gc = crate::ui::theme::ACCENT_BRIGHT;
                 let w = if hot { 2.5 } else { 1.5 };
-                painter.line_segment([Pos2::new(x, lanes.top()), Pos2::new(x, lanes.bottom())], Stroke::new(w, col));
+                painter.line_segment([Pos2::new(x, lanes.top()), Pos2::new(x, lanes.bottom())], Stroke::new(w, gc));
                 let (t, r) = (lanes.top(), if hot { 6.0 } else { 4.5 });
                 painter.add(egui::Shape::convex_polygon(
                     vec![Pos2::new(x - r, t), Pos2::new(x + r, t), Pos2::new(x, t + r * 1.4)],
-                    col,
+                    gc,
                     Stroke::NONE,
                 ));
             }

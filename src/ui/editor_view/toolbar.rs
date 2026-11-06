@@ -359,8 +359,12 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
             (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
         for (v, label, hover) in items {
-            // Trim only applies to a kit.
+            // Trim only applies to a kit: shown greyed out on a plain
+            // sample, pointing the way to slice mode.
             if label == "Trim" && !kit {
+                ui.add_enabled(false, vis_toggle(v, label)).on_disabled_hover_text(
+                    "Trim works on a kit: enter slice mode (the Kit tab, or + Slice → Kit / K) to use it",
+                );
                 continue;
             }
             ui.add(vis_toggle(v, label))

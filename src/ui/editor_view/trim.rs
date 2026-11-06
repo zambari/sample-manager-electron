@@ -5,6 +5,7 @@
 use super::strip::{DB_RANGE, SAVE_COLOR, threshold_strip};
 use super::*;
 use crate::editor::SliceEnd;
+use crate::ui::theme;
 
 const BAR_W: f32 = 300.0;
 const BAR_H: f32 = 4.0;
@@ -14,12 +15,13 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
     let Some(rate) = ed.sample().map(|s| s.rate.max(1) as f64) else { return };
     let nch = ed.sample().map_or(1, |s| s.channels.len().max(1));
 
+    let plan = ed.active_trim_plan();
     ui.horizontal_wrapped(|ui| {
         // Grid kits (a slot count or Auto): every slot is as long as the
         // longest sound, so one slot length is the quick way in.
         if ed.grid.is_some() {
             ui.selectable_value(&mut ed.prefs.grid_trim_by_level, false, "Length").on_hover_text(
-                "Cut every slot to one length: drag the green line on the wave (any slot) or the strip here. \
+                "Cut every slot to one length: drag the orange line on the wave (any slot). \
                  Sounds that run past it fade out just before it.",
             );
             ui.selectable_value(&mut ed.prefs.grid_trim_by_level, true, "Level").on_hover_text(
@@ -44,9 +46,26 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
             "Default fade before a slot-length cut, or after a level's threshold point. Drag a fade's knob on the wave to shape one: \
              sideways for length, up / down for the curve; double-click resets it.",
         );
+        // Apply: cut and fade the kit in memory (one undo step); nothing
+        // is written to disk until it's saved or sent.
+        let (saved, nf) = plan.as_ref().map_or((0, 0), |p| (p.saved(), p.fades().len()));
+        ui.separator();
+        if ui
+            .add_enabled(
+                saved > 0 || nf > 0,
+                egui::Button::new(RichText::new("Apply").color(theme::ON_ACCENT)).fill(theme::ACCENT),
+            )
+            .on_hover_text(format!(
+                "Apply the cut and the {nf} fade{} shown on the wave to the kit in memory. ⌘Z undoes; nothing is written to disk.",
+                if nf == 1 { "" } else { "s" }
+            ))
+            .clicked()
+        {
+            out.push(EdIntent::TrimTails);
+        }
     });
 
-    let Some(plan) = ed.active_trim_plan() else { return };
+    let Some(plan) = plan else { return };
     let saved = plan.saved();
     let nf = plan.fades().len();
     let secs = |f: usize| f as f64 / rate;
@@ -54,22 +73,13 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
     let bytes = |f: usize| f * nch * 2;
     ui.horizontal_wrapped(|ui| {
         let label = if saved > 0 {
-            RichText::new(format!("✂ Trim  −{:.2} s", secs(saved))).color(SAVE_COLOR)
+            RichText::new(format!("−{:.2} s", secs(saved))).color(SAVE_COLOR)
         } else if nf > 0 {
-            RichText::new(format!("✂ Trim  (fades only: {nf})")).color(ui.visuals().warn_fg_color)
+            RichText::new(format!("fades only: {nf}")).color(ui.visuals().warn_fg_color)
         } else {
-            RichText::new("Nothing to trim")
+            RichText::new("Nothing to trim").weak()
         };
-        if ui
-            .add_enabled(saved > 0 || nf > 0, egui::Button::new(label))
-            .on_hover_text(format!(
-                "Apply the {nf} fade{} shown on the wave and cut what's shaded green. ⌘Z undoes.",
-                if nf == 1 { "" } else { "s" }
-            ))
-            .clicked()
-        {
-            out.push(EdIntent::TrimTails);
-        }
+        ui.label(label);
         // Kept vs freed, to scale.
         let (rect, _) = ui.allocate_exact_size(vec2(BAR_W, 12.0), Sense::hover());
         let bar = Rect::from_center_size(rect.center(), vec2(BAR_W, BAR_H));
@@ -158,25 +168,11 @@ fn length_row(ui: &mut Ui, ed: &mut Editor, rate: f64) {
     let mut cut = before;
     ui.label("Slot length").on_hover_text(
         "Every slot gets cut to this length, so the kit shrinks by the same amount per slot. \
-         Sounds that run past it fade out over the fade time just before it (orange on the wave); shorter ones stay as they are.\n\n\
-         Ticks: where each slot's sound ends — orange ones get faded. Dragging snaps to them, \
-         so landing on the second-longest tick cuts only the longest sound.",
+         Sounds that run past it fade out over the fade time just before it; shorter ones stay as they are.\n\n\
+         Drag the fader here or the orange line on the wave (any slot). Ticks: where each slot's sound ends — \
+         orange ones get faded. Dragging snaps to them, so landing on the second-longest tick cuts only the longest sound.",
     );
     slot_strip(ui, &mut cut, len, &sounds, rate);
-    let mut ms = cut as f64 * 1000.0 / rate;
-    let max_ms = len as f64 * 1000.0 / rate;
-    if ui
-        .add(
-            egui::DragValue::new(&mut ms)
-                .range(1.0..=max_ms)
-                .speed(0.5)
-                .max_decimals(1)
-                .suffix(" ms"),
-        )
-        .changed()
-    {
-        cut = (ms / 1000.0 * rate).round() as usize;
-    }
     if ui
         .add_enabled(cut < len, egui::Button::new("Full"))
         .on_hover_text("Back to the slot length as it is: nothing cut")
@@ -195,6 +191,7 @@ fn slot_strip(ui: &mut Ui, cut: &mut usize, len: usize, sounds: &[usize], rate: 
     const W: f32 = 300.0;
     const H: f32 = 18.0;
     const SNAP: f32 = 4.0;
+    const CAP_W: f32 = 10.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(W, H), Sense::click_and_drag());
     let len_f = len.max(1) as f32;
     let x_of = |f: usize| rect.left() + f as f32 / len_f * rect.width();
@@ -226,7 +223,7 @@ fn slot_strip(ui: &mut Ui, cut: &mut usize, len: usize, sounds: &[usize], rate: 
 
     let vis = ui.visuals().clone();
     let warn = vis.warn_fg_color;
-    let p = ui.painter_at(rect.expand(1.0));
+    let p = ui.painter_at(rect.expand2(vec2(CAP_W / 2.0 + 1.0, 2.0)));
     let mid = rect.center().y;
     let strip = Rect::from_x_y_ranges(rect.x_range(), mid - BAR_H / 2.0..=mid + BAR_H / 2.0);
     let tx = x_of(*cut);
@@ -245,12 +242,21 @@ fn slot_strip(ui: &mut Ui, cut: &mut usize, len: usize, sounds: &[usize], rate: 
             near.push((i, s));
         }
     }
-    p.line_segment([Pos2::new(tx, rect.top() + 3.0), Pos2::new(tx, rect.bottom())], Stroke::new(1.5, vis.strong_text_color()));
-    p.add(egui::Shape::convex_polygon(
-        vec![Pos2::new(tx - 4.0, rect.top()), Pos2::new(tx + 4.0, rect.top()), Pos2::new(tx, rect.top() + 4.0)],
-        vis.strong_text_color(),
-        Stroke::NONE,
-    ));
+    // Fader cap: a small rounded block over the strip, with a groove
+    // across its middle marking the exact cut.
+    let hot = resp.hovered() || resp.dragged();
+    let cap = Rect::from_center_size(Pos2::new(tx, mid), vec2(CAP_W, H));
+    let fill = if hot { theme::ACCENT_BRIGHT } else { theme::ACCENT };
+    p.rect_filled(cap.translate(vec2(0.0, 1.0)), 2.0, Color32::from_black_alpha(90));
+    p.rect_filled(cap, 2.0, fill);
+    p.rect_stroke(cap, 2.0, Stroke::new(1.0, theme::ACCENT_BRIGHT), egui::StrokeKind::Inside);
+    for dx in [-2.0, 2.0] {
+        p.line_segment(
+            [Pos2::new(tx + dx, cap.top() + 4.0), Pos2::new(tx + dx, cap.bottom() - 4.0)],
+            Stroke::new(1.0, theme::ON_ACCENT.gamma_multiply(0.35)),
+        );
+    }
+    p.line_segment([Pos2::new(tx, cap.top() + 2.0), Pos2::new(tx, cap.bottom() - 2.0)], Stroke::new(1.0, theme::ON_ACCENT));
 
     if let Some(q) = pointer {
         let f = f_of(q.x);
