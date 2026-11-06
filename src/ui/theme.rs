@@ -295,6 +295,18 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
 /// Font family for device-screen text (Silkscreen pixel font).
 pub const OLED_FAMILY: &str = "oled";
 
+/// Device-screen text: the Silkscreen pixel font.
+pub fn oled_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(OLED_FAMILY.into()))
+}
+
+/// Readout green-white, like the device screen. Used for anything that lives
+/// on the device (Elk Sample Order slots, +Drive file lists).
+pub const OLED: Color32 = Color32::from_rgb(222, 236, 230);
+pub const OLED_DIM: Color32 = Color32::from_rgb(110, 122, 118);
+pub const OLED_BG: Color32 = Color32::from_rgb(12, 14, 14);
+pub const OLED_HOVER: Color32 = Color32::from_rgb(30, 36, 36);
+
 /// Registers the pixel font as `OLED_FAMILY`, falling back to the default
 /// fonts for glyphs it lacks (accents, symbols).
 pub fn install_fonts(ctx: &egui::Context) {

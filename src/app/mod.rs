@@ -592,32 +592,32 @@ impl eframe::App for App {
         };
         let max_for = |other: f32| (w - other - MIN_EDITOR_W).max(MIN_SIDE_W);
 
-        let left = egui::Panel::left("source_col")
-            .resizable(true)
-            .default_size(default_w)
-            .size_range(MIN_SIDE_W..=max_for(prev_r))
-            .show(ui, |ui| self.show_pane(ui, Role::Source));
-        self.side_widths[0] = left.response.rect.width();
-        let right = egui::Panel::right("dest_col")
-            .resizable(true)
-            .default_size(default_w)
-            .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
-            .show(ui, |ui| self.show_pane(ui, Role::Dest));
-        self.side_widths[1] = right.response.rect.width();
-        draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
-        draw_divider(
-            ui,
-            right.response.rect.left(),
-            right.response.rect.y_range(),
-        );
+        // Elk Sample Order mode takes the whole window: the file panes have
+        // nothing to do with it.
+        if self.elk_mode {
+            egui::CentralPanel::default().show(ui, |ui| self.show_elk(ui));
+        } else {
+            let left = egui::Panel::left("source_col")
+                .resizable(true)
+                .default_size(default_w)
+                .size_range(MIN_SIDE_W..=max_for(prev_r))
+                .show(ui, |ui| self.show_pane(ui, Role::Source));
+            self.side_widths[0] = left.response.rect.width();
+            let right = egui::Panel::right("dest_col")
+                .resizable(true)
+                .default_size(default_w)
+                .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
+                .show(ui, |ui| self.show_pane(ui, Role::Dest));
+            self.side_widths[1] = right.response.rect.width();
+            draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
+            draw_divider(
+                ui,
+                right.response.rect.left(),
+                right.response.rect.y_range(),
+            );
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.elk_mode {
-                self.show_elk(ui)
-            } else {
-                self.show_editor(ui)
-            }
-        });
+            egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
+        }
 
         // Modal last, so it paints over both panes.
         if let Some(p) = &self.pending {

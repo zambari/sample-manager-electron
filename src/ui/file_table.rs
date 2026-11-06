@@ -9,6 +9,7 @@ use crate::fs_model::{self, SortKey};
 use crate::preview::Preview;
 use crate::sizes::{Size, SizeCache};
 use crate::tab::DirTab;
+use crate::ui::theme::{oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
 use egui::{Align, Key, Sense, Stroke, StrokeKind, Ui};
 use std::path::PathBuf;
 
@@ -267,6 +268,13 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
         }
     });
 
+    // Device listings sit on a dark "screen", like the Elk Sample Order view,
+    // so it's obvious at a glance which side is the device.
+    if tab.device {
+        ui.painter()
+            .rect_filled(ui.available_rect_before_wrap(), 2.0, OLED_BG);
+    }
+
     area.show_rows(ui, ROW_HEIGHT, total, |ui, range| {
         ui.set_min_width(ui.available_width());
         for i in range {
@@ -352,13 +360,21 @@ fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
         }
     }
     if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        let fill = if tab.device {
+            OLED_HOVER
+        } else {
+            ui.visuals().widgets.hovered.weak_bg_fill
+        };
+        ui.painter().rect_filled(rect, 2.0, fill);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     // Painted, not label widgets, so the text can't swallow clicks.
     let inner = rect.shrink2(egui::vec2(6.0, 0.0));
-    paint_text(ui, inner, "..", body_font(ui, 1.0), egui::Color32::WHITE);
+    if tab.device {
+        paint_text(ui, inner, "..", oled_font(OLED_TEXT), OLED_DIM);
+    } else {
+        paint_text(ui, inner, "..", body_font(ui, 1.0), egui::Color32::WHITE);
+    }
     // Double click, like any other folder row.
     if resp.on_hover_text("Parent folder").double_clicked() {
         intents.push(Intent::GoUp);
@@ -384,7 +400,14 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
     // until the row's response exists, so reserve a slot for it here.
     let bg = ui.painter().add(egui::Shape::Noop);
     if is_selected {
-        let fill = if cx.pane_focused {
+        let fill = if tab.device {
+            // Inverted, like a highlighted line on the device screen.
+            if cx.pane_focused {
+                OLED
+            } else {
+                OLED_UNFOCUSED_SEL
+            }
+        } else if cx.pane_focused {
             ui.visuals().selection.bg_fill
         } else {
             // A selection in the unfocused pane stays visible but recedes --
@@ -398,10 +421,15 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
         paint_save_mark(ui, rect, *mark);
     }
     if is_cursor && cx.pane_focused {
+        let color = if tab.device {
+            OLED_DIM
+        } else {
+            ui.visuals().strong_text_color()
+        };
         ui.painter().rect_stroke(
             rect,
             2.0,
-            Stroke::new(1.0, ui.visuals().strong_text_color()),
+            Stroke::new(1.0, color),
             StrokeKind::Inside,
         );
     }
@@ -431,14 +459,24 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
                 egui::Align2::CENTER_CENTER,
                 glyph,
                 egui::FontId::proportional(12.0),
-                ui.visuals().text_color(),
+                if !tab.device {
+                    ui.visuals().text_color()
+                } else if is_selected {
+                    OLED_BG
+                } else {
+                    OLED_DIM
+                },
             );
             arrow_rect = Some(r);
         }
         inner.min.x += ARROW_W + 2.0;
     }
     let shown = tab.display_name(idx).map(str::to_owned);
-    draw_cells(ui, inner, cx, &entry, shown.as_deref(), tab.device);
+    if tab.device {
+        draw_device_cells(ui, inner, cx, &entry, shown.as_deref(), is_selected);
+    } else {
+        draw_cells(ui, inner, cx, &entry, shown.as_deref(), false);
+    }
 
     // One interaction region covering the whole row, sensing both so a click
     // selects and a press-and-move starts a drag.
@@ -453,7 +491,11 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
         // Highlight the full row so it's clear the whole width is a target.
         // Painted behind the text (which was laid out before we knew).
         if !is_selected {
-            let hover = ui.visuals().widgets.hovered.weak_bg_fill;
+            let hover = if tab.device {
+                OLED_HOVER
+            } else {
+                ui.visuals().widgets.hovered.weak_bg_fill
+            };
             ui.painter()
                 .set(bg, egui::Shape::rect_filled(rect, 2.0, hover));
         }
@@ -830,6 +872,73 @@ fn draw_cells(
         body_font(ui, 1.0),
         name_color,
     );
+}
+
+/// Pixel font size for device rows.
+const OLED_TEXT: f32 = 16.0;
+/// Selected device row while the other pane has focus.
+const OLED_UNFOCUSED_SEL: egui::Color32 = egui::Color32::from_rgb(96, 106, 102);
+
+/// A device row, in the device-screen style of the Elk Sample Order view:
+/// pixel font, green-white on black, inverted when selected. Folders get a
+/// small painted folder (filled, or hollow when empty), since the pixel font
+/// has no symbol glyphs.
+fn draw_device_cells(
+    ui: &Ui,
+    inner: egui::Rect,
+    cx: &TableCtx<'_>,
+    entry: &fs_model::Entry,
+    shown: Option<&str>,
+    selected: bool,
+) {
+    let (fg, dim) = if selected {
+        (OLED_BG, egui::Color32::from_rgb(60, 70, 66))
+    } else {
+        (OLED, OLED_DIM)
+    };
+    let font = oled_font(OLED_TEXT);
+    let cy = inner.center().y.round();
+
+    let size_text = if entry.is_dir {
+        String::new()
+    } else {
+        fs_model::human_bytes(entry.len)
+    };
+    let size_galley = ui.painter().layout_no_wrap(size_text, font.clone(), dim);
+    let size_left = inner.right() - size_galley.size().x;
+    ui.painter().galley(
+        egui::pos2(size_left, cy - size_galley.size().y / 2.0),
+        size_galley,
+        dim,
+    );
+
+    // Folder icon, 13×9, pixel-aligned.
+    const ICON_W: f32 = 13.0;
+    let x = inner.left().round();
+    if entry.is_dir {
+        let color = if entry.empty { dim } else { fg };
+        let tab = egui::Rect::from_min_size(egui::pos2(x, cy - 5.0), egui::vec2(6.0, 2.0));
+        let body = egui::Rect::from_min_size(egui::pos2(x, cy - 3.0), egui::vec2(ICON_W, 8.0));
+        let p = ui.painter();
+        p.rect_filled(tab, 0.0, color);
+        if entry.empty {
+            p.rect_stroke(body, 0.0, Stroke::new(1.0, color), StrokeKind::Inside);
+        } else {
+            p.rect_filled(body, 0.0, color);
+        }
+    }
+
+    let mut name_rect = inner;
+    name_rect.min.x = x + ICON_W + 7.0;
+    name_rect.max.x = (size_left - 8.0).max(name_rect.min.x);
+    let color = if entry.is_dir && entry.empty { dim } else { fg };
+    // Cut items fade until they're pasted.
+    let color = if cx.is_cut(&entry.path, true) {
+        color.gamma_multiply(0.4)
+    } else {
+        color
+    };
+    paint_text(ui, name_rect, shown.unwrap_or(&entry.name), font, color);
 }
 
 fn paste_button(

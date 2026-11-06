@@ -10,15 +10,8 @@ const ROW_H: f32 = 20.0;
 const TEXT: f32 = 16.0;
 const BANK: usize = 128;
 
-/// Every piece of slot-list text goes through here: the Silkscreen pixel font.
-pub fn oled_font(size: f32) -> egui::FontId {
-    egui::FontId::new(size, egui::FontFamily::Name(theme::OLED_FAMILY.into()))
-}
-
-/// Readout green-white, like the device screen.
-const OLED: Color32 = Color32::from_rgb(222, 236, 230);
-const OLED_DIM: Color32 = Color32::from_rgb(110, 122, 118);
-const OLED_BG: Color32 = Color32::from_rgb(12, 14, 14);
+pub use theme::oled_font;
+use theme::{OLED, OLED_BG, OLED_DIM, OLED_HOVER};
 
 #[derive(Default)]
 pub struct ElkState {
@@ -622,7 +615,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
                 p.rect_filled(
                     r.shrink2(egui::vec2(4.0, 0.0)),
                     0.0,
-                    Color32::from_rgb(30, 36, 36),
+                    OLED_HOVER,
                 );
             }
             p.text(
@@ -735,7 +728,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     if selected {
         painter.rect_filled(rect, 0.0, OLED);
     } else if resp.hovered() && !off {
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 36, 36));
+        painter.rect_filled(rect, 0.0, OLED_HOVER);
     }
     if st.cursor == Some(slot) && !selected {
         painter.rect_stroke(
