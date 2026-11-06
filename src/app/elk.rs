@@ -26,6 +26,15 @@ impl App {
                 ElkIntent::Push => {
                     let Some(p) = &self.elk.project else { continue };
                     let msgs = p.build_push(&self.elk.order);
+                    if msgs.is_empty() {
+                        self.elk.status = "Nothing to send: no pattern, kit or sound changes with this order.".into();
+                        continue;
+                    }
+                    crate::log::line(format!(
+                        "elk: partial push, {} of {} dump messages changed",
+                        msgs.len(),
+                        p.msg_count()
+                    ));
                     let settings = p.settings_data().to_vec();
                     self.elk.expect = Some(self.elk.new_pool());
                     self.elk.busy = Some(("Sending to device".into(), 0, msgs.len()));
@@ -37,13 +46,20 @@ impl App {
 
     fn elk_read(&mut self) {
         self.elk.busy = Some(("Reading project".into(), 0, 129));
-        self.device.elk(ElkCmd::Read);
+        let known = self.elk.names.keys().copied().collect();
+        self.device.elk(ElkCmd::Read { known });
     }
 
     pub(super) fn elk_event(&mut self, e: ElkEv) {
         let st = &mut self.elk;
         match e {
             ElkEv::Projects(r) => st.projects = Some(r),
+            ElkEv::Partial(p) => st.set_project(p),
+            ElkEv::Uses(v) => {
+                if let Some(p) = st.project.as_mut().filter(|p| p.partial && p.uses.len() == v.len()) {
+                    p.uses = v;
+                }
+            }
             ElkEv::Progress { label, done, total } => st.busy = Some((label, done, total)),
             ElkEv::Loaded(r) => {
                 st.busy = None;
@@ -74,6 +90,10 @@ impl App {
                     Err(e) => {
                         st.expect = None;
                         st.status = format!("Read failed: {e}");
+                        // A pool shown early stays, but can't be pushed.
+                        if let Some(p) = st.project.as_mut().filter(|p| p.partial) {
+                            p.read_only = Some(format!("the read didn't finish ({e}); load again to push"));
+                        }
                     }
                 }
             }

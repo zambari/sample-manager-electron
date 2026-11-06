@@ -69,6 +69,12 @@ impl ElkState {
     }
 
     pub fn set_project(&mut self, p: Box<ElkProject>) {
+        // The full read landing on the pool shown early: keep the edits made
+        // while it streamed in.
+        if self.project.as_ref().is_some_and(|old| old.partial && old.pool == p.pool) && self.order.len() == p.pool.len() {
+            self.project = Some(p);
+            return;
+        }
         self.order = (0..p.pool.len() as u16).collect();
         let banks = p.pool.len().div_ceil(BANK);
         self.bank = [0, 1.min(banks - 1)];
@@ -418,7 +424,9 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     });
     }
 
-    if let Some(why) = st.project.as_ref().and_then(|p| p.read_only.clone()) {
+    if st.project.as_ref().is_some_and(|p| p.partial) && busy {
+        ui.label(RichText::new("Sample pool loaded; use counts fill in as the patterns arrive. You can start arranging, pushing unlocks when the read finishes.").weak());
+    } else if let Some(why) = st.project.as_ref().and_then(|p| p.read_only.clone()) {
         ui.colored_label(Color32::from_rgb(230, 120, 90), format!("Read-only: {why}"))
             .on_hover_text(
                 "Pushing is disabled because the dump doesn't match the layouts we know.",
@@ -928,8 +936,9 @@ fn confirm_push(ctx: &egui::Context, changed: usize) -> Option<bool> {
         ui.heading(format!("Push new sample order ({changed} slots)?"));
         ui.add_space(6.0);
         ui.label(
-            "This replaces the project currently loaded on the device: every pattern, kit and pool sound \
-             is rewritten so their sample references follow the new order. The saved copy on +Drive is not touched.",
+            "This rewrites the project currently loaded on the device: only the patterns, kits and pool sounds \
+             that reference moved slots are sent, plus the sample pool. Everything else on the device is left as is. \
+             The saved copy on +Drive is not touched.",
         );
         ui.add_space(4.0);
         ui.label(RichText::new("Wait for the device's own progress bar to finish. If it sounds right, save via PROJECT › SAVE. If anything is off, don't save: reload the project from +Drive.").weak());

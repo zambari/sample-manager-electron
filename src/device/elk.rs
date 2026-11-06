@@ -320,6 +320,150 @@ impl SlotRef {
     }
 }
 
+/// What the parser finds message by message.
+#[derive(Default)]
+pub(super) struct Scan {
+    refs: Vec<SlotRef>,
+    problems: Vec<String>,
+    pv_seen: std::collections::BTreeSet<u32>,
+    snd_seen: std::collections::BTreeSet<u32>,
+    unknown: std::collections::BTreeSet<String>,
+}
+
+impl Scan {
+    /// Finds the slot references in message `mi` and adds one to `uses`
+    /// for each (slot 0 aside).
+    pub(super) fn count(&mut self, model: Model, mi: usize, m: &DumpMsg, uses: &mut [u32]) {
+        let from = self.refs.len();
+        self.msg(model, mi, m);
+        for r in &self.refs[from..] {
+            if let Some(s) = r.get(&m.data).filter(|&s| s > 0 && s < uses.len()) {
+                uses[s] += 1;
+            }
+        }
+    }
+
+    fn msg(&mut self, model: Model, mi: usize, m: &DumpMsg) {
+        let d = &m.data;
+        match m.kind {
+            PATTERN_KIT => {
+                let Some(pv) = be32(d, 0) else {
+                    self.problems.push(format!("pattern {} too short", m.index));
+                    return;
+                };
+                self.pv_seen.insert(pv);
+                let (Some(psize), Some(plocks)) =
+                    (pattern_sizeof(model, pv), pattern_plocks(model, pv))
+                else {
+                    self.unknown.insert(format!("pattern v{pv}"));
+                    return;
+                };
+                let kit = psize;
+                let kv_at = if model == DT2 && be32(d, kit) == Some(MAGIC) {
+                    kit + 4
+                } else {
+                    kit
+                };
+                let kv = be32(d, kv_at).unwrap_or(u32::MAX);
+                let (Some(ks), Some(ksize), Some(sv)) = (
+                    kit_sounds(model, kv),
+                    kit_sizeof(model, kv),
+                    kit_sound_version(model, kv),
+                ) else {
+                    self.unknown.insert(format!("kit v{kv}"));
+                    return;
+                };
+                if kv != pv {
+                    self.problems.push(format!(
+                        "pattern {} has kit v{kv} but pattern v{pv}",
+                        m.index
+                    ));
+                }
+                if d.len() < kit + ksize {
+                    self.problems.push(format!("pattern {} shorter than its kit", m.index));
+                    return;
+                }
+                let (Some(slot_at), Some(ssize), Some(param)) = (
+                    sound_slot(model, sv),
+                    sound_sizeof(model, sv),
+                    sample_param(model, sv),
+                ) else {
+                    self.unknown.insert(format!("sound v{sv}"));
+                    return;
+                };
+                self.snd_seen.insert(sv);
+                for t in 0..model.kit_tracks() {
+                    let s = kit + ks + t * ssize;
+                    if be32(d, s) != Some(MAGIC) || be32(d, s + 4) != Some(sv) {
+                        self.problems.push(format!(
+                            "pattern {} track {} sound doesn't look right",
+                            m.index,
+                            t + 1
+                        ));
+                        continue;
+                    }
+                    let enc = if model == DT2 { Enc::U16 } else { Enc::U8 };
+                    self.refs.push(SlotRef {
+                        msg: mi,
+                        at: s + slot_at,
+                        enc,
+                    });
+                }
+                let midi_mask = kit_midi_mask(model, kv)
+                    .and_then(|o| be16(d, kit + o))
+                    .unwrap_or(0);
+                let sample_track =
+                    |t: usize| t < model.kit_tracks() && midi_mask & (1 << t) == 0;
+                let row = 2 + model.steps() * 2;
+                for r in 0..PLOCK_ROWS {
+                    let at = plocks + r * row;
+                    if d.len() < at + row {
+                        break;
+                    }
+                    if d[at] != param || !sample_track(d[at + 1] as usize) {
+                        continue;
+                    }
+                    let enc = if model == DT2 {
+                        Enc::Lock16
+                    } else {
+                        Enc::LockHi
+                    };
+                    for s in 0..model.steps() {
+                        let r = SlotRef {
+                            msg: mi,
+                            at: at + 2 + s * 2,
+                            enc,
+                        };
+                        if r.get(d).is_some() {
+                            self.refs.push(r);
+                        }
+                    }
+                }
+            }
+            SOUND => {
+                let sv = be32(d, 4).unwrap_or(u32::MAX);
+                if be32(d, 0) != Some(MAGIC) {
+                    self.problems.push(format!("pool sound {} doesn't look right", m.index));
+                    return;
+                }
+                let Some(slot_at) = sound_slot(model, sv) else {
+                    self.unknown.insert(format!("sound v{sv}"));
+                    return;
+                };
+                self.snd_seen.insert(sv);
+                let enc = if model == DT2 { Enc::U16 } else { Enc::U8 };
+                if d.len() >= slot_at + 2 {
+                    self.refs.push(SlotRef {
+                        msg: mi,
+                        at: slot_at,
+                        enc,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
 pub struct ElkProject {
     pub model: Model,
     msgs: Vec<DumpMsg>,
@@ -333,6 +477,29 @@ pub struct ElkProject {
     pub versions: String,
     /// Why pushing is not allowed, if it isn't.
     pub read_only: Option<String>,
+    /// Only the pool so far: the patterns are still coming in.
+    pub partial: bool,
+}
+
+/// The pool from a project settings struct: where it starts, and its entries.
+fn read_pool(model: Model, sd: &[u8]) -> Result<(u32, usize, Vec<PoolEntry>), String> {
+    let sv = be32(sd, 0).ok_or("project settings too short")?;
+    let pool_at = settings_samples(model, sv).ok_or_else(|| {
+        format!("unknown project settings version {sv} (firmware newer than elk-herd's tables?)")
+    })?;
+    let pool: Vec<PoolEntry> = (0..model.pool_size())
+        .map(|i| {
+            let at = pool_at + i * 16;
+            Some(PoolEntry {
+                inode: be32(sd, at)?,
+                hash: be32(sd, at + 4)?,
+                size: be32(sd, at + 8)?,
+                seqnr: be32(sd, at + 12)?,
+            })
+        })
+        .collect::<Option<_>>()
+        .ok_or("project settings too short for the sample pool")?;
+    Ok((sv, pool_at, pool))
 }
 
 impl ElkProject {
@@ -357,151 +524,15 @@ impl ElkProject {
             ));
         }
 
-        let sd = &msgs[settings_msg].data;
-        let sv = be32(sd, 0).ok_or("project settings too short")?;
-        let pool_at = settings_samples(model, sv).ok_or_else(|| {
-            format!(
-                "unknown project settings version {sv} (firmware newer than elk-herd's tables?)"
-            )
-        })?;
-        let n = model.pool_size();
-        let pool: Vec<PoolEntry> = (0..n)
-            .map(|i| {
-                let at = pool_at + i * 16;
-                Some(PoolEntry {
-                    inode: be32(sd, at)?,
-                    hash: be32(sd, at + 4)?,
-                    size: be32(sd, at + 8)?,
-                    seqnr: be32(sd, at + 12)?,
-                })
-            })
-            .collect::<Option<_>>()
-            .ok_or("project settings too short for the sample pool")?;
+        let (sv, pool_at, pool) = read_pool(model, &msgs[settings_msg].data)?;
+        let n = pool.len();
 
-        let mut refs = Vec::new();
-        let mut pv_seen = std::collections::BTreeSet::new();
-        let mut snd_seen = std::collections::BTreeSet::new();
-        let mut unknown = std::collections::BTreeSet::new();
+        let mut scan = Scan::default();
         for (mi, m) in msgs.iter().enumerate() {
-            let d = &m.data;
-            match m.kind {
-                PATTERN_KIT => {
-                    let Some(pv) = be32(d, 0) else {
-                        problems.push(format!("pattern {} too short", m.index));
-                        continue;
-                    };
-                    pv_seen.insert(pv);
-                    let (Some(psize), Some(plocks)) =
-                        (pattern_sizeof(model, pv), pattern_plocks(model, pv))
-                    else {
-                        unknown.insert(format!("pattern v{pv}"));
-                        continue;
-                    };
-                    let kit = psize;
-                    let kv_at = if model == DT2 && be32(d, kit) == Some(MAGIC) {
-                        kit + 4
-                    } else {
-                        kit
-                    };
-                    let kv = be32(d, kv_at).unwrap_or(u32::MAX);
-                    let (Some(ks), Some(ksize), Some(sv)) = (
-                        kit_sounds(model, kv),
-                        kit_sizeof(model, kv),
-                        kit_sound_version(model, kv),
-                    ) else {
-                        unknown.insert(format!("kit v{kv}"));
-                        continue;
-                    };
-                    if kv != pv {
-                        problems.push(format!(
-                            "pattern {} has kit v{kv} but pattern v{pv}",
-                            m.index
-                        ));
-                    }
-                    if d.len() < kit + ksize {
-                        problems.push(format!("pattern {} shorter than its kit", m.index));
-                        continue;
-                    }
-                    let (Some(slot_at), Some(ssize), Some(param)) = (
-                        sound_slot(model, sv),
-                        sound_sizeof(model, sv),
-                        sample_param(model, sv),
-                    ) else {
-                        unknown.insert(format!("sound v{sv}"));
-                        continue;
-                    };
-                    snd_seen.insert(sv);
-                    for t in 0..model.kit_tracks() {
-                        let s = kit + ks + t * ssize;
-                        if be32(d, s) != Some(MAGIC) || be32(d, s + 4) != Some(sv) {
-                            problems.push(format!(
-                                "pattern {} track {} sound doesn't look right",
-                                m.index,
-                                t + 1
-                            ));
-                            continue;
-                        }
-                        let enc = if model == DT2 { Enc::U16 } else { Enc::U8 };
-                        refs.push(SlotRef {
-                            msg: mi,
-                            at: s + slot_at,
-                            enc,
-                        });
-                    }
-                    let midi_mask = kit_midi_mask(model, kv)
-                        .and_then(|o| be16(d, kit + o))
-                        .unwrap_or(0);
-                    let sample_track =
-                        |t: usize| t < model.kit_tracks() && midi_mask & (1 << t) == 0;
-                    let row = 2 + model.steps() * 2;
-                    for r in 0..PLOCK_ROWS {
-                        let at = plocks + r * row;
-                        if d.len() < at + row {
-                            break;
-                        }
-                        if d[at] != param || !sample_track(d[at + 1] as usize) {
-                            continue;
-                        }
-                        let enc = if model == DT2 {
-                            Enc::Lock16
-                        } else {
-                            Enc::LockHi
-                        };
-                        for s in 0..model.steps() {
-                            let r = SlotRef {
-                                msg: mi,
-                                at: at + 2 + s * 2,
-                                enc,
-                            };
-                            if r.get(d).is_some() {
-                                refs.push(r);
-                            }
-                        }
-                    }
-                }
-                SOUND => {
-                    let sv = be32(d, 4).unwrap_or(u32::MAX);
-                    if be32(d, 0) != Some(MAGIC) {
-                        problems.push(format!("pool sound {} doesn't look right", m.index));
-                        continue;
-                    }
-                    let Some(slot_at) = sound_slot(model, sv) else {
-                        unknown.insert(format!("sound v{sv}"));
-                        continue;
-                    };
-                    snd_seen.insert(sv);
-                    let enc = if model == DT2 { Enc::U16 } else { Enc::U8 };
-                    if d.len() >= slot_at + 2 {
-                        refs.push(SlotRef {
-                            msg: mi,
-                            at: slot_at,
-                            enc,
-                        });
-                    }
-                }
-                _ => {}
-            }
+            scan.msg(model, mi, m);
         }
+        let Scan { refs, problems: found, pv_seen, snd_seen, unknown } = scan;
+        problems.extend(found);
         if !unknown.is_empty() {
             problems.push(format!(
                 "unknown struct versions: {}",
@@ -545,7 +576,31 @@ impl ElkProject {
             uses,
             versions,
             read_only,
+            partial: false,
         })
+    }
+
+    /// Just the pool, from a settings message read ahead of the full dump.
+    /// Not pushable; counts start at zero and fill in as patterns arrive.
+    pub(super) fn partial(model: Model, settings: DumpMsg) -> Result<Self, String> {
+        let (sv, pool_at, pool) = read_pool(model, &settings.data)?;
+        let n = pool.len();
+        Ok(Self {
+            model,
+            msgs: vec![settings],
+            settings_msg: 0,
+            pool_at,
+            pool,
+            refs: Vec::new(),
+            uses: vec![0; n],
+            versions: format!("settings v{sv}"),
+            read_only: Some("still reading the patterns".into()),
+            partial: true,
+        })
+    }
+
+    pub fn msg_count(&self) -> usize {
+        self.msgs.len()
     }
 
     /// The project settings struct as read, to check the device still has it.
@@ -553,8 +608,10 @@ impl ElkProject {
         &self.msgs[self.settings_msg].data
     }
 
-    /// Every message to send for the pool laid out as `order`, where
-    /// `order[new_slot] = old_slot`. Unchanged messages go out as received.
+    /// The messages to send for the pool laid out as `order`, where
+    /// `order[new_slot] = old_slot`: only those whose contents change, in
+    /// dump order (settings last). Untouched patterns, kits and sounds are
+    /// left alone on the device, so edits made there since the read survive.
     pub fn build_push(&self, order: &[u16]) -> Vec<Vec<u8>> {
         let n = self.pool.len();
         let mut new_of = vec![0usize; n];
@@ -585,9 +642,9 @@ impl ElkProject {
         self.msgs
             .iter()
             .zip(data)
-            .map(|(m, d)| match d {
-                Some(d) => build_dump(self.model, m.kind, m.index, &d),
-                None => m.raw.clone(),
+            .filter_map(|(m, d)| {
+                let d = d.filter(|d| *d != m.data)?;
+                Some(build_dump(self.model, m.kind, m.index, &d))
             })
             .collect()
     }
@@ -603,7 +660,10 @@ pub struct SavedProject {
 
 pub enum ElkCmd {
     ListProjects,
-    Read,
+    /// Read the project; `known` names needn't be looked up again.
+    Read {
+        known: std::collections::HashSet<(u32, u32)>,
+    },
     /// Messages to send, and the settings struct they were built from.
     Push {
         msgs: Vec<Vec<u8>>,
@@ -618,6 +678,10 @@ pub enum ElkEv {
         done: usize,
         total: usize,
     },
+    /// The pool, before the patterns: shown while the rest streams in.
+    Partial(Box<ElkProject>),
+    /// Use counts so far, as patterns arrive.
+    Uses(Vec<u32>),
     Loaded(Result<Box<ElkProject>, String>),
     /// `(hash, length) → +Drive path` for pool entries.
     Names(Vec<((u32, u32), String)>),
@@ -653,7 +717,7 @@ impl Conn {
         &mut self,
         m: Model,
         last: u8,
-        on_msg: &mut dyn FnMut(usize),
+        on_msg: &mut dyn FnMut(usize, &DumpMsg),
     ) -> R<Vec<DumpMsg>> {
         let mut out = Vec::new();
         let mut wait = FIRST_WAIT;
@@ -691,8 +755,8 @@ impl Conn {
                 continue;
             }
             let kind = msg.kind;
+            on_msg(out.len(), &msg);
             out.push(msg);
-            on_msg(out.len());
             if kind == last {
                 return Ok(out);
             }
@@ -701,7 +765,7 @@ impl Conn {
 
     pub(super) fn read_project(
         &mut self,
-        on_msg: &mut dyn FnMut(usize),
+        on_msg: &mut dyn FnMut(usize, &DumpMsg),
     ) -> R<(Model, Vec<DumpMsg>)> {
         let m = self.model()?;
         while self.rx.try_recv().is_ok() {}
@@ -723,11 +787,15 @@ impl Conn {
         Ok((m, msgs))
     }
 
-    fn read_settings(&mut self, m: Model) -> R<Vec<u8>> {
+    pub(super) fn read_settings_msg(&mut self, m: Model) -> R<DumpMsg> {
         while self.rx.try_recv().is_ok() {}
         self.send_sysex(&build_dump(m, REQ_SETTINGS, 0, &[]))?;
-        let msgs = self.collect_dump(m, SETTINGS, &mut |_| {})?;
-        Ok(msgs.into_iter().last().map(|m| m.data).unwrap_or_default())
+        let msgs = self.collect_dump(m, SETTINGS, &mut |_, _| {})?;
+        msgs.into_iter().last().map_or_else(|| refused("no project settings came back"), Ok)
+    }
+
+    fn read_settings(&mut self, m: Model) -> R<Vec<u8>> {
+        Ok(self.read_settings_msg(m)?.data)
     }
 
     pub(super) fn list_projects(&mut self) -> R<Vec<SavedProject>> {
@@ -816,10 +884,41 @@ impl Worker {
                 let r = self.with_conn(|c| c.list_projects());
                 self.em.send(Ev::Elk(ElkEv::Projects(r)));
             }
-            ElkCmd::Read => {
-                prog("Reading project", 0, 129);
+            ElkCmd::Read { known } => {
+                let mut asked = known;
+                prog("Reading sample pool", 0, 129);
+                // The pool comes last in the dump, so ask for it on its own
+                // first: the list shows right away, counts fill in after.
+                let early = self.with_conn(|c| {
+                    let m = c.model()?;
+                    Ok((m, c.read_settings_msg(m)?))
+                });
+                let mut live = match early.map(|(m, s)| (m, ElkProject::partial(m, s))) {
+                    Ok((m, Ok(p))) => {
+                        let uses = vec![0u32; p.pool.len()];
+                        let keys = pool_keys(&p.pool, &asked);
+                        em.send(Ev::Elk(ElkEv::Partial(Box::new(p))));
+                        // Names before the dump: a quick request each, where
+                        // the dump takes half a minute.
+                        self.look_up_names(&keys, &mut asked, true);
+                        Some((m, Scan::default(), uses))
+                    }
+                    Ok((_, Err(e))) | Err(e) => {
+                        crate::log::line(format!("elk: early pool read skipped: {e}"));
+                        None
+                    }
+                };
                 let r = self.with_conn(|c| {
-                    c.read_project(&mut |n| prog("Reading project", n, 129.max(n + 1)))
+                    c.read_project(&mut |i, msg| {
+                        if let Some((m, scan, uses)) = &mut live {
+                            let before: u32 = uses.iter().sum();
+                            scan.count(*m, i, msg, uses);
+                            if uses.iter().sum::<u32>() != before {
+                                em.send(Ev::Elk(ElkEv::Uses(uses.clone())));
+                            }
+                        }
+                        prog("Reading project", i + 1, 129.max(i + 2))
+                    })
                 });
                 let r = r.and_then(|(m, msgs)| ElkProject::parse(m, msgs).map(Box::new));
                 match &r {
@@ -834,38 +933,10 @@ impl Worker {
                     )),
                     Err(e) => crate::log::line(format!("elk: read failed: {e}")),
                 }
-                let keys: Vec<(u32, u32)> = match &r {
-                    Ok(p) => {
-                        let mut k: Vec<_> = p
-                            .pool
-                            .iter()
-                            .skip(1)
-                            .filter(|e| !e.is_empty())
-                            .map(|e| e.key())
-                            .collect();
-                        k.sort();
-                        k.dedup();
-                        k
-                    }
-                    Err(_) => Vec::new(),
-                };
+                let keys = r.as_ref().map(|p| pool_keys(&p.pool, &asked)).unwrap_or_default();
                 self.em.send(Ev::Elk(ElkEv::Loaded(r)));
-                let mut batch = Vec::new();
-                for (i, &(h, l)) in keys.iter().enumerate() {
-                    match self.with_conn(|c| c.sample_path(h, l)) {
-                        Ok(Some(p)) => batch.push(((h, l), p)),
-                        Ok(None) => {}
-                        Err(_) => break,
-                    }
-                    if batch.len() >= 32 || i + 1 == keys.len() {
-                        self.em
-                            .send(Ev::Elk(ElkEv::Names(std::mem::take(&mut batch))));
-                        self.serve_pending();
-                    }
-                }
-                if !batch.is_empty() {
-                    self.em.send(Ev::Elk(ElkEv::Names(batch)));
-                }
+                // After `Loaded`: no progress, nothing would clear it.
+                self.look_up_names(&keys, &mut asked, false);
             }
             ElkCmd::Push { msgs, settings } => {
                 let total = msgs.len();
@@ -885,6 +956,40 @@ impl Worker {
                 }
                 self.em.send(Ev::Elk(ElkEv::Pushed(r.map(|_| total))));
             }
+        }
+    }
+}
+
+/// Distinct files in the pool not in `skip`.
+fn pool_keys(pool: &[PoolEntry], skip: &std::collections::HashSet<(u32, u32)>) -> Vec<(u32, u32)> {
+    let mut k: Vec<_> = pool.iter().skip(1).filter(|e| !e.is_empty()).map(|e| e.key()).filter(|k| !skip.contains(k)).collect();
+    k.sort();
+    k.dedup();
+    k
+}
+
+impl Worker {
+    /// Asks the device for each file's +Drive path, sending them on in small
+    /// batches so the list fills in as it goes.
+    fn look_up_names(&mut self, keys: &[(u32, u32)], asked: &mut std::collections::HashSet<(u32, u32)>, progress: bool) {
+        let mut batch = Vec::new();
+        for (i, &(h, l)) in keys.iter().enumerate() {
+            match self.with_conn(|c| c.sample_path(h, l)) {
+                Ok(Some(p)) => batch.push(((h, l), p)),
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            asked.insert((h, l));
+            if progress {
+                self.em.send(Ev::Elk(ElkEv::Progress { label: "Looking up names".into(), done: i + 1, total: keys.len() }));
+            }
+            if batch.len() >= 8 || i + 1 == keys.len() {
+                self.em.send(Ev::Elk(ElkEv::Names(std::mem::take(&mut batch))));
+                self.serve_pending();
+            }
+        }
+        if !batch.is_empty() {
+            self.em.send(Ev::Elk(ElkEv::Names(batch)));
         }
     }
 }
