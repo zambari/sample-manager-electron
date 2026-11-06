@@ -77,6 +77,29 @@ single file (handy for chains of drum hits).
   to another file in the browser always brings you back to the sample.
 - Press **⌘S** while showing the kit to save it. The kit stays open between
   launches, and quitting asks about unsaved kit changes.
+- Each slice gets a **marker**, saved as a WAV cue point. Click near a
+  marker to park the playhead on it; double-click to select one slice.
+  **G** inserts 100 ms of silence before the playhead.
+- Several kits can be open at once. The kit tab picks the one **K** adds
+  to, its **×** closes it, and right-click a file → *Load as kit* opens
+  another.
+
+**Grid kits.** The Digitakt 1 can only slice a file into equal parts, so a
+kit can be laid out on 4, 8 or 16 equal slots: each slice starts its own
+slot, padded with silence to the longest one. *Auto* grows the grid as you
+add slices and shrinks it when you cut them. Exported grid kits get the
+slot count in their name (`[8] drums.wav`), and a file named like that
+opens as a grid kit.
+
+### Elk Sample Order
+
+Click **Elk Sample Order** next to the editor title to rearrange the sample
+pool of the project loaded on a Digitakt or Digitakt II. Drag a slot onto
+any other (in any bank) to swap them, or select several and move them with
+**⌥↑ / ⌥↓**. **Push to memory** writes the new order into the project in
+the device's memory, updating patterns, kits and sounds to match. Only the
+parts that changed are sent. Saved projects on the +Drive are never
+written; save the project on the device to keep the result.
 
 ### Drag and drop
 
