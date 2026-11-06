@@ -699,6 +699,10 @@ impl App {
                     replaced,
                 } => self.applied(job, done, replaced),
                 Ev::Note { job, text } => self.finish_note = Some((job, text)),
+                Ev::Linked(l) => {
+                    self.links.add(l);
+                    self.refresh_elk_links();
+                }
                 Ev::DeviceStatus(s) => {
                     if let Err(e) = &s {
                         crate::log::line(format!("device status: {e}"));

@@ -23,6 +23,20 @@ impl App {
                     self.device.elk(ElkCmd::ListProjects);
                 }
                 ElkIntent::Read => self.elk_read(),
+                ElkIntent::Local(k, open) => {
+                    let Some(l) = self.links.local(k.0, k.1) else {
+                        self.elk.status = "That local copy was changed or moved since the transfer, so it no longer matches the device file.".into();
+                        continue;
+                    };
+                    let (local, note) = (l.local.clone(), super::editing::link_note(l));
+                    if open {
+                        self.elk_mode = false;
+                        self.load_into_editor(&local);
+                    } else {
+                        self.preview_toggle(&local);
+                    }
+                    self.status = note;
+                }
                 ElkIntent::Push => {
                     let Some(p) = &self.elk.project else { continue };
                     let msgs = p.build_push(&self.elk.order);
@@ -44,6 +58,25 @@ impl App {
         }
     }
 
+    /// Which pool files we have a local copy of, for the view.
+    pub(super) fn refresh_elk_links(&mut self) {
+        let Some(p) = &self.elk.project else { return };
+        let linked: std::collections::HashMap<_, _> = p
+            .pool
+            .iter()
+            .filter(|e| !e.is_empty())
+            .filter_map(|e| {
+                let k = e.key();
+                let l = self.links.known(k.0, k.1)?;
+                Some((k, (l.device_name().to_owned(), l.local.clone(), l.uploaded)))
+            })
+            .collect();
+        if linked.len() != self.elk.linked.len() {
+            crate::log::line(format!("elk: {} pool files have a local copy", linked.len()));
+        }
+        self.elk.linked = linked;
+    }
+
     fn elk_read(&mut self) {
         self.elk.busy = Some(("Reading project".into(), 0, 129));
         let known = self.elk.names.keys().copied().collect();
@@ -54,7 +87,10 @@ impl App {
         let st = &mut self.elk;
         match e {
             ElkEv::Projects(r) => st.projects = Some(r),
-            ElkEv::Partial(p) => st.set_project(p),
+            ElkEv::Partial(p) => {
+                st.set_project(p);
+                self.refresh_elk_links();
+            }
             ElkEv::Uses(v) => {
                 if let Some(p) = st.project.as_mut().filter(|p| p.partial && p.uses.len() == v.len()) {
                     p.uses = v;
@@ -86,6 +122,7 @@ impl App {
                             None => format!("Read {used} samples"),
                         };
                         st.set_project(p);
+                        self.refresh_elk_links();
                     }
                     Err(e) => {
                         st.expect = None;

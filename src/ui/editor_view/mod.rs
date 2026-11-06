@@ -60,6 +60,8 @@ pub enum EdIntent {
     ElkMode,
     /// Fade and cut every kit slice's tail below the threshold.
     TrimTails,
+    /// Upload what you hear as a new file next to its device original.
+    SendToDevice,
 }
 
 /// One open kit, for the kit switcher.
@@ -88,6 +90,8 @@ pub struct Slots {
     pub kits: Vec<KitEntry>,
     /// File in the sample slot, shown or not.
     pub sample_name: Option<String>,
+    /// The device file the sample came from or went to, when known.
+    pub device_home: Option<String>,
 }
 
 const RULER_H: f32 = 18.0;
@@ -132,7 +136,7 @@ pub fn show(
         let ends = ed.slice_ends();
         trim_section(ui, ed, &ends, &mut out);
     }
-    let trim = if trimming { ed.trim_plan(ed.prefs.tail_db) } else { None };
+    let trim = if trimming { ed.active_trim_plan() } else { None };
     let fades = trim.as_ref().map_or_else(Vec::new, |p| ed.shown_fades(&p.fades()));
 
     if ed.current.is_none() {

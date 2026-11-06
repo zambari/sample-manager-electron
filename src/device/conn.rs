@@ -450,6 +450,7 @@ pub(super) fn entries(path: &Path, v: Vec<DirEntry>) -> Vec<crate::fs_model::Ent
             modified: None,
             is_audio: false,
             empty: false,
+            hash: d.hash,
         })
         .collect()
 }

@@ -76,6 +76,21 @@ pub(super) fn waveform(
             .find(|e| handle_pos(e).distance(p) <= HANDLE_R + 4.0)
             .copied()
     };
+    // Grid trim by length: the cut line in every slot, any of them
+    // draggable. (slot count, slot length, cut, each slot's sound length)
+    let off = ed.crop.map_or(0, |c| c.0);
+    let slot_cut = match (trim.is_some() && ed.trims_by_length(), ed.grid, ed.slot_sounds()) {
+        (true, Some(n), Some((len, sounds))) => Some((n, len, ed.slot_cut_len().unwrap_or(len), sounds)),
+        _ => None,
+    };
+    let cut_at = |p: Pos2| {
+        let (n, len, cut, _) = slot_cut.as_ref()?;
+        if p.y <= rect.top() + RULER_H {
+            return None;
+        }
+        (0..*n).find(|i| (m.x((i * len + cut) as f64 - off as f64) - p.x).abs() <= GRAB_PX)
+    };
+    let mut hot_cut = matches!(ed.drag, Some(Drag::SlotCut(..)));
     let mut hot_fade = match ed.drag {
         Some(Drag::Fade(i, ..)) => Some(i),
         _ => None,
@@ -134,6 +149,9 @@ pub(super) fn waveform(
                 hot_fade = Some(e.slice);
             } else if near(x_in, p) || near(x_out, p) {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            } else if cut_at(p).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                hot_cut = true;
             } else if on_bar(p) {
                 ui.ctx().set_cursor_icon(CursorIcon::Grab);
                 bar_hot = true;
@@ -171,6 +189,8 @@ pub(super) fn waveform(
                 Drag::In
             } else if near(x_out, o) {
                 Drag::Out
+            } else if let Some(i) = cut_at(o) {
+                Drag::SlotCut(i)
             } else if on_bar(o) {
                 Drag::Move(ed.sel, m.frame(o.x))
             } else {
@@ -201,9 +221,24 @@ pub(super) fn waveform(
                     let g = (1.0 - (p.y - fade_top) / fade_h).clamp(0.5f32.powf(8.0), 0.5);
                     ed.shape_fade(slice, len, g.ln() / 0.5f32.ln());
                 }
+                Drag::SlotCut(i) => {
+                    if let Some((_, len, _, sounds)) = &slot_cut {
+                        let rel = (m.frame(px) + off).saturating_sub(i * len);
+                        // Snap onto where a sound ends: cutting right
+                        // there frees the most without touching it.
+                        let rel = sounds
+                            .iter()
+                            .copied()
+                            .filter(|&s| s > 0 && (s.abs_diff(rel) as f64 / m.fpp) <= SNAP_PX as f64)
+                            .min_by_key(|&s| s.abs_diff(rel))
+                            .unwrap_or(rel)
+                            .clamp(1, *len);
+                        ed.slot_cut = (rel < *len).then_some(rel);
+                    }
+                }
             }
             // Dragging a marker past the edge scrolls the view along.
-            if !matches!(d, Drag::Pan | Drag::Fade(..)) {
+            if !matches!(d, Drag::Pan | Drag::Fade(..) | Drag::SlotCut(..)) {
                 let edge = 12.0;
                 if p.x > rect.right() - edge {
                     ed.view.start += 8.0 * ed.view.fpp;
@@ -322,7 +357,10 @@ pub(super) fn waveform(
 
     let rate = ed.sample().map_or(1, |s| s.rate);
     if let Some(plan) = trim {
-        trim_cues(&painter, &m, lanes, plan, ed.crop.map_or(0, |c| c.0));
+        // On a grid every slot shrinks to the same length.
+        let uniform = ed.grid.map(|n| plan.new_total / n.max(1));
+        let grip = slot_cut.as_ref().map(|(_, _, cut, _)| (*cut, hot_cut));
+        trim_cues(&painter, &m, lanes, plan, off, uniform, grip);
     }
     fade_cues(&painter, &m, lanes, abrupt, hot_fade, rate, &vis);
     if let Some(tp) = ed.trim_preview() {
@@ -615,21 +653,48 @@ fn fade_cues(
 }
 
 /// Tail trim: shade what each slice would lose, with a line at the cut.
-fn trim_cues(painter: &egui::Painter, m: &Map, lanes: Rect, plan: &crate::editor::TrimPlan, off: usize) {
+/// `uniform`: a grid kit, where every slot shrinks to this length. `grip`:
+/// trim by length, the slot cut (from each slot start) to draw as a
+/// draggable line, and whether it's hot.
+fn trim_cues(
+    painter: &egui::Painter,
+    m: &Map,
+    lanes: Rect,
+    plan: &crate::editor::TrimPlan,
+    off: usize,
+    uniform: Option<usize>,
+    grip: Option<(usize, bool)>,
+) {
     let col = super::strip::SAVE_COLOR;
     for s in &plan.slices {
-        let cut = s.a + s.keep;
-        if cut >= s.b || s.b <= off {
+        if s.b <= off {
             continue;
         }
-        let (xa, xb) = (m.x(cut.saturating_sub(off) as f64), m.x((s.b - off) as f64));
-        if xb < lanes.left() || xa > lanes.right() {
-            continue;
+        let x_at = |f: usize| m.x(f.saturating_sub(off) as f64);
+        let cut = s.a + uniform.unwrap_or(s.keep);
+        if cut < s.b {
+            let (xa, xb) = (x_at(cut), x_at(s.b));
+            if xb >= lanes.left() && xa <= lanes.right() {
+                let r = Rect::from_x_y_ranges(xa.max(lanes.left())..=xb.min(lanes.right()), lanes.y_range());
+                painter.rect_filled(r, 0.0, col.gamma_multiply(0.10));
+                if grip.is_none() && lanes.x_range().contains(xa) {
+                    painter.line_segment([Pos2::new(xa, lanes.top()), Pos2::new(xa, lanes.bottom())], Stroke::new(1.5, col));
+                }
+            }
         }
-        let r = Rect::from_x_y_ranges(xa.max(lanes.left())..=xb.min(lanes.right()), lanes.y_range());
-        painter.rect_filled(r, 0.0, col.gamma_multiply(0.10));
-        if lanes.x_range().contains(xa) {
-            painter.line_segment([Pos2::new(xa, lanes.top()), Pos2::new(xa, lanes.bottom())], Stroke::new(1.5, col));
+        // The slot cut, with a grip at the top: drag any to move them all.
+        if let Some((c, hot)) = grip {
+            let x = x_at(s.a + c);
+            if lanes.x_range().contains(x) {
+                let w = if hot { 2.5 } else { 1.5 };
+                painter.line_segment([Pos2::new(x, lanes.top()), Pos2::new(x, lanes.bottom())], Stroke::new(w, col));
+                let (t, r) = (lanes.top(), if hot { 6.0 } else { 4.5 });
+                painter.add(egui::Shape::convex_polygon(
+                    vec![Pos2::new(x - r, t), Pos2::new(x + r, t), Pos2::new(x, t + r * 1.4)],
+                    col,
+                    Stroke::NONE,
+                ));
+            }
         }
     }
 }

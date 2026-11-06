@@ -89,6 +89,12 @@ pub enum Intent {
     UseAsKit(PathBuf),
     /// Fetch this device file and open it in the editor (after a warning).
     LoadFromDevice(PathBuf),
+    /// Device file: reveal its local copy in Finder / Explorer.
+    RevealLocal(PathBuf),
+    /// Device file: show its local copy in the other pane.
+    ShowLocal(PathBuf),
+    /// Local file: show the device file it was uploaded as (or fetched from).
+    ShowOnDevice(PathBuf),
     /// Make a "<name> Mono" copy of each of these folders, folding stereo
     /// files down each of these ways.
     MonoCopy {
@@ -104,6 +110,8 @@ pub struct TableCtx<'a> {
     pub opened: &'a std::collections::HashSet<PathBuf>,
     /// Files already committed to a destination; drawn with a check badge.
     pub committed: &'a std::collections::HashSet<PathBuf>,
+    /// Device files with a known local copy; drawn with a dot badge.
+    pub links: &'a crate::links::Links,
     /// Files being written by the editor (`None`), or written at this
     /// instant: drawn with a pulse, then a fading flash.
     pub saving: &'a std::collections::HashMap<PathBuf, Option<std::time::Instant>>,
@@ -684,9 +692,35 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
             intents.push(Intent::UseAsKit(entry.path.clone()));
             ui.close();
         }
-        if single && !local && !entry.is_dir && ui.button("Load to editor…").clicked() {
+        let linked = single && !local && !entry.is_dir && cx.links.known(entry.hash, entry.len as u32).is_some();
+        let load_label = if linked { "Load to editor (local copy)" } else { "Load to editor…" };
+        if single && !local && !entry.is_dir && ui.button(load_label).clicked() {
             intents.push(Intent::LoadFromDevice(entry.path.clone()));
             ui.close();
+        }
+        if linked {
+            let reveal = if cfg!(target_os = "macos") { "Reveal local copy in Finder" } else { "Show local copy in Explorer" };
+            if ui.button(reveal).clicked() {
+                intents.push(Intent::RevealLocal(entry.path.clone()));
+                ui.close();
+            }
+            if ui.button("Show local copy in other pane").clicked() {
+                intents.push(Intent::ShowLocal(entry.path.clone()));
+                ui.close();
+            }
+        }
+        if single && local && !entry.is_dir {
+            if let Some(l) = cx.links.for_local(&entry.path) {
+                let tip = format!(
+                    "{} {} (where it was then; it may have moved)",
+                    if l.uploaded { "Uploaded as" } else { "Fetched from" },
+                    l.device
+                );
+                if ui.button("Show on device").on_hover_text(tip).clicked() {
+                    intents.push(Intent::ShowOnDevice(entry.path.clone()));
+                    ui.close();
+                }
+            }
         }
         // Next to the row, i.e. in the folder the row sits in.
         if let Some(parent) = entry.path.parent() {
@@ -844,6 +878,13 @@ fn draw_cells(
             stroke,
         );
         x = left + h;
+    }
+    // Device file we have a local copy of: loads instantly, no fetch.
+    if device && !entry.is_dir && cx.links.known(entry.hash, entry.len as u32).is_some() {
+        let r = 3.0;
+        let c = egui::pos2(x + gap + r, inner.center().y);
+        ui.painter().circle_filled(c, r, crate::ui::theme::ACCENT_BRIGHT);
+        x = c.x + r;
     }
 
     // Name: white (gray once opened in the editor), one point larger than
@@ -1117,6 +1158,7 @@ mod tests {
             modified: None,
             is_audio: !d,
             empty: false,
+            hash: 0,
         };
         t.accept_listing(g, Ok(vec![e("folder", true), e("kick.wav", false)]));
         t.selected.clear();
@@ -1145,6 +1187,7 @@ mod tests {
                         preview: &preview,
                         opened: &Default::default(),
                         committed: &Default::default(),
+                        links: &Default::default(),
                         saving: &Default::default(),
                         pane_focused: true,
                         clipboard: None,

@@ -251,6 +251,13 @@ pub struct App {
     /// The centre column shows the Elk Sample Order view instead of the editor.
     elk_mode: bool,
     elk: crate::ui::elk_view::ElkState,
+    /// Device files we have a local copy of (see [`crate::links`]).
+    links: crate::links::Links,
+    /// Last device file opened through a local copy or a fetch:
+    /// `(local file, device path)`, for "send to device as".
+    device_origin: Option<(PathBuf, PathBuf)>,
+    /// Waiting on the "send to device as" question.
+    send_back: Option<dialogs::SendBack>,
 }
 
 impl App {
@@ -398,6 +405,9 @@ impl App {
             allow_close: false,
             close_when_idle: false,
             build_watch: relaunch::BuildWatch::new(),
+            links: crate::links::Links::load(),
+            device_origin: None,
+            send_back: None,
             relaunch: false,
             elk_mode: false,
             elk: Default::default(),
@@ -759,6 +769,23 @@ impl eframe::App for App {
             }
         }
 
+        if self.send_back.is_some() {
+            let (taken, exists) = {
+                let f = self.send_back.as_ref().expect("checked above");
+                let name = f.name.trim();
+                (
+                    !name.is_empty() && self.device_has(&f.dir.join(name)),
+                    f.local_dir.as_ref().is_some_and(|d| d.join(format!("{name}.wav")).exists()),
+                )
+            };
+            let f = self.send_back.as_mut().expect("checked above");
+            if let Some(ok) = dialogs::send_back(ui.ctx(), f, taken, exists) {
+                let f = self.send_back.take().expect("checked above");
+                if ok {
+                    self.start_send_back(f);
+                }
+            }
+        }
         if let Some(n) = &mut self.export_naming {
             if let Some(ok) = dialogs::name_export(ui.ctx(), &mut n.name, &n.dir, &n.taken) {
                 let n = self.export_naming.take().expect("checked above");

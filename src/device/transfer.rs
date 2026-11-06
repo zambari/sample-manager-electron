@@ -253,6 +253,7 @@ impl Worker {
         self.progress(&name, 0);
         let mut s =
             crate::audio::decode::decode(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let folded = mono.is_some() && s.channels.len() > 1;
         if let Some(fold) = mono.filter(|_| s.channels.len() > 1) {
             let one = (0..s.frames()).map(|i| fold.at(&s.channels, i)).collect();
             s.channels = vec![one];
@@ -280,8 +281,20 @@ impl Worker {
             return Ok(());
         }
         self.write_raw(&target, &raw, false, Some(worth), cancel)?;
+        // The device's hash for what landed, read back from its folder.
+        if let Ok(e) = self.stat(&target) {
+            self.note_link(e.hash, e.size, &target, src, true, folded);
+        }
         self.file_done();
         Ok(())
+    }
+
+    /// Remember that device file `device` matches local file `local`.
+    fn note_link(&mut self, hash: u32, size: u32, device: &Path, local: &Path, uploaded: bool, folded: bool) {
+        if let Some(l) = crate::links::Link::new(hash, size, dev_str(device), local, uploaded, folded) {
+            crate::links::append(&l);
+            self.em.send(Ev::Linked(l));
+        }
     }
 
     /// `half`: this write follows a read of the same bytes (a device-to-device
@@ -480,6 +493,7 @@ impl Worker {
         let raw = self.read_raw(src, false, cancel)?;
         std::fs::create_dir_all(dst_dir).map_err(|e| format!("{}: {e}", dst_dir.display()))?;
         sample::write_wav(&raw, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+        self.note_link(entry.hash, entry.size, src, &target, false, false);
         self.file_done();
         Ok(())
     }

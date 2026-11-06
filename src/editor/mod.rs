@@ -56,6 +56,9 @@ pub struct Prefs {
     pub tail_db: f32,
     /// Fade after each cut when trimming kit tails, ms.
     pub trim_fade_ms: f32,
+    /// Grid kits: trim by level (each slice where it drops below
+    /// `tail_db`) instead of by slot length.
+    pub grid_trim_by_level: bool,
 }
 
 /// Visibility of each editor panel, toggled from the header row.
@@ -114,6 +117,7 @@ impl Default for Prefs {
             panels: Panels::default(),
             tail_db: -50.0,
             trim_fade_ms: 20.0,
+            grid_trim_by_level: false,
         }
     }
 }
@@ -268,6 +272,8 @@ pub enum Drag {
     /// Shape a slice's fade-out: the slice, the fade's fixed end (its
     /// start for a tail fade, else its end) and whether it's a tail fade.
     Fade(usize, usize, bool),
+    /// Grid trim by length: drag the slot cut, grabbed in this slot.
+    SlotCut(usize),
 }
 
 /// Visible window: first frame at the left edge and frames per pixel.
@@ -317,6 +323,9 @@ pub struct Editor {
     names: Vec<String>,
     /// Fade-outs shaped on the wave but not applied yet, by slice.
     fades: HashMap<usize, fade::FadeShape>,
+    /// Grid kit, trim by length: the slot length to cut every slot to,
+    /// in frames from the slot start. `None` is the slot as it is.
+    pub slot_cut: Option<usize>,
     /// Where each slice decays past each threshold, for the tail trim.
     decay: std::cell::RefCell<Option<Arc<trim::DecayMap>>>,
     /// Kit laid out on this many equal slots (see [`grid`]), or free.
@@ -377,6 +386,7 @@ impl Editor {
             markers: Vec::new(),
             names: Vec::new(),
             fades: HashMap::new(),
+            slot_cut: None,
             decay: Default::default(),
             grid: None,
             auto_grid: false,
@@ -612,6 +622,7 @@ impl Editor {
     fn install(&mut self, loaded: Loaded, cues: Vec<usize>, names: Vec<String>) {
         let frames = loaded.sample.frames();
         self.fades.clear();
+        self.slot_cut = None;
         self.markers = if self.is_kit {
             cues.into_iter().filter(|&m| m > 0 && m < frames).collect()
         } else {

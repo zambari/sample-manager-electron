@@ -570,3 +570,100 @@ pub fn name_kit(
     });
     answer
 }
+
+/// "Send to device as…": an edited sample goes up as a new file next to the
+/// device file it came from.
+pub struct SendBack {
+    /// Device folder it goes into.
+    pub dir: std::path::PathBuf,
+    /// The device file it came from, for the message.
+    pub from: String,
+    /// New name, without extension.
+    pub name: String,
+    /// Folder of the local original, when there is one to save beside.
+    pub local_dir: Option<std::path::PathBuf>,
+    pub keep_local: bool,
+}
+
+/// `taken_device`: a device file of that name is listed in `dir`.
+/// `local_exists`: the local copy would overwrite a file.
+pub fn send_back(
+    ctx: &Context,
+    f: &mut SendBack,
+    taken_device: bool,
+    local_exists: bool,
+) -> Option<bool> {
+    let mut answer = None;
+    let clean = f.name.trim().to_owned();
+    let valid = !clean.is_empty() && !clean.contains(['/', '\\']);
+    Modal::new(Id::unique("send_back_modal")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("Send to device as");
+        ui.add_space(6.0);
+        ui.label(format!(
+            "Uploads what you hear as a new file in {}, next to \"{}\".",
+            crate::device::dev_str(&f.dir),
+            f.from
+        ));
+        ui.label(
+            RichText::new(
+                "The original stays as it is: projects find samples by their contents, \
+                 so replacing it would leave them without the sample.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+        let id = Id::unique("send_back_field");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut f.name)
+                .id(id)
+                .desired_width(ui.available_width()),
+        );
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
+            answer = Some(true);
+        }
+        if taken_device {
+            ui.label(
+                RichText::new("That name is taken on the device: a number gets added.")
+                    .color(ui.visuals().warn_fg_color),
+            );
+        }
+        if let Some(dir) = &f.local_dir {
+            ui.add_space(6.0);
+            ui.checkbox(&mut f.keep_local, "Also save it next to the original")
+                .on_hover_text(dir.display().to_string());
+            if f.keep_local && local_exists {
+                ui.label(
+                    RichText::new(format!("{clean}.wav exists there and will be overwritten."))
+                        .color(ui.visuals().warn_fg_color),
+                );
+            }
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(valid, egui::Button::new("⬆ Send"))
+                    .on_hover_text("↩")
+                    .clicked()
+                {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(false);
+        } else if answer == Some(true) {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        }
+    });
+    answer
+}

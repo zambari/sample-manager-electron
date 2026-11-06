@@ -195,6 +195,7 @@ impl Editor {
         self.splice(0, total, &chans);
         self.markers = (1..n).map(|i| i * len).collect();
         self.names = names;
+        self.slot_cut = None;
         self.grid = Some(n);
         self.view.fit_pending = true;
         Some(len)

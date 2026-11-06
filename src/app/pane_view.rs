@@ -142,6 +142,7 @@ impl App {
             let opened = &self.opened;
             let committed = &self.committed;
             let saving = &self.saving;
+            let links = &self.links;
             // Borrow the pane field directly rather than via `pane_mut`, so
             // the borrow checker can see it is disjoint from `sizes`/`preview`.
             let pane = match role {
@@ -158,6 +159,7 @@ impl App {
                     opened,
                     committed,
                     saving,
+                    links,
                     pane_focused: focused,
                     clipboard: self.clipboard.as_ref(),
                     other_folder,
@@ -191,7 +193,11 @@ impl App {
                     if is_dir {
                         self.open_in(role, p);
                     } else if on_dev {
-                        self.ask_device_load(p);
+                        // A device file we have locally plays like a local one.
+                        match self.linked_local(&p) {
+                            Some(local) => self.preview_toggle(&local),
+                            None => self.ask_device_load(p),
+                        }
                     } else {
                         self.preview_toggle(&p);
                     }
@@ -258,6 +264,26 @@ impl App {
                 }
                 Intent::NewFolderWith { dir, paths } => self.new_folder_with(role, dir, paths),
                 Intent::LoadFromDevice(p) => self.ask_device_load(p),
+                Intent::RevealLocal(p) => {
+                    if let Some(local) = self.local_copy_of(&p) {
+                        reveal(&local);
+                    }
+                }
+                Intent::ShowLocal(p) => {
+                    if let Some(local) = self.local_copy_of(&p) {
+                        self.show_file(role.other(), false, &local);
+                    }
+                }
+                Intent::ShowOnDevice(p) => {
+                    if let Some(dev) = self.links.for_local(&p).map(|l| PathBuf::from(&l.device)) {
+                        // Prefer a device tab already open, in either pane.
+                        let role = [role.other(), role]
+                            .into_iter()
+                            .find(|&r| self.pane(r).tabs.iter().any(|t| t.device))
+                            .unwrap_or(role.other());
+                        self.show_file(role, true, &dev);
+                    }
+                }
                 Intent::MonoCopy { dirs, folds } => {
                     for d in dirs {
                         self.mono_copy(d, folds.clone());
@@ -579,4 +605,51 @@ impl App {
 /// ⌥ or Ctrl held: a drop copies instead of moving.
 fn copy_held(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.modifiers.alt || i.modifiers.ctrl)
+}
+
+impl App {
+    /// The local file a device file was linked to, if it is still on disk
+    /// (edited since or not). Says why not in the status bar.
+    pub(super) fn local_copy_of(&mut self, device_path: &Path) -> Option<PathBuf> {
+        let e = self.device_entry(device_path)?;
+        let local = self.links.known(e.hash, e.len as u32).map(|l| l.local.clone());
+        match local {
+            Some(p) if p.exists() => Some(p),
+            Some(p) => {
+                self.status = format!("{} is no longer there", p.display());
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Open `file`'s folder in a `device` (or local) tab of `role` and put
+    /// the cursor on it: the active tab when it's the right kind, else
+    /// another one, else a new one.
+    pub(super) fn show_file(&mut self, role: Role, device: bool, file: &Path) {
+        let Some(dir) = file.parent().map(Path::to_path_buf) else { return };
+        let pane = self.pane(role);
+        let idx = if pane.active_tab().device == device {
+            Some(pane.active)
+        } else {
+            pane.tabs.iter().position(|t| t.device == device)
+        };
+        match idx {
+            Some(i) => self.pane_mut(role).active = i,
+            None => {
+                let id = self.new_tab_id();
+                let tab = if device {
+                    DirTab::new_device(id, dir.clone())
+                } else {
+                    DirTab::new(id, dir.clone())
+                };
+                self.pane_mut(role).add_tab(tab);
+            }
+        }
+        let tab = self.pane_mut(role).active_tab_mut();
+        tab.navigate_to(dir);
+        tab.selected.insert(file.to_path_buf());
+        let i = self.pane(role).active;
+        self.reload(role, i);
+    }
 }

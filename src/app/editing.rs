@@ -92,11 +92,10 @@ impl App {
 
     /// Auto-load whatever the file cursor is on, when it changes.
     pub(super) fn follow_cursor(&mut self) {
-        let cur = self
-            .pane(self.focused)
-            .active_tab()
+        let tab = self.pane(self.focused).active_tab();
+        let cur = tab
             .cursor_entry()
-            .filter(|e| e.is_audio)
+            .filter(|e| self.loadable(tab, e))
             .map(|e| e.path.clone());
         if self.hold_cursor_load {
             // Wait for the restored listing to settle, then adopt its cursor
@@ -119,29 +118,32 @@ impl App {
         self.last_cursor = cur.clone();
         if let Some(p) = cur {
             if self.editor.prefs.auto_load {
-                self.audition(&p, self.editor.prefs.auto_play);
+                self.audition_row(&p, self.editor.prefs.auto_play);
             }
         }
     }
 
     /// Step the file cursor to the next audio file in `dir` direction.
     pub(super) fn step_file(&mut self, dir: isize) {
-        let tab = self.pane_mut(self.focused).active_tab_mut();
-        for _ in 0..tab.entries.len() {
+        let n = self.pane(self.focused).active_tab().entries.len();
+        for _ in 0..n {
+            let tab = self.pane_mut(self.focused).active_tab_mut();
             let before = tab.cursor;
             tab.move_cursor(dir, false);
-            if tab.cursor == before || tab.cursor_entry().is_some_and(|e| e.is_audio) {
+            let tab = self.pane(self.focused).active_tab();
+            if tab.cursor == before || tab.cursor_entry().is_some_and(|e| self.loadable(tab, e)) {
                 break;
             }
         }
+        let tab = self.pane(self.focused).active_tab();
         let path = tab
             .cursor_entry()
-            .filter(|e| e.is_audio)
+            .filter(|e| self.loadable(tab, e))
             .map(|e| e.path.clone());
         if let Some(p) = path {
             // Explicit request: load even when auto-load is off.
             self.last_cursor = Some(p.clone());
-            self.audition(&p, self.editor.prefs.auto_play);
+            self.audition_row(&p, self.editor.prefs.auto_play);
         }
     }
 
@@ -432,14 +434,123 @@ impl App {
         }
     }
 
-    /// Ask before fetching a device file for the editor: it's slow.
+    /// The local copy of device file `path`, if we know one and it hasn't
+    /// changed since. Says so in the status bar. Touches the disk.
+    pub(super) fn linked_local(&mut self, path: &Path) -> Option<PathBuf> {
+        let e = self.device_entry(path)?;
+        let l = self.links.local(e.hash, e.len as u32)?;
+        let local = l.local.clone();
+        self.status = link_note(l);
+        self.device_origin = Some((local.clone(), path.to_path_buf()));
+        Some(local)
+    }
+
+    /// Where on the device the sample in the editor came from (or was sent
+    /// to): the device file it was opened through, else the newest link.
+    pub(super) fn device_home(&self) -> Option<PathBuf> {
+        let p = self.browser().path()?;
+        match &self.device_origin {
+            Some((local, dev)) if local == p => Some(dev.clone()),
+            _ => self.links.for_local(p).map(|l| PathBuf::from(&l.device)),
+        }
+    }
+
+    /// Open the "send to device as" question for the editor's sample.
+    pub(super) fn begin_send_back(&mut self) {
+        if self.showing_kit || self.editor.current.is_none() {
+            return;
+        }
+        let (Some(home), Some(src)) = (self.device_home(), self.editor.path().map(Path::to_path_buf)) else {
+            return;
+        };
+        let dir = home.parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+        let from = home
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Beside the local original, unless it's one of our temp downloads.
+        let local_dir = src
+            .parent()
+            .filter(|d| !d.starts_with(std::env::temp_dir()) && !d.starts_with("/private/var/folders"))
+            .map(Path::to_path_buf);
+        let free = |c: &str| {
+            !self.device_has(&dir.join(c))
+                && local_dir.as_ref().is_none_or(|d| !d.join(format!("{c}.wav")).exists())
+        };
+        let name = next_name(&from, free);
+        self.send_back = Some(dialogs::SendBack {
+            dir,
+            from,
+            name,
+            keep_local: local_dir.is_some(),
+            local_dir,
+        });
+    }
+
+    /// Render the editor and upload it under the name picked.
+    pub(super) fn start_send_back(&mut self, f: dialogs::SendBack) {
+        let name = f.name.trim().to_owned();
+        if name.is_empty() || self.editor.exporting {
+            return;
+        }
+        let staged = match f.local_dir.filter(|_| f.keep_local) {
+            Some(d) => d.join(format!("{name}.wav")),
+            None => {
+                let tmp = std::env::temp_dir().join("sample_manager_upload");
+                if let Err(e) = std::fs::create_dir_all(&tmp) {
+                    self.errors.push(format!("{}: {e}", tmp.display()));
+                    return;
+                }
+                tmp.join(format!("{name}.wav"))
+            }
+        };
+        self.status = format!("Rendering {name} for the device…");
+        self.staged_upload = Some(StagedUpload {
+            staged: staged.clone(),
+            dest_dir: f.dir,
+            // Never over an existing file: a taken name gets a number.
+            policy: Policy::KeepBoth,
+        });
+        let mono = self.editor.fold();
+        self.editor.export(staged, mono);
+    }
+
+    /// Is the file under `tab`'s cursor one to load: audio on disk, or a
+    /// device file we have a local copy of. Cheap, no disk access.
+    fn loadable(&self, tab: &crate::tab::DirTab, e: &fs_model::Entry) -> bool {
+        if tab.device {
+            !e.is_dir && self.links.known(e.hash, e.len as u32).is_some()
+        } else {
+            e.is_audio
+        }
+    }
+
+    /// Load the file at `p` in the focused pane: a device file through its
+    /// local copy.
+    fn audition_row(&mut self, p: &Path, play: bool) {
+        if !self.pane(self.focused).active_tab().device {
+            self.audition(p, play);
+        } else if let Some(local) = self.linked_local(p) {
+            self.audition(&local, play);
+        }
+    }
+
+    /// Ask before fetching a device file for the editor: it's slow. One we
+    /// have a local copy of opens right away instead.
     pub(super) fn ask_device_load(&mut self, path: PathBuf) {
+        if let Some(local) = self.linked_local(&path) {
+            let note = std::mem::take(&mut self.status);
+            self.load_into_editor(&local);
+            self.status = note;
+            return;
+        }
         let bytes = self.device_entry(&path).map_or(0, |e| e.len);
         self.device_load_pending = Some((path, bytes));
     }
 
     /// Download a device file to a temp folder; it opens in the editor when done.
     pub(super) fn start_device_load(&mut self, src: PathBuf, bytes: u64) {
+        let src_path = src.clone();
         // Mirror the device path, so same-named files in different folders
         // don't overwrite each other.
         let rel = src
@@ -460,6 +571,7 @@ impl App {
             total_bytes: bytes,
         };
         let id = self.run_device(task, &format!("Loading {name}"), 1, bytes);
+        self.device_origin = Some((local.clone(), src_path));
         self.device_load = Some((id, local));
         self.status = format!("Fetching {name} from the device…");
     }
@@ -532,6 +644,11 @@ impl App {
                     if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) =>
                 {
                     let s = self.staged_upload.take().expect("checked above");
+                    // Sent back with a copy kept beside the original: show it.
+                    if let Some(d) = s.staged.parent().filter(|d| !d.starts_with(std::env::temp_dir())) {
+                        let d = d.to_path_buf();
+                        self.reload_showing(&d, false);
+                    }
                     let leave = self.leave_after_save.take();
                     let task = device::Task::Transfer {
                         dir: device::Dir::Upload,
@@ -611,6 +728,7 @@ impl App {
                 .path()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned()),
+            device_home: self.device_home().map(|p| device::dev_str(&p)),
         };
         let intents = editor_view::show(
             ui,
@@ -662,6 +780,7 @@ impl App {
                 EdIntent::CloseKit => self.close_kit(),
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
                 EdIntent::RenameKit(name) => self.rename_kit(&name),
+                EdIntent::SendToDevice => self.begin_send_back(),
             }
         }
     }
@@ -685,4 +804,32 @@ fn with_slot_count(path: &Path, n: usize) -> PathBuf {
         .unwrap_or_default();
     let base = crate::editor::slot_prefix(&stem).map_or(stem.trim_start(), |(_, rest)| rest);
     path.with_file_name(format!("[{n}] {base}.wav"))
+}
+
+/// Status line for opening a device file through its local copy.
+pub(super) fn link_note(l: &crate::links::Link) -> String {
+    let name = l.local.file_name().unwrap_or_default().to_string_lossy();
+    if l.uploaded {
+        let fold = if l.folded {
+            " (the device has it folded to mono)"
+        } else {
+            ""
+        };
+        format!("{name}: opened the local file it was uploaded from{fold}, no fetch needed")
+    } else {
+        format!("{name}: opened the copy fetched from the device earlier")
+    }
+}
+
+/// `name 2`, or one past a number already at the end (`kick 3` → `kick 4`),
+/// the first that `free` accepts.
+fn next_name(name: &str, free: impl Fn(&str) -> bool) -> String {
+    let (base, start) = match name.rsplit_once(' ') {
+        Some((b, n)) if !b.is_empty() && n.parse::<u32>().is_ok() => (b, n.parse::<u32>().unwrap_or(1) + 1),
+        _ => (name, 2),
+    };
+    (start..start + 10_000)
+        .map(|n| format!("{base} {n}"))
+        .find(|c| free(c))
+        .unwrap_or_else(|| format!("{base} edit"))
 }

@@ -83,6 +83,8 @@ pub enum Ev {
     Elk(crate::device::ElkEv),
     /// A summary to show in place of "Done" when `job` finishes.
     Note { job: u64, text: String },
+    /// A device file and a local file now known to hold the same sample.
+    Linked(crate::links::Link),
 }
 
 /// Files with identical contents: `keep` has the shortest name.

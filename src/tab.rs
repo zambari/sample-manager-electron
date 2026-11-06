@@ -510,6 +510,7 @@ mod tests {
             is_dir,
             len: 0,
             modified: None,
+            hash: 0,
         }
     }
 

@@ -602,6 +602,19 @@ pub(super) fn toolbar(
                     out.push(EdIntent::SaveInPlace);
                 }
             }
+            if let Some(home) = slots.device_home.as_ref().filter(|_| !showing_kit) {
+                let tip = format!(
+                    "Upload what you hear as a new file next to {home} on the device, \
+                     with a name you pick. The original stays."
+                );
+                if ui
+                    .add_enabled(has && !ed.exporting, egui::Button::new("⬆ To device as…"))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    out.push(EdIntent::SendToDevice);
+                }
+            }
             if !showing_kit
                 && ui
                     .add_enabled(ed.current.is_some(), egui::Button::new("+ Slice → Kit"))

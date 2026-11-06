@@ -154,6 +154,70 @@ impl Editor {
         })
     }
 
+    /// Grid kit trimmed by slot length (rather than by level).
+    pub fn trims_by_length(&self) -> bool {
+        self.is_kit && self.grid.is_some() && !self.prefs.grid_trim_by_level
+    }
+
+    /// Grid kit: the slot length now and each slot's sound length (up to
+    /// its last non-zero frame), in frames.
+    pub fn slot_sounds(&self) -> Option<(usize, Vec<usize>)> {
+        let n = self.grid?;
+        let map = self.decay_map()?;
+        let len = self.full.as_ref()?.sample.frames() / n;
+        Some((len, map.slices.iter().map(|d| d.end - d.a).collect()))
+    }
+
+    /// The slot length a length trim cuts to, in frames.
+    pub fn slot_cut_len(&self) -> Option<usize> {
+        let (len, _) = self.slot_sounds()?;
+        Some(self.slot_cut.map_or(len, |c| c.clamp(1, len)))
+    }
+
+    /// The plan the Trim button applies: by slot length on a grid (unless
+    /// level is picked), else by level.
+    pub fn active_trim_plan(&self) -> Option<TrimPlan> {
+        if self.trims_by_length() {
+            self.length_plan(self.slot_cut_len()?)
+        } else {
+            self.trim_plan(self.prefs.tail_db)
+        }
+    }
+
+    /// Grid kit: every slot cut to `cut` frames. A sound that runs past
+    /// it fades out over its last stretch before the cut.
+    pub fn length_plan(&self, cut: usize) -> Option<TrimPlan> {
+        let n = self.grid?;
+        let map = self.decay_map()?;
+        let full = self.full.as_ref()?;
+        let total = full.sample.frames();
+        let rate = full.sample.rate.max(1) as f64;
+        let cut = cut.max(1);
+        let def = ((self.prefs.trim_fade_ms.max(0.0) as f64 / 1000.0 * rate) as usize).max(1);
+        let slices: Vec<TrimSlice> = map
+            .slices
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let len = d.end - d.a;
+                let fade = (len > cut).then(|| {
+                    let shape = self.fade_shape(i);
+                    let l = shape.map_or(def, |sh| sh.len).clamp(1, (cut * 9 / 10).max(1));
+                    FadeEnd {
+                        slice: i,
+                        start: d.a + cut - l,
+                        end: d.a + cut,
+                        k: shape.map_or(CUT_K, |sh| sh.k),
+                        tail: false,
+                    }
+                });
+                TrimSlice { a: d.a, b: d.b, keep: len.min(cut), fade }
+            })
+            .collect();
+        let new_total = slices.iter().map(|s| s.keep).max().unwrap_or(0).max(1) * n;
+        Some(TrimPlan { slices, total, new_total })
+    }
+
     /// What trimming at `db` would leave, with the fade each slice gets.
     pub fn trim_plan(&self, db: f32) -> Option<TrimPlan> {
         let map = self.decay_map()?;
@@ -220,7 +284,7 @@ impl Editor {
     /// Returns the kit length before and after, in frames, and how many
     /// fades went in.
     pub fn trim_tails(&mut self) -> Option<(usize, usize, usize)> {
-        let plan = self.trim_plan(self.prefs.tail_db)?;
+        let plan = self.active_trim_plan()?;
         let nfades = plan.fades().len();
         if plan.saved() == 0 && nfades == 0 {
             return None;

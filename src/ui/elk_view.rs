@@ -21,6 +21,12 @@ pub struct ElkState {
     pub order: Vec<u16>,
     /// +Drive paths by `(hash, length)`.
     pub names: HashMap<(u32, u32), String>,
+    /// Pool files we have a local copy of (uploaded from it, or fetched to
+    /// it), by `(hash, length)`: `(device name when linked, local path,
+    /// is the original)`. Filled by the app.
+    pub linked: HashMap<(u32, u32), (String, std::path::PathBuf, bool)>,
+    /// A row asked for its local copy: `(key, open in editor)`.
+    want_local: Option<((u32, u32), bool)>,
     pub bank: [usize; 2],
     /// `(label, done, total)` while the device works.
     pub busy: Option<(String, usize, usize)>,
@@ -50,6 +56,9 @@ pub enum ElkIntent {
     ListProjects,
     Read,
     Push,
+    /// Play the local copy of this pool file (`false`), or open it in the
+    /// editor (`true`).
+    Local((u32, u32), bool),
 }
 
 impl ElkState {
@@ -363,6 +372,7 @@ enum RowAct {
     CloseGap(usize),
     MoveHere(usize),
     Nudge(i32),
+    Local((u32, u32), bool),
 }
 
 pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
@@ -471,6 +481,9 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
         });
     }
 
+    if let Some((k, open)) = st.want_local.take() {
+        out.push(ElkIntent::Local(k, open));
+    }
     if st.confirm_close {
         if let Some(yes) = confirm_close(ui.ctx(), st.changed()) {
             st.confirm_close = false;
@@ -701,6 +714,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
             RowAct::CloseGap(s) => st.close_gap(s),
             RowAct::MoveHere(s) => st.move_sel_to(s),
             RowAct::Nudge(d) => st.nudge(d),
+            RowAct::Local(k, open) => st.want_local = Some((k, open)),
         }
     }
 }
@@ -770,11 +784,14 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     } else if e.is_empty() {
         "-".to_owned()
     } else {
-        match st.names.get(&e.key()) {
-            Some(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
-            None => format!("#{:08x}", e.hash),
+        match (st.names.get(&e.key()), st.linked.get(&e.key())) {
+            (Some(path), _) => path.rsplit('/').next().unwrap_or(path).to_owned(),
+            // Known from our own transfers while the device lookup runs.
+            (None, Some((name, ..))) => name.clone(),
+            (None, None) => format!("#{:08x}", e.hash),
         }
     };
+    let linked = (!off && !e.is_empty()).then(|| st.linked.get(&e.key())).flatten();
     let uses = p.uses[from];
     let size = if e.is_empty() || off {
         String::new()
@@ -784,6 +801,10 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     let size_w = 84.0;
     let uses_w = 44.0;
     let name_x = rect.left() + 8.0 + label_w;
+    // A local copy is known: a small dot before the name.
+    if linked.is_some() {
+        painter.circle_filled(egui::pos2(name_x - 7.0, y), 2.5, if selected { OLED_BG } else { theme::ACCENT_BRIGHT });
+    }
     let clip = egui::Rect::from_min_max(
         egui::pos2(name_x, rect.top()),
         egui::pos2(rect.right() - size_w - uses_w, rect.bottom()),
@@ -817,6 +838,9 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     }
     if resp.clicked() {
         acts.push(RowAct::Click(slot, ui.input(|i| i.modifiers)));
+    }
+    if resp.double_clicked() && linked.is_some() {
+        acts.push(RowAct::Local(e.key(), false));
     }
     if resp.drag_started() {
         acts.push(RowAct::DragStart(slot));
@@ -865,6 +889,21 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
 
     let n_sel = st.sel.len();
     resp.context_menu(|ui| {
+        if linked.is_some() {
+            if ui.button("Play local copy  (double-click)").clicked() {
+                acts.push(RowAct::Local(e.key(), false));
+                ui.close();
+            }
+            if ui
+                .button("Open local copy in editor")
+                .on_hover_text("Leaves this view; nothing is fetched from the device")
+                .clicked()
+            {
+                acts.push(RowAct::Local(e.key(), true));
+                ui.close();
+            }
+            ui.separator();
+        }
         if ui
             .button("Insert empty slot here")
             .on_hover_text(
@@ -911,6 +950,13 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
             .get(&e.key())
             .cloned()
             .unwrap_or_else(|| "(not found on +Drive)".into());
+        if let Some((_, local, original)) = linked {
+            tip.push_str(&format!(
+                "\n{}: {}\n(double-click to play it)",
+                if *original { "uploaded from" } else { "fetched to" },
+                local.display()
+            ));
+        }
         tip.push_str(&format!("\npool slot {slot}"));
         if moved {
             tip.push_str(&format!(", was {}", st.label(from)));

@@ -18,6 +18,7 @@ impl App {
             || self.kit_naming.is_some()
             || self.save_scope_pending
             || self.export_naming.is_some()
+            || self.send_back.is_some()
         {
             return;
         }

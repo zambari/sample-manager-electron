@@ -165,6 +165,8 @@ impl<'a> Reader<'a> {
 /// One row of a directory listing.
 #[derive(Clone, Debug)]
 pub struct DirEntry {
+    /// The +Drive's content hash (the one project sample pools refer to).
+    pub hash: u32,
     pub size: u32,
     pub is_dir: bool,
     pub name: String,
@@ -174,13 +176,14 @@ pub fn parse_listing(args: &[u8]) -> Result<Vec<DirEntry>, String> {
     let mut r = Reader::new(args);
     let mut out = Vec::new();
     while !r.is_empty() {
-        let _hash = r.u32()?;
+        let hash = r.u32()?;
         let size = r.u32()?;
         let _locked = r.bool()?;
         let kind = r.u8()?;
         let name = r.str()?;
         if !name.is_empty() {
             out.push(DirEntry {
+                hash,
                 size,
                 is_dir: kind == b'D',
                 name,

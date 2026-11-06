@@ -104,6 +104,8 @@ pub struct Entry {
     pub is_audio: bool,
     /// A folder with nothing in it (dotfiles like .DS_Store don't count).
     pub empty: bool,
+    /// Device files: the +Drive's content hash. 0 for local files.
+    pub hash: u32,
 }
 
 impl Entry {
@@ -126,6 +128,7 @@ impl Entry {
             modified: md.modified().ok(),
             is_audio: !is_dir && AUDIO_EXTS.contains(&ext.as_str()),
             empty,
+            hash: 0,
         })
     }
 }
@@ -316,6 +319,7 @@ mod tests {
             modified: None,
             is_audio: false,
             empty: false,
+            hash: 0,
         };
         let mut v = vec![
             mk("zed.wav", false),
