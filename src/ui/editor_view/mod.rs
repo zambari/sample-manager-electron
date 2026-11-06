@@ -27,7 +27,7 @@ use levels::stats_table;
 use overview::overview;
 use scope::scope;
 use trim::trim_section;
-use toolbar::{header, positions, slot_bar, toolbar};
+use toolbar::{file_row, header, positions, slot_bar, toolbar};
 use waveform::{draw_lanes, draw_ruler, marker, slice_marks, waveform};
 
 pub struct PlayView {
@@ -165,6 +165,8 @@ pub fn show(
     let mut reserved = 0.0;
     // The wave is always shown.
     reserved += sec;
+    // File row (Save / Export).
+    reserved += ui.spacing().interact_size.y + sec;
     if pn.nums {
         reserved += ui.spacing().interact_size.y + sec;
     }
@@ -197,6 +199,11 @@ pub fn show(
     };
     reserved += help_h;
 
+    // File row sits right above the last of wave / scalpel.
+    if !pn.scalpel {
+        file_row(ui, ed, can_export, slots, &mut out);
+    }
+
     section_header(ui, "Wave");
     let wave_h = (avail.y - reserved - 12.0).max(80.0);
     let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
@@ -208,6 +215,7 @@ pub fn show(
     }
 
     if pn.scalpel {
+        file_row(ui, ed, can_export, slots, &mut out);
         section_header(ui, "Scalpel");
         let (srect, _) = ui.allocate_exact_size(vec2(avail.x, SCOPE_H), Sense::hover());
         scope(ui, ed, &pv, srect, &mut out);

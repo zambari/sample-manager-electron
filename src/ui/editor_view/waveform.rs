@@ -433,11 +433,30 @@ pub(super) fn draw_lanes(
         vis.weak_text_color()
     };
 
+    // Which channels make it into a mono export. Fold::Right takes the last
+    // channel when there is only one, matching Fold::at.
+    let fold = ed.fold();
+    let kept = |c: usize| match fold {
+        Some(Fold::Left) => c == 0,
+        Some(Fold::Right) => c == 1.min(n_ch - 1),
+        _ => true,
+    };
+
     for (c, (data, peaks)) in cur.sample.channels.iter().zip(cur.peaks.iter()).enumerate() {
         let lane = Rect::from_min_size(
             Pos2::new(lanes.left(), lanes.top() + c as f32 * lane_h),
             vec2(lanes.width(), lane_h),
         );
+        // A channel the mono fold throws away recedes into the background.
+        let (wave_in, wave_out, clip_col) = if kept(c) {
+            (wave_in, wave_out, CLIP_COLOR)
+        } else {
+            (
+                wave_in.gamma_multiply(0.22),
+                wave_out.gamma_multiply(0.35),
+                CLIP_COLOR.gamma_multiply(0.3),
+            )
+        };
         let mid = lane.center().y;
         let half = lane_h * 0.46;
         let y = |s: f32| (mid - s * gain * half).clamp(lane.top(), lane.bottom());
@@ -480,7 +499,7 @@ pub(super) fn draw_lanes(
                 let inside = f1 > ed.sel.0 && f0 < ed.sel.1;
                 let clip = hi * gain >= 1.0 || lo * gain <= -1.0;
                 let col = if clip && inside {
-                    CLIP_COLOR
+                    clip_col
                 } else if inside {
                     wave_in
                 } else {
@@ -509,7 +528,7 @@ pub(super) fn draw_lanes(
                 let base = if !inside(f) {
                     wave_out
                 } else if s.abs() * gain >= 1.0 {
-                    CLIP_COLOR
+                    clip_col
                 } else {
                     wave_in
                 };
@@ -576,6 +595,130 @@ pub(super) fn draw_lanes(
                 }
             }
         }
+    }
+
+    if let Some(fold) = fold {
+        mono_cues(painter, ed, m, lanes, lane_h, n_ch, fold, &kept, vis);
+    }
+}
+
+/// What a mono fold does to the lanes: a slim bar beside each channel that
+/// ends up in the export, a quiet note on the one that's dropped, and for a
+/// mix-down a warm band on the seam showing (heavily exaggerated) how much
+/// level L+R lose to phase cancellation at each point.
+#[allow(clippy::too_many_arguments)]
+fn mono_cues(
+    painter: &egui::Painter,
+    ed: &Editor,
+    m: &Map,
+    lanes: Rect,
+    lane_h: f32,
+    n_ch: usize,
+    fold: Fold,
+    kept: &dyn Fn(usize) -> bool,
+    vis: &egui::Visuals,
+) {
+    let Some(cur) = &ed.current else { return };
+    let lane = |c: usize| {
+        Rect::from_min_size(
+            Pos2::new(lanes.left(), lanes.top() + c as f32 * lane_h),
+            vec2(lanes.width(), lane_h),
+        )
+    };
+
+    for c in 0..n_ch {
+        let r = lane(c);
+        if kept(c) {
+            // Inset a little so neighbouring kept lanes read as separate bars.
+            let (t, b) = (r.top() + 3.0, r.bottom() - 3.0);
+            if b > t {
+                painter.rect_filled(
+                    Rect::from_x_y_ranges(r.left()..=r.left() + 2.0, t..=b),
+                    1.0,
+                    MONO_COLOR.gamma_multiply(0.85),
+                );
+            }
+        } else {
+            painter.text(
+                Pos2::new(r.right() - 8.0, r.top() + 5.0),
+                Align2::RIGHT_TOP,
+                "not exported",
+                FontId::proportional(10.0),
+                vis.weak_text_color().gamma_multiply(0.7),
+            );
+        }
+    }
+
+    if fold != Fold::Mix || n_ch != 2 {
+        return;
+    }
+    let (l, r) = (&cur.sample.channels[0], &cur.sample.channels[1]);
+    let len = l.len().min(r.len());
+    if len == 0 {
+        return;
+    }
+    let seam = lanes.top() + lane_h;
+    let reach = lane_h * 0.42;
+    let warm = crate::ui::theme::ACCENT_BRIGHT;
+    // Measure over at least this many frames so a zoomed-in view doesn't
+    // flicker sample by sample.
+    const MIN_WIN: f64 = 48.0;
+    // At most this many frames looked at per column, spread evenly.
+    const PROBES: usize = 64;
+
+    let mut mesh = egui::Mesh::default();
+    let w = m.rect.width().ceil() as usize;
+    for px in 0..w {
+        let a = m.start + px as f64 * m.fpp;
+        let b = a + m.fpp;
+        let pad = ((MIN_WIN - m.fpp) * 0.5).max(0.0);
+        let f0 = (a - pad).max(0.0) as usize;
+        let f1 = ((b + pad).ceil() as usize).min(len);
+        if f0 >= f1 {
+            if f0 >= len {
+                break;
+            }
+            continue;
+        }
+        let step = ((f1 - f0) / PROBES).max(1);
+        let (mut el, mut er, mut em, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let mut i = f0;
+        while i < f1 {
+            let (x, y) = (l[i], r[i]);
+            let mid = (x + y) * 0.5;
+            el += x * x;
+            er += y * y;
+            em += mid * mid;
+            n += 1.0;
+            i += step;
+        }
+        // Level the mix loses: average channel RMS minus mono RMS. Zero for
+        // identical channels, the full level for channels in opposite phase.
+        let side = ((el / n).sqrt() + (er / n).sqrt()) * 0.5;
+        let loss = (side - (em / n).sqrt()).max(0.0);
+        // Exaggerated: a few percent of lost level already shows.
+        let amt = (loss * 6.0).sqrt().min(1.0);
+        if amt < 0.02 {
+            continue;
+        }
+        let h = amt * reach;
+        let x0 = m.rect.left() + px as f32;
+        let x1 = x0 + 1.0;
+        let core = warm.gamma_multiply(0.5 * (0.4 + 0.6 * amt));
+        let edge = warm.gamma_multiply(0.0);
+        // Two quads per column, brightest on the seam and fading outwards.
+        for y_edge in [seam - h, seam + h] {
+            let i = mesh.vertices.len() as u32;
+            mesh.colored_vertex(Pos2::new(x0, seam), core);
+            mesh.colored_vertex(Pos2::new(x1, seam), core);
+            mesh.colored_vertex(Pos2::new(x1, y_edge), edge);
+            mesh.colored_vertex(Pos2::new(x0, y_edge), edge);
+            mesh.add_triangle(i, i + 1, i + 2);
+            mesh.add_triangle(i, i + 2, i + 3);
+        }
+    }
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 

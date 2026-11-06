@@ -376,7 +376,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
 /// Save and Export, always shown. Each button means the same thing in every
 /// state: Save writes over the open file, Export writes a new file into the
 /// destination tab.
-fn file_row(ui: &mut Ui, ed: &Editor, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
+pub(super) fn file_row(ui: &mut Ui, ed: &Editor, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
     let showing_kit = slots.showing_kit;
     let has = ed.current.is_some();
     section_header(ui, "File");
@@ -461,7 +461,6 @@ pub(super) fn toolbar(
     out: &mut Vec<EdIntent>,
 ) {
     let showing_kit = slots.showing_kit;
-    file_row(ui, ed, can_export, slots, out);
     let playing = pv.playing;
     let has = ed.current.is_some();
     let pn = ed.prefs.panels.clone();

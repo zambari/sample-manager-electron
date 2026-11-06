@@ -7,7 +7,6 @@ use super::*;
 use crate::editor::SliceEnd;
 use crate::ui::theme;
 
-const BAR_W: f32 = 300.0;
 const BAR_H: f32 = 4.0;
 
 pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out: &mut Vec<EdIntent>) {
@@ -80,18 +79,6 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
             RichText::new("Nothing to trim").weak()
         };
         ui.label(label);
-        // Kept vs freed, to scale.
-        let (rect, _) = ui.allocate_exact_size(vec2(BAR_W, 12.0), Sense::hover());
-        let bar = Rect::from_center_size(rect.center(), vec2(BAR_W, BAR_H));
-        let p = ui.painter_at(rect);
-        let kept = plan.new_total as f32 / plan.total.max(1) as f32;
-        let split = bar.left() + bar.width() * kept.min(1.0);
-        p.rect_filled(
-            Rect::from_x_y_ranges(bar.left()..=split, bar.y_range()),
-            0.0,
-            ui.visuals().strong_text_color().gamma_multiply(0.6),
-        );
-        p.rect_filled(Rect::from_x_y_ranges(split..=bar.right(), bar.y_range()), 0.0, SAVE_COLOR);
         let pct = 100.0 * saved as f64 / plan.total.max(1) as f64;
         ui.label(
             RichText::new(format!(
@@ -236,8 +223,9 @@ fn slot_strip(ui: &mut Ui, cut: &mut usize, len: usize, sounds: &[usize], rate: 
             continue;
         }
         let x = x_of(s);
-        let col = if s > *cut { warn.gamma_multiply(0.9) } else { vis.strong_text_color().gamma_multiply(0.6) };
-        p.line_segment([Pos2::new(x, strip.top() - 2.0), Pos2::new(x, strip.bottom() + 2.0)], Stroke::new(1.5, col));
+        let col = if s > *cut { warn.gamma_multiply(0.45) } else { vis.strong_text_color().gamma_multiply(0.3) };
+        let h = (BAR_H + 4.0) / 4.0;
+        p.line_segment([Pos2::new(x, mid - h), Pos2::new(x, mid + h)], Stroke::new(1.5, col));
         if pointer.is_some_and(|q| (q.x - x).abs() <= SNAP) {
             near.push((i, s));
         }
