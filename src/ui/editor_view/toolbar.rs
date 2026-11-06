@@ -395,14 +395,22 @@ fn file_row(ui: &mut Ui, ed: &Editor, can_export: bool, slots: &Slots, out: &mut
             if !slots.kit_on_disk {
                 (false, "Not saved yet — Export kit names it and writes it into the destination. After that, Save writes over that file. (⌘S on an unsaved kit runs Export.)".to_owned())
             } else {
-                (ed.is_dirty(), "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)".to_owned())
+                (ed.can_save(), "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)".to_owned())
             }
         } else {
             (ed.can_save(), "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file".to_owned())
         };
         let label = if ed.exporting { "Saving…".to_owned() } else { format!("💾 Save{mono}") };
+        let enabled = has && can && !ed.exporting;
+        // Solid accent fill once there's something to write back.
+        let button = if enabled {
+            egui::Button::new(egui::RichText::new(label).color(crate::ui::theme::ON_ACCENT))
+                .fill(crate::ui::theme::ACCENT)
+        } else {
+            egui::Button::new(label)
+        };
         if ui
-            .add_enabled(has && can && !ed.exporting, egui::Button::new(label))
+            .add_enabled(enabled, button)
             .on_hover_text(&tip)
             .on_disabled_hover_text(&tip)
             .clicked()

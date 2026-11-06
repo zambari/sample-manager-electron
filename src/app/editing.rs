@@ -238,6 +238,15 @@ impl App {
             self.export();
             return;
         }
+        // Same rule as the Save button: nothing changed, nothing to write.
+        if !self.editor.can_save() {
+            self.status = "Nothing to save — the file is unchanged".to_owned();
+            // Don't strand a close / quit that was waiting on this save.
+            if let Some(leave) = self.leave_after_save.take() {
+                self.finish_leave(leave);
+            }
+            return;
+        }
         if self.editor.is_trimmed() {
             self.save_scope_pending = true;
         } else {

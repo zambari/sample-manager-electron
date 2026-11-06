@@ -825,9 +825,17 @@ impl Editor {
             && (self.crop.is_some() || self.sel != (0, self.frames()))
     }
 
-    /// Anything a save in place would change: cut / paste, gain or a trim.
+    /// Anything a save in place would change: cut / paste, gain, a mono fold
+    /// or (on a plain sample) a trim. A kit is saved whole, so in / out and
+    /// the crop don't count there.
     pub fn can_save(&self) -> bool {
-        self.is_dirty() || (!self.is_kit && self.current.is_some() && self.is_edited())
+        if self.current.is_none() {
+            return false;
+        }
+        self.is_dirty()
+            || self.gain_db.abs() > 0.001
+            || self.mono_active()
+            || (!self.is_kit && self.is_edited())
     }
 
     /// Re-read the open file after a save replaced it. Its old in / out, gain
