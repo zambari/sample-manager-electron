@@ -16,6 +16,7 @@ pub(super) struct EditState {
     full: Option<Loaded>,
     rev: u64,
     markers: Vec<usize>,
+    names: Vec<String>,
 }
 
 pub(super) const CH_IN: u8 = 1;
@@ -48,7 +49,7 @@ impl EditState {
         if self.rev != o.rev {
             m |= CH_AUDIO;
         }
-        if self.markers != o.markers {
+        if self.markers != o.markers || self.names != o.names {
             m |= CH_MARKS;
         }
         m
@@ -82,6 +83,7 @@ impl Editor {
             full: self.full.clone(),
             rev: self.rev,
             markers: self.markers.clone(),
+            names: self.names.clone(),
         }
     }
 
@@ -101,6 +103,7 @@ impl Editor {
         self.playhead = st.playhead;
         self.gain_db = st.gain_db;
         self.markers = st.markers;
+        self.names = st.names;
         self.stats_key = None;
         self.grid = self.infer_grid();
         self.auto_grid &= self.grid.is_some();

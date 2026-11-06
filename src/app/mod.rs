@@ -36,6 +36,7 @@ mod kit;
 mod nav;
 mod os_dnd;
 mod pane_view;
+mod relaunch;
 mod transfers;
 mod undo;
 
@@ -241,6 +242,10 @@ pub struct App {
     allow_close: bool,
     /// Close once the running job (an upload of the saved edit) finishes.
     close_when_idle: bool,
+    /// Dev builds: watches for a newer binary on disk.
+    build_watch: relaunch::BuildWatch,
+    /// The window is closing to start the new build.
+    relaunch: bool,
     /// The centre column shows the Elk Sample Order view instead of the editor.
     elk_mode: bool,
     elk: crate::ui::elk_view::ElkState,
@@ -390,6 +395,8 @@ impl App {
             saving: Default::default(),
             allow_close: false,
             close_when_idle: false,
+            build_watch: relaunch::BuildWatch::new(),
+            relaunch: false,
             elk_mode: false,
             elk: Default::default(),
             jobs,
@@ -502,6 +509,17 @@ impl eframe::App for App {
         eframe::set_value(storage, state::KEY, &self.snapshot(true));
     }
 
+    fn on_exit(&mut self) {
+        if !self.relaunch {
+            return;
+        }
+        if let Some(exe) = self.build_watch.exe() {
+            if let Err(e) = std::process::Command::new(exe).spawn() {
+                crate::log::line(format!("error: relaunch failed: {e}"));
+            }
+        }
+    }
+
     fn auto_save_interval(&self) -> std::time::Duration {
         state::SAVE_INTERVAL
     }
@@ -515,6 +533,7 @@ impl eframe::App for App {
         self.os_drag_out(ctx, frame);
         #[cfg(not(target_os = "macos"))]
         let _ = frame;
+        self.build_watch.poll(ctx);
         // eframe only autosaves on a frame. After a change, make sure one
         // happens once the interval has passed, even if the app goes idle.
         let snap = self.snapshot(false);

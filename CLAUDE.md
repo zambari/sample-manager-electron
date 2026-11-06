@@ -2,9 +2,9 @@
 
 ## Workflow rules
 
-- **Relaunch after every code change.** At the end of each round where code changed, build, kill the running app, and start the new build so the user can try it right away:
+- **Build after every code change, but never kill or launch the app.** The user keeps the app running while they work. At the end of each round where code changed, just build:
   ```bash
-  cargo build --release && { pkill -x sample_manager; sleep 0.5; (./target/release/sample_manager >/dev/null 2>&1 &); }
+  cargo build --release
   ```
-  Run the launch in the background so it doesn't block. If the build fails, fix it before ending the round (leave the old app running in the meantime).
-- **Don't write tests.** Verify by building and running the app instead. When unsure whether a change works in edge cases, tell the user which edge conditions to try and what symptoms to look for.
+  If the build fails, fix it before ending the round. Never run `pkill`/`kill` on `sample_manager` and don't start it yourself. When a newer build lands, the running app shows a **New build: relaunch** button in its toolbar, and the user relaunches when they're ready. Tell them the build is ready to relaunch.
+- **Don't write tests.** Verify by building instead (the user runs the app). When unsure whether a change works in edge cases, tell the user which edge conditions to try and what symptoms to look for.

@@ -327,7 +327,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
     section_header(ui, "Show");
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        let items: [(&mut bool, &str, &str); 9] = [
+        let items: [(&mut bool, &str, &str); 11] = [
             (
                 &mut p.transport,
                 "Transport",
@@ -352,6 +352,16 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
                 "Minimap: the whole file, click to jump",
             ),
             (&mut p.stats, "Stats", "Stats table and phase meter"),
+            (
+                &mut p.fades,
+                "Fades",
+                "Kit only: find slices that stop while still sounding, and fade them out. Hidden, nothing is flagged or shaped on the wave",
+            ),
+            (
+                &mut p.trim,
+                "Trim",
+                "Kit only: cut every slice's tail below a threshold to free sample memory",
+            ),
             (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
         for (v, label, hover) in items {

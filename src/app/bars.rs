@@ -240,6 +240,23 @@ impl App {
                 self.reload_all();
             }
 
+            if self.build_watch.ready() {
+                ui.separator();
+                let idle = self.active_jobs.is_empty();
+                let btn = egui::Button::new(
+                    egui::RichText::new("New build: relaunch").color(theme::ON_ACCENT),
+                )
+                .fill(theme::ACCENT);
+                let resp = ui
+                    .add_enabled(idle, btn)
+                    .on_hover_text("A newer build is on disk. Quit (asking about unsaved edits first) and start it.")
+                    .on_disabled_hover_text("Wait for the transfer to finish");
+                if resp.clicked() {
+                    self.relaunch = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Right to left: the first widget lands at the far right.
                 let commit_key = self.keymap.describe(Action::Commit);

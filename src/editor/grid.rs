@@ -156,13 +156,22 @@ impl Editor {
     /// Empty slots from the end are dropped to make room; with more sounding
     /// slices than slots nothing changes and it returns `None`. Otherwise
     /// returns the slot length in frames.
-    fn lay_out(&mut self, mut slices: Vec<Slice>, n: usize) -> Option<usize> {
+    /// `names` go with `slices`, one each.
+    pub(super) fn lay_out(
+        &mut self,
+        mut slices: Vec<Slice>,
+        mut names: Vec<String>,
+        n: usize,
+    ) -> Option<usize> {
         let nch = self.full.as_ref()?.sample.channels.len();
+        names.resize(slices.len(), String::new());
         while slices.len() > n {
             let i = slices.iter().rposition(is_empty)?;
             slices.remove(i);
+            names.remove(i);
         }
         slices.resize(n, vec![Vec::new(); nch]);
+        names.resize(n, String::new());
         let len = slices
             .iter()
             .map(|s| s.first().map_or(0, Vec::len))
@@ -185,6 +194,7 @@ impl Editor {
         let total = self.frames();
         self.splice(0, total, &chans);
         self.markers = (1..n).map(|i| i * len).collect();
+        self.names = names;
         self.grid = Some(n);
         self.view.fit_pending = true;
         Some(len)
@@ -212,7 +222,8 @@ impl Editor {
         } else {
             n
         };
-        self.lay_out(s, n).ok_or_else(|| too_many(n))?;
+        self.lay_out(s, self.slice_names(), n)
+            .ok_or_else(|| too_many(n))?;
         self.auto_grid = auto;
         Ok(())
     }
@@ -308,7 +319,12 @@ impl Editor {
         };
         s.resize(n.max(s.len()), Vec::new());
         s[at] = ins;
-        let len = self.lay_out(s, n).ok_or("Slice didn't fit the grid")?;
+        let mut names = self.slice_names();
+        names.resize(s.len(), String::new());
+        names[at] = clip.name.clone().unwrap_or_default();
+        let len = self
+            .lay_out(s, names, n)
+            .ok_or("Slice didn't fit the grid")?;
         self.sel = (at * len, (at + 1) * len);
         self.playhead = at * len;
         Ok(())
@@ -324,7 +340,7 @@ impl Editor {
             let sounding = s.iter().filter(|s| !is_empty(s)).count();
             n = auto_size(sounding).unwrap_or(n);
         }
-        if self.lay_out(s, n).is_none() {
+        if self.lay_out(s, self.slice_names(), n).is_none() {
             self.grid = None;
             self.auto_grid = false;
             self.notice = Some(format!(

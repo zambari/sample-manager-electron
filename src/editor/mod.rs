@@ -14,9 +14,13 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 mod clip;
+mod fade;
 mod grid;
 mod history;
+mod trim;
 
+pub use fade::{FadeEnd, fade_gain};
+pub use trim::TrimPlan;
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
 mod selection;
 
@@ -47,6 +51,11 @@ pub struct Prefs {
     pub fold: Fold,
     /// Which editor panels are shown.
     pub panels: Panels,
+    /// Kit slices whose last moment is louder than this (dBFS) end
+    /// abruptly and are offered a fade-out.
+    pub tail_db: f32,
+    /// Fade after each cut when trimming kit tails, ms.
+    pub trim_fade_ms: f32,
 }
 
 /// Visibility of each editor panel, toggled from the header row.
@@ -69,6 +78,10 @@ pub struct Panels {
     pub stats: bool,
     /// Keyboard shortcut cheat sheet at the bottom.
     pub help: bool,
+    /// Kit only: cut-off slice ends, their threshold and fade knobs.
+    pub fades: bool,
+    /// Kit only: cut every slice's tail below the threshold.
+    pub trim: bool,
 }
 
 impl Default for Panels {
@@ -83,6 +96,8 @@ impl Default for Panels {
             minimap: true,
             stats: true,
             help: true,
+            fades: false,
+            trim: false,
         }
     }
 }
@@ -100,6 +115,8 @@ impl Default for Prefs {
             mono: None,
             fold: Fold::Mix,
             panels: Panels::default(),
+            tail_db: -50.0,
+            trim_fade_ms: 10.0,
         }
     }
 }
@@ -162,6 +179,8 @@ impl Memo {
 pub struct AudioClip {
     pub rate: u32,
     pub channels: Vec<Vec<f32>>,
+    /// File the audio came from, so a kit slice made of it can say so.
+    pub name: Option<String>,
 }
 
 impl AudioClip {
@@ -213,6 +232,7 @@ enum Ev {
         path: PathBuf,
         result: Result<Loaded, String>,
         cues: Vec<usize>,
+        names: Vec<String>,
     },
     /// `rev` is the content revision that was rendered.
     Exported {
@@ -248,6 +268,8 @@ pub enum Drag {
     /// Scope strip: move the playhead by dragging the wave. Holds the
     /// playhead and pointer x at the start of the drag.
     Scrub(usize, f32),
+    /// Shape a slice's fade-out: the slice and where its sound ends.
+    Fade(usize, usize),
 }
 
 /// Visible window: first frame at the left edge and frames per pixel.
@@ -291,6 +313,14 @@ pub struct Editor {
     /// Kit slice starts, in whole-file frames, sorted, strictly inside the
     /// file (0 and the end are implied).
     markers: Vec<usize>,
+    /// Kit slice names (the file each slice came from), by slice: entry 0
+    /// is the slice before the first marker. May be shorter than the slice
+    /// count; empty means unknown.
+    names: Vec<String>,
+    /// Fade-outs shaped on the wave but not applied yet, by slice.
+    fades: HashMap<usize, fade::FadeShape>,
+    /// Where each slice decays past each threshold, for the tail trim.
+    decay: std::cell::RefCell<Option<Arc<trim::DecayMap>>>,
     /// Kit laid out on this many equal slots (see [`grid`]), or free.
     pub grid: Option<usize>,
     /// Auto grid: `grid` grows 4 → 8 → 16 as slices are added and shrinks
@@ -347,6 +377,9 @@ impl Editor {
             play_when_loaded: false,
             is_kit: false,
             markers: Vec::new(),
+            names: Vec::new(),
+            fades: HashMap::new(),
+            decay: Default::default(),
             grid: None,
             auto_grid: false,
             auto_on_load: None,
@@ -463,11 +496,13 @@ impl Editor {
             .spawn(move || {
                 let result = decode::decode(&path).map(Loaded::new);
                 let cues = cues::read(&path);
+                let names = cues::read_names(&path);
                 let _ = tx.send(Ev::Loaded {
                     generation,
                     path,
                     result,
                     cues,
+                    names,
                 });
                 ctx.request_repaint();
             });
@@ -482,6 +517,7 @@ impl Editor {
                     path,
                     result,
                     cues,
+                    names,
                 } => {
                     if generation != self.generation {
                         continue; // the cursor moved on
@@ -490,7 +526,7 @@ impl Editor {
                     match result {
                         Ok(loaded) => {
                             self.remember();
-                            self.install(loaded, cues);
+                            self.install(loaded, cues, names);
                             out.push(Outcome::Loaded);
                         }
                         Err(e) => {
@@ -575,10 +611,17 @@ impl Editor {
         self.request(&s.path);
     }
 
-    fn install(&mut self, loaded: Loaded, cues: Vec<usize>) {
+    fn install(&mut self, loaded: Loaded, cues: Vec<usize>, names: Vec<String>) {
         let frames = loaded.sample.frames();
+        self.fades.clear();
         self.markers = if self.is_kit {
             cues.into_iter().filter(|&m| m > 0 && m < frames).collect()
+        } else {
+            Vec::new()
+        };
+        // Names only make sense against the cues they were saved with.
+        self.names = if self.is_kit && names.len() == self.markers.len() + 1 {
+            names
         } else {
             Vec::new()
         };
@@ -838,10 +881,10 @@ impl Editor {
                 mono,
             }
         };
-        let marks = if self.is_kit {
-            self.markers.clone()
+        let (marks, names) = if self.is_kit {
+            (self.markers.clone(), self.slice_names())
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
@@ -850,7 +893,8 @@ impl Editor {
             .name("export".into())
             .spawn(move || {
                 let result = export::write_wav(&sample, &r, &target)
-                    .and_then(|p| cues::append(&p, &marks).map(|_| p));
+                    .and_then(|p| cues::append(&p, &marks).map(|_| p))
+                    .and_then(|p| cues::append_names(&p, &names).map(|_| p));
                 let _ = tx.send(Ev::Exported { rev, result });
                 ctx.request_repaint();
             });

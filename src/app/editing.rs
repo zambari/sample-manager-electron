@@ -290,6 +290,7 @@ impl App {
     pub(super) fn answer_leave(&mut self, leave: Leave, choice: LeaveChoice) {
         match choice {
             LeaveChoice::Cancel => {
+                self.relaunch = false;
                 self.status = "Kept editing — the edits are still unsaved".to_owned();
             }
             LeaveChoice::Discard if matches!(leave, Leave::CloseKit) => {
@@ -628,6 +629,28 @@ impl App {
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
                 EdIntent::ElkMode => self.enter_elk(),
+                EdIntent::FadeEnds(only) => {
+                    let n = self.editor.fade_ends(only);
+                    self.status = match only {
+                        Some(i) => format!("Faded out the end of slice {} — ⌘Z undoes", i + 1),
+                        None => format!(
+                            "Faded out the end of {n} slice{} — ⌘Z undoes",
+                            if n == 1 { "" } else { "s" }
+                        ),
+                    };
+                }
+                EdIntent::TrimTails => {
+                    let rate = self.editor.sample().map_or(1, |s| s.rate.max(1)) as f64;
+                    self.status = match self.editor.trim_tails() {
+                        Some((was, now)) => format!(
+                            "Trimmed tails: {:.2} s → {:.2} s, freed {:.2} s — ⌘Z undoes",
+                            was as f64 / rate,
+                            now as f64 / rate,
+                            was.saturating_sub(now) as f64 / rate
+                        ),
+                        None => "Nothing to trim".to_owned(),
+                    };
+                }
                 EdIntent::CloseKit => self.close_kit(),
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
                 EdIntent::RenameKit(name) => self.rename_kit(&name),

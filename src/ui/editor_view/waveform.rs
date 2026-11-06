@@ -8,6 +8,8 @@ pub(super) fn waveform(
     pv: &PlayView,
     rect: Rect,
     focused: bool,
+    abrupt: &[crate::editor::FadeEnd],
+    trim: Option<&crate::editor::TrimPlan>,
     out: &mut Vec<EdIntent>,
 ) {
     ed.wave_rect = Some(rect);
@@ -60,6 +62,25 @@ pub(super) fn waveform(
     let x_out = m.x(ed.sel.1 as f64);
     let marks = if ed.is_kit { ed.marks() } else { Vec::new() };
 
+    // Fade handles: a knob at the middle of each abrupt end's fade curve.
+    let fade_top = rect.top() + RULER_H + 4.0;
+    let fade_h = rect.bottom() - fade_top;
+    let handle_pos = |e: &crate::editor::FadeEnd| {
+        let x = m.x(e.start as f64 + (e.end - e.start) as f64 / 2.0);
+        let y = fade_top + (1.0 - crate::editor::fade_gain(0.5, e.k)) * fade_h;
+        Pos2::new(x, y)
+    };
+    let handle_at = |p: Pos2| {
+        abrupt
+            .iter()
+            .find(|e| handle_pos(e).distance(p) <= HANDLE_R + 4.0)
+            .copied()
+    };
+    let mut hot_fade = match ed.drag {
+        Some(Drag::Fade(i, _)) => Some(i),
+        _ => None,
+    };
+
     // ---- mouse ----
     let near = |x: f32, p: Pos2| (p.x - x).abs() <= GRAB_PX;
     // The kit slice marker under the pointer, if any (nearest wins).
@@ -108,11 +129,25 @@ pub(super) fn waveform(
     let mut bar_hot = matches!(ed.drag, Some(Drag::Move(..)));
     if let Some(p) = resp.hover_pos() {
         if ed.drag.is_none() {
-            if near(x_in, p) || near(x_out, p) {
+            if let Some(e) = handle_at(p) {
+                ui.ctx().set_cursor_icon(CursorIcon::Move);
+                hot_fade = Some(e.slice);
+            } else if near(x_in, p) || near(x_out, p) {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             } else if on_bar(p) {
                 ui.ctx().set_cursor_icon(CursorIcon::Grab);
                 bar_hot = true;
+            }
+        }
+    }
+    // Kit: the ruler and slice-number row name the file a slice came from.
+    if ed.is_kit && ed.drag.is_none() {
+        if let Some(p) = resp.hover_pos() {
+            if p.y <= rect.top() + RULER_H + 16.0 {
+                if let Some((n, name)) = ed.slice_name_at(m.frame(p.x)) {
+                    resp.clone()
+                        .on_hover_text_at_pointer(format!("Slice {n}: {name}"));
+                }
             }
         }
     }
@@ -128,6 +163,8 @@ pub(super) fn waveform(
         ed.drag = origin.map(|o| {
             if resp.dragged_by(egui::PointerButton::Middle) || alt {
                 Drag::Pan
+            } else if let Some(e) = handle_at(o) {
+                Drag::Fade(e.slice, e.end)
             } else if near(x_in, o)
                 && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs())
             {
@@ -152,9 +189,17 @@ pub(super) fn waveform(
                 Drag::Move(orig, grab) => ed.move_region(orig, m.frame(px) as i64 - grab as i64),
                 Drag::Pan => ed.view.start -= resp.drag_delta().x as f64 * ed.view.fpp,
                 Drag::Scrub(..) => {}
+                Drag::Fade(slice, end) => {
+                    // Sideways: the knob is the fade's middle, so the fade
+                    // runs twice that far back from the end. Up / down: the
+                    // gain at the middle, which sets the curve.
+                    let mid = m.frame(px).min(end.saturating_sub(1));
+                    let g = (1.0 - (p.y - fade_top) / fade_h).clamp(0.5f32.powf(8.0), 0.5);
+                    ed.shape_fade(slice, 2 * (end - mid), g.ln() / 0.5f32.ln());
+                }
             }
             // Dragging a marker past the edge scrolls the view along.
-            if !matches!(d, Drag::Pan) {
+            if !matches!(d, Drag::Pan | Drag::Fade(..)) {
                 let edge = 12.0;
                 if p.x > rect.right() - edge {
                     ed.view.start += 8.0 * ed.view.fpp;
@@ -183,7 +228,11 @@ pub(super) fn waveform(
         // On a marker: park the playhead exactly on it. Elsewhere: select
         // the kit slice there, or everything.
         let p = resp.interact_pointer_pos();
+        let fade = p.and_then(handle_at);
         let target = p.and_then(|p| endpoint_at(p).or_else(|| mark_at(p)));
+        if let Some(e) = fade {
+            out.push(EdIntent::FadeEnds(Some(e.slice)));
+        } else {
         match target {
             Some(f) => {
                 ed.playhead = f;
@@ -198,6 +247,7 @@ pub(super) fn waveform(
                 }
             }
             None => ed.select_all(),
+        }
         }
     }
     if resp.secondary_clicked() {
@@ -266,6 +316,11 @@ pub(super) fn waveform(
         );
     }
 
+    let rate = ed.sample().map_or(1, |s| s.rate);
+    if let Some(plan) = trim {
+        trim_cues(&painter, &m, lanes, plan, ed.crop.map_or(0, |c| c.0));
+    }
+    fade_cues(&painter, &m, lanes, abrupt, hot_fade, rate, &vis);
     if let Some(tp) = ed.trim_preview() {
         let rate = ed.sample().map_or(1, |s| s.rate);
         trim_overlay(&painter, &m, lanes, &tp, rate, &vis);
@@ -481,6 +536,111 @@ pub(super) fn draw_lanes(
         }
     }
 }
+
+/// Abrupt slice ends: the fade-out that "Fade ends" would apply, drawn as
+/// its gain curve over the end of each such slice.
+fn fade_cues(
+    painter: &egui::Painter,
+    m: &Map,
+    lanes: Rect,
+    ends: &[crate::editor::FadeEnd],
+    hot: Option<usize>,
+    rate: u32,
+    vis: &egui::Visuals,
+) {
+    let col = vis.warn_fg_color;
+    for e in ends {
+        let is_hot = hot == Some(e.slice);
+        let (xa, xb) = (m.x(e.start as f64), m.x(e.end as f64));
+        if xb < lanes.left() || xa > lanes.right() {
+            continue;
+        }
+        let top = lanes.top() + 4.0;
+        let h = lanes.bottom() - top;
+        let steps = ((xb - xa) / 2.0).clamp(2.0, 200.0) as usize;
+        let pts: Vec<Pos2> = (0..=steps)
+            .map(|i| {
+                let t = i as f32 / steps as f32;
+                let g = crate::editor::fade_gain(t, e.k);
+                Pos2::new(xa + (xb - xa) * t, top + (1.0 - g) * h)
+            })
+            .collect();
+        painter.line(pts, Stroke::new(if is_hot { 2.0 } else { 1.5 }, col));
+        // Shade what the fade takes away, so its reach reads at a glance.
+        if xb - xa > 1.0 {
+            painter.rect_filled(
+                Rect::from_x_y_ranges(xa.max(lanes.left())..=xb.min(lanes.right()), top..=lanes.bottom()),
+                0.0,
+                col.gamma_multiply(if is_hot { 0.10 } else { 0.05 }),
+            );
+        }
+        // The knob: middle of the curve.
+        let knob = Pos2::new(
+            (xa + xb) / 2.0,
+            top + (1.0 - crate::editor::fade_gain(0.5, e.k)) * h,
+        );
+        if lanes.x_range().contains(knob.x) {
+            painter.circle(
+                knob,
+                if is_hot { HANDLE_R + 1.0 } else { HANDLE_R },
+                if is_hot { col } else { vis.extreme_bg_color },
+                Stroke::new(1.5, col),
+            );
+            if is_hot {
+                let ms = (e.end - e.start) as f64 * 1000.0 / rate.max(1) as f64;
+                let text = format!(
+                    "fade {ms:.0} ms · curve {:.1}\n↔ length  ↕ curve\ndouble-click: apply this one",
+                    e.k
+                );
+                let galley = painter.layout(text, FontId::monospace(10.0), col, 400.0);
+                let mut pos = Pos2::new(knob.x + 10.0, knob.y - galley.size().y - 6.0);
+                if pos.x + galley.size().x > lanes.right() {
+                    pos.x = knob.x - 10.0 - galley.size().x;
+                }
+                pos.y = pos.y.max(lanes.top() + 2.0);
+                let bg = Rect::from_min_size(pos, galley.size()).expand(3.0);
+                painter.rect_filled(bg, 3.0, vis.extreme_bg_color.gamma_multiply(0.9));
+                painter.galley(pos, galley, col);
+            }
+        }
+        // A tick at the hard stop, visible even zoomed far out.
+        painter.line_segment(
+            [Pos2::new(xb, lanes.bottom() - 10.0), Pos2::new(xb, lanes.bottom())],
+            Stroke::new(2.0, col),
+        );
+    }
+}
+
+/// Tail trim: shade what each slice would lose, with a line at the cut.
+fn trim_cues(painter: &egui::Painter, m: &Map, lanes: Rect, plan: &crate::editor::TrimPlan, off: usize) {
+    let col = super::fades::SAVE_COLOR;
+    for s in &plan.slices {
+        let cut = s.a + s.keep;
+        if cut >= s.b || s.b <= off {
+            continue;
+        }
+        let (xa, xb) = (m.x(cut.saturating_sub(off) as f64), m.x((s.b - off) as f64));
+        if xb < lanes.left() || xa > lanes.right() {
+            continue;
+        }
+        let r = Rect::from_x_y_ranges(xa.max(lanes.left())..=xb.min(lanes.right()), lanes.y_range());
+        painter.rect_filled(r, 0.0, col.gamma_multiply(0.10));
+        if let Some(f) = s.fade_at {
+            // The short fade before the cut.
+            let xf = m.x(f.saturating_sub(off) as f64);
+            painter.line_segment(
+                [Pos2::new(xf, lanes.top()), Pos2::new(xa, lanes.bottom())],
+                Stroke::new(1.0, col.gamma_multiply(0.7)),
+            );
+        }
+        if lanes.x_range().contains(xa) {
+            painter.line_segment([Pos2::new(xa, lanes.top()), Pos2::new(xa, lanes.bottom())], Stroke::new(1.5, col));
+        }
+    }
+}
+
+/// Radius of a fade knob.
+const HANDLE_R: f32 = 5.0;
 
 /// Grid kit, part of a slot selected: shade the padding each slot would
 /// lose if the selection were deleted, mark where the next-longest slice

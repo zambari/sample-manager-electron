@@ -18,9 +18,11 @@ impl Editor {
             .iter()
             .map(|c| c[a..b].iter().map(|x| x * g).collect())
             .collect();
+        let name = self.source_name(a);
         self.clip = Some(AudioClip {
             rate: s.rate,
             channels,
+            name,
         });
         true
     }
@@ -74,6 +76,7 @@ impl Editor {
         Some(AudioClip {
             rate: s.rate,
             channels,
+            name: self.source_name(a),
         })
     }
 
@@ -95,6 +98,7 @@ impl Editor {
         if self.is_kit && end > 0 && end < self.frames() {
             self.add_marker(end);
         }
+        self.name_slice_at(end, clip.name.as_deref());
         self.view.fit_pending = true;
         Ok(())
     }
@@ -120,7 +124,8 @@ impl Editor {
             format: "WAV".into(),
             file_len: 0,
         };
-        self.install(Loaded::new(sample), Vec::new());
+        self.install(Loaded::new(sample), Vec::new(), Vec::new());
+        self.name_slice_at(0, clip.name.as_deref());
         if grid.is_some() && self.set_grid(grid).is_ok() {
             self.sel = (0, self.markers.first().copied().unwrap_or(self.frames()));
             self.playhead = 0;
@@ -177,6 +182,8 @@ impl Editor {
         if self.is_kit {
             self.add_marker(fa);
             self.add_marker(fa + n);
+            let name = self.clip.as_ref().and_then(|c| c.name.clone());
+            self.name_slice_at(fa, name.as_deref());
         }
         self.settle_grid();
         true
@@ -206,8 +213,51 @@ impl Editor {
             return;
         }
         if let Err(i) = self.markers.binary_search(&f) {
+            self.names = self.slice_names();
             self.markers.insert(i, f);
+            // The slice split here keeps its name on the left part.
+            self.names.insert(i + 1, String::new());
         }
+    }
+
+    /// Every slice's name, one per slice (empty where unknown).
+    pub(super) fn slice_names(&self) -> Vec<String> {
+        let mut v = self.names.clone();
+        v.resize(self.markers.len() + 1, String::new());
+        v
+    }
+
+    /// Name the kit slice holding whole-file frame `f`.
+    pub(super) fn name_slice_at(&mut self, f: usize, name: Option<&str>) {
+        let Some(name) = name.filter(|n| !n.is_empty()) else { return };
+        if !self.is_kit {
+            return;
+        }
+        let i = self.markers.partition_point(|&m| m <= f);
+        self.names = self.slice_names();
+        self.names[i] = name.to_owned();
+    }
+
+    /// The kit slice under shown-sample frame `frame`: its 1-based number
+    /// and the file it came from, when known.
+    pub fn slice_name_at(&self, frame: usize) -> Option<(usize, &str)> {
+        let f = frame + self.crop_offset();
+        let i = self.markers.partition_point(|&m| m <= f);
+        self.names
+            .get(i)
+            .filter(|n| !n.is_empty())
+            .map(|n| (i + 1, n.as_str()))
+    }
+
+    /// What a clip taken from shown-sample frame `a` should be called: in a
+    /// kit, the slice it starts in; otherwise this file's name.
+    fn source_name(&self, a: usize) -> Option<String> {
+        if self.is_kit {
+            return self.slice_name_at(a).map(|(_, n)| n.to_owned());
+        }
+        self.path()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
     }
 
     /// Slice markers in shown-sample frames (inside the crop, if any).
@@ -279,22 +329,28 @@ impl Editor {
         let total = sample.frames();
         // Markers before the edit stay, ones inside what was replaced go,
         // the rest move with the audio after it.
-        let mut marks: Vec<usize> = self
+        // Each marker carries the name of the slice it starts.
+        let names = self.slice_names();
+        let mut marks: Vec<(usize, String)> = self
             .markers
             .iter()
-            .filter_map(|&m| {
+            .zip(names.iter().skip(1))
+            .filter_map(|(&m, name)| {
                 if m < fb && m <= fa {
-                    Some(m)
+                    Some((m, name.clone()))
                 } else if m >= fb {
-                    Some(m - (fb - fa) + n)
+                    Some((m - (fb - fa) + n, name.clone()))
                 } else {
                     None
                 }
             })
-            .filter(|&m| m > 0 && m < total)
+            .filter(|&(m, _)| m > 0 && m < total)
             .collect();
-        marks.dedup();
-        self.markers = marks;
+        marks.dedup_by_key(|p| p.0);
+        self.markers = marks.iter().map(|p| p.0).collect();
+        self.names = std::iter::once(names[0].clone())
+            .chain(marks.into_iter().map(|p| p.1))
+            .collect();
         let new_full = Loaded::new(sample);
         self.full = Some(new_full.clone());
         self.next_rev += 1;
