@@ -72,8 +72,6 @@ pub struct Panels {
     pub gain: bool,
     /// Undo, crop, loop scaling, export.
     pub tools: bool,
-    /// The main zoomable waveform.
-    pub wave: bool,
     /// The fixed 40 ms extreme-zoom strip.
     pub scalpel: bool,
     pub minimap: bool,
@@ -92,7 +90,6 @@ impl Default for Panels {
             nums: true,
             gain: true,
             tools: true,
-            wave: true,
             scalpel: true,
             minimap: true,
             stats: true,

@@ -166,9 +166,8 @@ pub fn show(
     let phase = pn.stats && ed.is_multichannel();
     let sec = SECTION_H + ui.spacing().item_spacing.y;
     let mut reserved = 0.0;
-    if pn.wave {
-        reserved += sec;
-    }
+    // The wave is always shown.
+    reserved += sec;
     if pn.nums {
         reserved += ui.spacing().interact_size.y + sec;
     }
@@ -201,12 +200,10 @@ pub fn show(
     };
     reserved += help_h;
 
-    if pn.wave {
-        section_header(ui, "Wave");
-        let wave_h = (avail.y - reserved - 12.0).max(80.0);
-        let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
-        waveform(ui, ed, &pv, rect, focused, &fades, trim.as_ref(), &mut out);
-    }
+    section_header(ui, "Wave");
+    let wave_h = (avail.y - reserved - 12.0).max(80.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
+    waveform(ui, ed, &pv, rect, focused, &fades, trim.as_ref(), &mut out);
 
     if pn.nums {
         section_header(ui, "Nums");

@@ -44,7 +44,7 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
 /// Sample / Kit switch, plus the kit's own buttons.
 pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
         let sample = s.sample_name.as_deref().unwrap_or("—");
         if ui
             .selectable_label(!s.showing_kit, crate::app::short_name(sample, 28))
@@ -326,7 +326,7 @@ fn grid_picker(ui: &mut Ui, cur: Option<usize>, out: &mut Vec<EdIntent>) {
 pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: bool) {
     section_header(ui, "Show");
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().item_spacing.x = 8.0;
         let items: Vec<(&mut bool, &str, &str)> = vec![
             (
                 &mut p.transport,
@@ -335,7 +335,6 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
             ),
             (&mut p.gain, "Gain", "Gain and normalize"),
             (&mut p.tools, "Tools", "Undo, crop, loop scaling, export"),
-            (&mut p.wave, "Wave", "Main waveform"),
             (
                 &mut p.nums,
                 "Nums",

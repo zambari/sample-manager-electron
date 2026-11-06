@@ -235,15 +235,14 @@ pub fn section_header(ui: &mut egui::Ui, label: &str) {
     }
 }
 
-/// Show / hide switch for a panel: no button fill, just a small dot and the
-/// label. On: filled orange dot, normal text. Off: hollow dot, dim text.
-/// Deliberately unlike the filled-chip toggles used for Loop / Snap etc.
+/// Show / hide switch for a panel: a flat, square-cornered Silkscreen label
+/// whose background is the indicator. On: low-alpha accent fill, normal text.
+/// Off: no fill, dim text. Quieter than the solid orange chips used for
+/// Loop / Snap etc., so the Show bar reads as its own thing.
 pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
-        let font = egui::TextStyle::Small.resolve(ui.style());
-        let dot_r = 3.0;
-        let gap = 4.0;
-        let pad = egui::vec2(3.0, 1.0);
+        let font = oled_font(12.0);
+        let pad = egui::vec2(6.0, 1.0);
         let text_color = if *on {
             ui.visuals().text_color()
         } else {
@@ -252,10 +251,7 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
         let galley = ui
             .painter()
             .layout_no_wrap(label.to_owned(), font, text_color);
-        let size = egui::vec2(
-            dot_r * 2.0 + gap + galley.size().x,
-            galley.size().y.max(dot_r * 2.0),
-        ) + pad * 2.0;
+        let size = galley.size() + pad * 2.0;
         let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
         if resp.clicked() {
             *on = !*on;
@@ -265,29 +261,17 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
             return resp;
         }
         let p = ui.painter();
-        if resp.hovered() {
-            p.rect_filled(
-                rect,
-                2.0,
-                ui.visuals()
-                    .widgets
-                    .hovered
-                    .weak_bg_fill
-                    .gamma_multiply(0.6),
-            );
+        let hovered = resp.hovered();
+        let fill = match (*on, hovered) {
+            (true, false) => Some(ACCENT.gamma_multiply(0.22)),
+            (true, true) => Some(ACCENT.gamma_multiply(0.32)),
+            (false, true) => Some(Color32::from_gray(32)),
+            (false, false) => None,
+        };
+        if let Some(f) = fill {
+            p.rect_filled(rect, 0.0, f);
         }
-        let c = egui::pos2(rect.left() + pad.x + dot_r, rect.center().y);
-        if *on {
-            p.circle_filled(c, dot_r, ACCENT_BRIGHT);
-        } else {
-            p.circle_stroke(
-                c,
-                dot_r - 0.5,
-                Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.7)),
-            );
-        }
-        let tp = egui::pos2(c.x + dot_r + gap, rect.center().y - galley.size().y / 2.0);
-        p.galley(tp, galley, text_color);
+        p.galley(rect.min + pad, galley, text_color);
         resp
     }
 }
