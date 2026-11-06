@@ -55,6 +55,10 @@ impl App {
 
     /// Load `path` into the editor, optionally starting playback once it's in.
     pub(super) fn audition(&mut self, path: &Path, play: bool) {
+        // A sliced "[N] name" file opens as a kit instead.
+        if self.open_browsed_kit(path, play) {
+            return;
+        }
         // Browsing always happens in the sample slot, not the kit.
         self.show_kit(false);
         if self.editor.path() == Some(path) {

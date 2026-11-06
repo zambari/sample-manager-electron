@@ -174,6 +174,9 @@ pub struct App {
     showing_kit: bool,
     /// Other open kits, waiting to be switched to (see [`kit`]).
     parked: Vec<Editor>,
+    /// Kit opened by browsing onto a sliced "[N] name" file. Browsing on
+    /// closes it again while it has no edits, so kits don't pile up.
+    browsed_kit: Option<kit::BrowsedKit>,
     /// Slice to add once the kit file finishes loading.
     kit_pending: Option<(crate::editor::AudioClip, Option<usize>)>,
     /// Grid picked last time, offered for the next new kit.
@@ -344,6 +347,7 @@ impl App {
             other,
             showing_kit: false,
             parked,
+            browsed_kit: None,
             kit_pending: None,
             kit_grid: saved
                 .as_ref()

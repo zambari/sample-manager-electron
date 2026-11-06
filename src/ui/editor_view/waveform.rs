@@ -266,6 +266,11 @@ pub(super) fn waveform(
         );
     }
 
+    if let Some(tp) = ed.trim_preview() {
+        let rate = ed.sample().map_or(1, |s| s.rate);
+        trim_overlay(&painter, &m, lanes, &tp, rate, &vis);
+    }
+
     slice_marks(&painter, &m, rect, RULER_H, &marks);
     marker(&painter, rect, x_in, IN_COLOR, true);
     marker(&painter, rect, x_out, OUT_COLOR, false);
@@ -475,6 +480,80 @@ pub(super) fn draw_lanes(
             }
         }
     }
+}
+
+/// Grid kit, part of a slot selected: shade the padding each slot would
+/// lose if the selection were deleted, mark where the next-longest slice
+/// ends in the selected slot, and say how much time it saves.
+fn trim_overlay(
+    painter: &egui::Painter,
+    m: &Map,
+    lanes: Rect,
+    tp: &crate::editor::TrimPreview,
+    rate: u32,
+    vis: &egui::Visuals,
+) {
+    let secs = |f: usize| f as f64 / rate.max(1) as f64;
+    let vline = |x: f32, col: Color32| {
+        if lanes.x_range().contains(x) {
+            painter.add(egui::Shape::dashed_line(
+                &[Pos2::new(x, lanes.top()), Pos2::new(x, lanes.bottom())],
+                Stroke::new(1.0, col),
+                4.0,
+                3.0,
+            ));
+        }
+    };
+    let per = tp.len - tp.new_len;
+    if per > 0 {
+        for i in 0..tp.n {
+            let (a, b) = (i * tp.len + tp.new_len, (i + 1) * tp.len);
+            let (xa, xb) = (m.x(a as f64), m.x(b as f64));
+            let r = Rect::from_x_y_ranges(
+                xa.max(lanes.left())..=xb.min(lanes.right()),
+                lanes.y_range(),
+            );
+            if r.width() > 0.0 {
+                painter.rect_filled(r, 0.0, OUT_COLOR.gamma_multiply(0.16));
+            }
+            vline(xa, OUT_COLOR.gamma_multiply(0.8));
+        }
+    }
+    // Where the slot length bottoms out: cutting further saves nothing more.
+    if tp.floor < tp.len {
+        vline(m.x((tp.slot * tp.len + tp.floor) as f64), MARK_COLOR);
+    }
+
+    let text = if per > 0 {
+        let mut t = format!(
+            "Delete: {} slots {:.3}s → {:.3}s  ·  −{:.3}s each, −{:.2}s in all",
+            tp.n,
+            secs(tp.len),
+            secs(tp.new_len),
+            secs(per),
+            secs(tp.saved()),
+        );
+        if tp.binding != tp.slot {
+            t.push_str(&format!(
+                "  ·  slot {} now sets the length — cutting more saves nothing",
+                tp.binding + 1
+            ));
+        }
+        t
+    } else {
+        format!(
+            "Slot {} is {:.3}s long and sets the slot length — cutting here saves nothing",
+            tp.binding + 1,
+            secs(tp.len)
+        )
+    };
+    let font = FontId::monospace(11.0);
+    let col = if per > 0 { OUT_COLOR } else { vis.weak_text_color() };
+    let galley = painter.layout(text, font, col, lanes.width() - 12.0);
+    let pos = Pos2::new(lanes.left() + 6.0, lanes.top() + 16.0);
+    let bg = Rect::from_min_size(pos, galley.size()).expand(3.0);
+    painter.rect_filled(bg, 3.0, vis.extreme_bg_color.gamma_multiply(0.85));
+    painter.galley(pos, galley, col);
 }
 
 /// Kit slice starts: a line down the whole view, a tab in the ruler and the

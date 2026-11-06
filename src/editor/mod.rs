@@ -17,7 +17,7 @@ mod clip;
 mod grid;
 mod history;
 
-pub use grid::{AUTO_GRID, GRID_SIZES, slot_prefix};
+pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
 mod selection;
 
 use history::History;

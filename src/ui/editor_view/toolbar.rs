@@ -63,6 +63,13 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
                 out.push(EdIntent::AddSlice);
             }
+            if let (n, Some(g)) = s.kit_fill {
+                if !s.showing_kit || n > 1 {
+                    // Auto shows the 8 to aim for, until it outgrows them.
+                    let total = if s.kit_grid == Some(crate::editor::AUTO_GRID) { g.max(8) } else { g };
+                    fill_boxes(ui, n, total);
+                }
+            }
         }
         if !s.showing_kit && ed.current.is_some() {
             ui.separator();
@@ -103,6 +110,37 @@ fn add_slice_button(ui: &mut Ui, enabled: bool, kit: &str) -> bool {
         color,
     );
     resp.clicked()
+}
+
+/// A row of small boxes, `filled` of `total` in orange: how close the grid
+/// kit is to full. Grouped in fours.
+fn fill_boxes(ui: &mut Ui, filled: usize, total: usize) {
+    let (side, gap, group_gap) = (7.0, 2.0, 5.0);
+    let groups = total.div_ceil(4);
+    let w = total as f32 * side + (total - 1) as f32 * gap + (groups - 1) as f32 * (group_gap - gap);
+    let h = ui.spacing().interact_size.y;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    resp.on_hover_text(format!("{filled} of {total} slots used"));
+    let v = ui.visuals();
+    let full = filled >= total;
+    let mut x = rect.left();
+    for i in 0..total {
+        if i > 0 {
+            x += if i % 4 == 0 { side + group_gap } else { side + gap };
+        }
+        let r = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - side / 2.0), egui::vec2(side, side));
+        if i < filled {
+            let c = if full { crate::ui::theme::ON_ACCENT } else { crate::ui::theme::ACCENT_BRIGHT };
+            ui.painter().rect_filled(r, 1.0, c);
+        } else {
+            ui.painter().rect_stroke(
+                r,
+                1.0,
+                egui::Stroke::new(1.0, v.weak_text_color()),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
 }
 
 /// The × at the right end of the kit tab. Added after the tab so clicks on

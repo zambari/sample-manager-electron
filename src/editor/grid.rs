@@ -34,7 +34,101 @@ fn is_empty(s: &Slice) -> bool {
     s.first().is_none_or(Vec::is_empty)
 }
 
+/// What removing the selection would do to a grid kit: every slot is as
+/// long as the longest slice, so trimming that one's tail shortens them all.
+pub struct TrimPreview {
+    /// Slot count.
+    pub n: usize,
+    /// Slot length now and after the cut, in frames.
+    pub len: usize,
+    pub new_len: usize,
+    /// The slot the selection is in.
+    pub slot: usize,
+    /// The longest sound among the other slots: the slot can't get
+    /// shorter than this, so cutting past it is where the savings start.
+    pub floor: usize,
+    /// The slot whose sound sets `new_len`.
+    pub binding: usize,
+}
+
+impl TrimPreview {
+    /// Frames saved across the whole kit.
+    pub fn saved(&self) -> usize {
+        (self.len - self.new_len) * self.n
+    }
+}
+
 impl Editor {
+    /// Sound length of each grid slot (up to its last non-zero frame).
+    fn slot_sound_lens(&self, n: usize) -> Option<(usize, Vec<usize>)> {
+        let full = self.full.as_ref()?;
+        let ch = &full.sample.channels;
+        let total = full.sample.frames();
+        let len = total / n;
+        if len == 0 {
+            return None;
+        }
+        let lens = (0..n)
+            .map(|i| {
+                let a = i * len;
+                (a..a + len)
+                    .rev()
+                    .find(|&f| ch.iter().any(|c| c[f] != 0.0))
+                    .map_or(0, |f| f + 1 - a)
+            })
+            .collect();
+        Some((len, lens))
+    }
+
+    /// In a grid kit, with part of one slot selected: how the slots would
+    /// shrink if the selection were removed.
+    pub fn trim_preview(&self) -> Option<TrimPreview> {
+        let n = self.grid?;
+        if !self.is_kit || self.crop.is_some() {
+            return None;
+        }
+        let (a, b) = self.sel;
+        let (len, mut lens) = self.slot_sound_lens(n)?;
+        if b <= a {
+            return None;
+        }
+        let slot = a / len;
+        let (s0, s1) = (slot * len, (slot + 1) * len);
+        // Within one slot, and not the whole of it (that removes the slice).
+        if slot >= n || b > s1 || (a == s0 && b == s1) {
+            return None;
+        }
+        let ch = &self.full.as_ref()?.sample.channels;
+        let (ra, rb) = (a - s0, b - s0);
+        let cur = lens[slot];
+        lens[slot] = if rb < cur {
+            cur - (rb - ra)
+        } else {
+            // The cut takes the end of the sound: what's left ends at the
+            // last non-zero frame before the selection.
+            (s0..a)
+                .rev()
+                .find(|&f| ch.iter().any(|c| c[f] != 0.0))
+                .map_or(0, |f| f + 1 - s0)
+        };
+        let floor = lens
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != slot)
+            .map(|(_, &l)| l)
+            .max()
+            .unwrap_or(0);
+        let (binding, &new_len) = lens.iter().enumerate().max_by_key(|&(_, l)| *l)?;
+        Some(TrimPreview {
+            n,
+            len,
+            new_len: new_len.max(1).min(len),
+            slot,
+            floor,
+            binding,
+        })
+    }
+
     /// The slices the markers mark out (whole file), trailing silence trimmed,
     /// so a grid slot gives back just its sound.
     fn slices(&self) -> Vec<Slice> {

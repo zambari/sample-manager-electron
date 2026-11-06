@@ -17,6 +17,13 @@ fn slot_name(ed: &Editor) -> Option<String> {
     )
 }
 
+/// A kit opened by browsing onto a sliced file (see [`App::open_browsed_kit`]).
+pub(super) struct BrowsedKit {
+    pub path: PathBuf,
+    /// The kit that was active before, to go back to when this one closes.
+    pub prev: Option<PathBuf>,
+}
+
 /// A slice waiting on the "name the kit" question.
 pub(super) struct KitNaming {
     pub clip: AudioClip,
@@ -445,6 +452,96 @@ impl App {
         self.status = format!(
             "{name} is the active kit — K adds the selection of whatever sample you're on{others}"
         );
+    }
+
+    /// Browsing onto an audio file. A "[N] name" file with slice markers in
+    /// it opens as a kit and is shown: returns true. Anything else closes the
+    /// unedited kit the last such file opened and returns false, so the file
+    /// loads as a plain sample.
+    pub(super) fn open_browsed_kit(&mut self, p: &Path, play: bool) -> bool {
+        let stem = p.file_stem().unwrap_or_default().to_string_lossy();
+        let sliced =
+            crate::editor::slot_prefix(&stem).is_some() && !crate::audio::cues::read(p).is_empty();
+        let held_as_sample =
+            !self.showing_kit && self.editor.path() == Some(p) && self.editor.is_dirty();
+        if !sliced || held_as_sample {
+            self.drop_browsed_kit(true);
+            return false;
+        }
+        if self.engine.is_playing() {
+            self.engine.stop();
+        }
+        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if self.browsed_kit.as_ref().is_some_and(|b| b.path == p) || self.switch_to_open(p) {
+            if self.kit().path() == Some(p) || self.kit().loading.as_deref() == Some(p) {
+                self.show_kit(true);
+                if play && self.kit().loading.is_none() {
+                    self.start_play();
+                }
+                return true;
+            }
+        }
+        // Replace the last browsed kit, and hand on which kit to go back to.
+        let dropped = self.drop_browsed_kit(false);
+        if let Some(e) = self.kit_busy() {
+            self.status = e.to_owned();
+            return false;
+        }
+        let prev = dropped.unwrap_or_else(|| self.kit().path().map(Path::to_path_buf));
+        // Empty if the browsed kit was just closed out of the slot.
+        self.park_kit();
+        self.kit_mut().request(p);
+        self.kit_mut().play_when_loaded = play;
+        self.browsed_kit = Some(BrowsedKit {
+            path: p.to_path_buf(),
+            prev,
+        });
+        self.show_kit(true);
+        self.status = format!(
+            "{name} has slice markers — opened as a kit (B goes back to the sample). Closes again when you browse on, unless you edit it"
+        );
+        true
+    }
+
+    /// Close the kit browsing opened, unless it has been edited (it's a
+    /// kit you're working on then, and stays). `restore`: make the kit
+    /// that was active before it the active one again. Returns what that
+    /// kit was (`Some(None)`: there wasn't one), or None when nothing closed.
+    fn drop_browsed_kit(&mut self, restore: bool) -> Option<Option<PathBuf>> {
+        let b = self.browsed_kit.take()?;
+        let active = self.kit().path() == Some(b.path.as_path())
+            || self.kit().loading.as_deref() == Some(b.path.as_path());
+        if active {
+            if self.kit().is_dirty() || self.kit().exporting {
+                return None;
+            }
+            if self.showing_kit && self.engine.is_playing() {
+                self.engine.stop();
+            }
+            self.kit_mut().close();
+            self.kit_pending = None;
+        } else {
+            // Switched away from it through the kit list: drop it from there.
+            let i = self.parked.iter().position(|k| k.path() == Some(b.path.as_path()))?;
+            if self.parked[i].is_dirty() {
+                return None;
+            }
+            self.parked.remove(i);
+            return Some(b.prev);
+        }
+        if restore {
+            let i = b
+                .prev
+                .as_deref()
+                .and_then(|prev| self.parked.iter().position(|k| k.path() == Some(prev)))
+                .or_else(|| self.parked.len().checked_sub(1));
+            if let Some(i) = i {
+                self.swap_with_parked(i);
+                self.parked.remove(i);
+                self.kit_grid = self.kit().grid_mode().or(self.kit_grid);
+            }
+        }
+        Some(b.prev)
     }
 
     /// Lay the kit out on `n` equal slots, or free it.

@@ -378,4 +378,4 @@ S snap to zero · V follow playback · [ / ] step in point (to zero crossings wh
 ⌘Z undo, ⇧⌘Z redo · ←/→ nudge playhead (⇧ ×10, ⌥ 1 frame) · Home/End jump to in/out · +/− zoom · F fit · Z zoom to region · \
 ⌘X / ⌘C / ⌘V cut / copy / paste (paste goes in at the playhead, or over a selection; works across files) · ⌫ delete selection · ⌘S save in place · \
 N normalize · G insert 100 ms of silence before the playhead · K add selection to slice kit · B show kit / sample · \
-in a kit: click near a slice marker parks the playhead on it, double-click selects that slice, ↩ exports the whole kit · ↩ export · ↑/↓ next/prev sample · Tab next column";
+in a kit: click near a slice marker parks the playhead on it, double-click selects that slice, ↩ exports the whole kit; on a grid, select a tail to see how much Delete would shorten every slot · ↩ export · ↑/↓ next/prev sample · Tab next column";
