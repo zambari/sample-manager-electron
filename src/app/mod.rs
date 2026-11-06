@@ -217,6 +217,9 @@ pub struct App {
     leave_after_save: Option<Leave>,
     /// Save in place is waiting on "trim to selection or whole file?".
     save_scope_pending: bool,
+    /// Files the editor is writing (`None`) or just wrote (when), for the
+    /// file table's highlight.
+    saving: std::collections::HashMap<PathBuf, Option<std::time::Instant>>,
     /// Export hit an existing file: waiting on a new name.
     export_naming: Option<ExportNaming>,
     /// The user okayed closing the window with edits unsaved (or saved them).
@@ -307,7 +310,7 @@ impl App {
             showing_kit: false,
             parked,
             kit_pending: None,
-            kit_grid: saved.as_ref().and_then(|s| s.kit_grid),
+            kit_grid: saved.as_ref().map_or(Some(crate::editor::AUTO_GRID), |s| s.kit_grid),
             kit_naming: None,
             editor_focused: false,
             devices: Engine::devices(),
@@ -333,6 +336,7 @@ impl App {
             leave_after_save: None,
             save_scope_pending: false,
             export_naming: None,
+            saving: Default::default(),
             allow_close: false,
             close_when_idle: false,
             jobs,

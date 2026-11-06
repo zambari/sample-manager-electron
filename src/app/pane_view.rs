@@ -119,6 +119,7 @@ impl App {
             let preview = &self.preview;
             let opened = &self.opened;
             let committed = &self.committed;
+            let saving = &self.saving;
             // Borrow the pane field directly rather than via `pane_mut`, so
             // the borrow checker can see it is disjoint from `sizes`/`preview`.
             let pane = match role {
@@ -134,6 +135,7 @@ impl App {
                     preview,
                     opened,
                     committed,
+                    saving,
                     pane_focused: focused,
                     clipboard: self.clipboard.as_ref(),
                     other_folder,

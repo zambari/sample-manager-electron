@@ -85,6 +85,9 @@ pub struct TableCtx<'a> {
     pub opened: &'a std::collections::HashSet<PathBuf>,
     /// Files already committed to a destination; drawn with a check badge.
     pub committed: &'a std::collections::HashSet<PathBuf>,
+    /// Files being written by the editor (`None`), or written at this
+    /// instant: drawn with a pulse, then a fading flash.
+    pub saving: &'a std::collections::HashMap<PathBuf, Option<std::time::Instant>>,
     pub pane_focused: bool,
     /// The clipboard, for dimming cut items and enabling Paste.
     pub clipboard: Option<&'a crate::ops::Clipboard>,
@@ -276,6 +279,30 @@ fn rows(
     }
 }
 
+/// How long the "saved" flash takes to fade out.
+pub const SAVE_FLASH_SECS: f32 = 1.5;
+
+/// Amber pulse while the file is being written, then a green flash that
+/// fades once it's on disk.
+fn paint_save_mark(ui: &Ui, rect: egui::Rect, done: Option<std::time::Instant>) {
+    let (color, alpha) = match done {
+        None => {
+            let t = ui.input(|i| i.time) as f32;
+            (egui::Color32::from_rgb(245, 190, 60), 0.25 + 0.2 * (t * 6.0).sin())
+        }
+        Some(at) => {
+            let k = 1.0 - at.elapsed().as_secs_f32() / SAVE_FLASH_SECS;
+            if k <= 0.0 {
+                return;
+            }
+            (egui::Color32::from_rgb(90, 210, 120), 0.5 * k)
+        }
+    };
+    ui.painter().rect_filled(rect, 2.0, color.gamma_multiply(alpha));
+    ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, color.gamma_multiply(alpha * 1.6)), StrokeKind::Inside);
+    ui.ctx().request_repaint();
+}
+
 fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -342,6 +369,9 @@ fn row(
             ui.visuals().selection.bg_fill.gamma_multiply(0.45)
         };
         ui.painter().rect_filled(rect, 2.0, fill);
+    }
+    if let Some(mark) = cx.saving.get(&entry.path) {
+        paint_save_mark(ui, rect, *mark);
     }
     if is_cursor && cx.pane_focused {
         ui.painter().rect_stroke(
@@ -568,7 +598,11 @@ fn row(
             && local
             && !entry.is_dir
             && crate::fs_model::is_audio_path(&entry.path)
-            && ui.button("Start kit").on_hover_text("Open as a slice kit — K then adds selections to it").clicked()
+            && ui.button("Load as kit").on_hover_text(
+                "Open as a slice kit — K then adds selections to it.\n\
+                 Slices come back from the file's cue points, or, without any, from an [8]-style\n\
+                 name prefix (8 equal slices)",
+            ).clicked()
         {
             intents.push(Intent::UseAsKit(entry.path.clone()));
             ui.close();
@@ -901,7 +935,7 @@ mod tests {
         };
         let mut out = ctx.run_ui(input, |ui| {
             egui::Panel::left("col").default_size(320.0).show(ui, |ui| {
-                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), pane_focused: true, clipboard: None, other_folder: None });
+                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), saving: &Default::default(), pane_focused: true, clipboard: None, other_folder: None });
             });
             egui::CentralPanel::default().show(ui, |_| {});
         });

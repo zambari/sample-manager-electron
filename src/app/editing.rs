@@ -184,6 +184,7 @@ impl App {
             self.mark_committed([p]);
         }
         self.status = format!("Exporting{} to {}…", mono.map_or(String::new(), |f| format!(" (mono {})", f.short())), dst.display());
+        self.saving.insert(dst.clone(), None);
         self.editor.export(dst, mono);
     }
 
@@ -192,6 +193,11 @@ impl App {
     /// When in / out leave part of the file out, ask whether to trim first.
     pub(super) fn save_in_place(&mut self) {
         if self.editor.current.is_none() || self.editor.exporting {
+            return;
+        }
+        // A new kit has no file yet: its first save is the export.
+        if self.showing_kit && !self.editor.path().is_some_and(Path::is_file) {
+            self.export();
             return;
         }
         if self.editor.is_trimmed() {
@@ -212,6 +218,7 @@ impl App {
         let target = crate::audio::export::target_for(&src, dir);
         self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
         let mono = self.editor.fold();
+        self.saving.insert(target.clone(), None);
         self.editor.export_with(target, mono, whole);
     }
 
@@ -407,6 +414,8 @@ impl App {
     }
     /// `is_kit`: `editor` is the kit slot right now.
     pub(super) fn absorb_editor(&mut self, is_kit: bool) {
+        let fade = std::time::Duration::from_secs_f32(crate::ui::file_table::SAVE_FLASH_SECS);
+        self.saving.retain(|_, done| done.is_none_or(|at| at.elapsed() < fade));
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
@@ -443,6 +452,7 @@ impl App {
                     }
                 }
                 Outcome::Exported(p) => {
+                    self.saving.insert(p.clone(), Some(std::time::Instant::now()));
                     self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
                     // A kit exported somewhere new: name it right away.
                     let rename = is_kit && self.editor.path() != Some(p.as_path());
@@ -475,6 +485,7 @@ impl App {
                     // edits it was saving are still unsaved: stay put.
                     self.staged_upload = None;
                     self.leave_after_save = None;
+                    self.saving.retain(|_, done| done.is_some());
                     self.errors.push(e);
                 }
             }
@@ -495,6 +506,7 @@ impl App {
             kit_fill: (self.kit().kit_fill(), self.kit().grid),
             kits: self.kit_list(),
             kit_saves_here: self.kit_saves_here(),
+            kit_on_disk: self.kit().path().is_some_and(Path::is_file),
             sample_name: self.browser().path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
         };
         let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export, &slots);
@@ -538,9 +550,6 @@ pub(super) struct ExportNaming {
 /// `[n] name.wav`, replacing a slot count already at the start of the name.
 fn with_slot_count(path: &Path, n: usize) -> PathBuf {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let base = match stem.trim_start().strip_prefix('[').and_then(|s| s.split_once(']')) {
-        Some((digits, rest)) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => rest.trim_start(),
-        _ => stem.trim_start(),
-    };
+    let base = crate::editor::slot_prefix(&stem).map_or(stem.trim_start(), |(_, rest)| rest);
     path.with_file_name(format!("[{n}] {base}.wav"))
 }

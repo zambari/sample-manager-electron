@@ -74,9 +74,14 @@ pub struct AppState {
     /// Other open kits, parked behind the one K adds to.
     #[serde(default)]
     pub parked_kits: Vec<crate::editor::Session>,
-    /// Grid slots last picked for a new kit (`None` = free).
-    #[serde(default)]
+    /// Grid slots last picked for a new kit (`None` = free). New key so
+    /// saves from before Auto was the default start on Auto.
+    #[serde(rename = "new_kit_grid", default = "default_kit_grid")]
     pub kit_grid: Option<usize>,
+}
+
+fn default_kit_grid() -> Option<usize> {
+    Some(crate::editor::AUTO_GRID)
 }
 
 fn default_focus() -> Role {

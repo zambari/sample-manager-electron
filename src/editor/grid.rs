@@ -14,6 +14,14 @@ pub const GRID_SIZES: [usize; 3] = [4, 8, 16];
 /// kit's slices, picked again after every add or cut.
 pub const AUTO_GRID: usize = 0;
 
+/// The `[N]` slot-count prefix of a file name stem ("[8] drums" → 8, "drums"),
+/// as put there when a grid kit is exported. Counts outside 2..=64 don't count.
+pub fn slot_prefix(stem: &str) -> Option<(usize, &str)> {
+    let (digits, rest) = stem.trim_start().strip_prefix('[')?.split_once(']')?;
+    let n: usize = digits.trim().parse().ok()?;
+    (2..=64).contains(&n).then(|| (n, rest.trim_start()))
+}
+
 /// Smallest grid size that holds `k` slices.
 fn auto_size(k: usize) -> Option<usize> {
     GRID_SIZES.into_iter().find(|&g| g >= k)

@@ -17,7 +17,7 @@ mod clip;
 mod grid;
 mod history;
 
-pub use grid::{AUTO_GRID, GRID_SIZES};
+pub use grid::{slot_prefix, AUTO_GRID, GRID_SIZES};
 mod selection;
 
 use history::History;
@@ -501,6 +501,14 @@ impl Editor {
     fn install(&mut self, loaded: Loaded, cues: Vec<usize>) {
         let frames = loaded.sample.frames();
         self.markers = if self.is_kit { cues.into_iter().filter(|&m| m > 0 && m < frames).collect() } else { Vec::new() };
+        // No cue points (stripped by another tool, or made elsewhere): an
+        // "[8] name" file is read as 8 equal slices.
+        if self.is_kit && self.markers.is_empty() {
+            let stem = loaded.sample.path.file_stem().unwrap_or_default().to_string_lossy();
+            if let Some((n, _)) = grid::slot_prefix(&stem).filter(|&(n, _)| n <= frames) {
+                self.markers = (1..n).map(|i| i * frames / n).collect();
+            }
+        }
         let memo = self.memos.get(&loaded.sample.path).copied();
         self.file_stats = stats::compute(&loaded.sample.channels, 0, frames, 1.0);
         self.full = Some(loaded.clone());

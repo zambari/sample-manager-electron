@@ -221,7 +221,7 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     draw_lanes(&painter, ed, &m, lanes, &vis);
 
     // Dim outside the region on top of the wave.
-    let dim = vis.extreme_bg_color.gamma_multiply(0.55);
+    let dim = vis.extreme_bg_color.gamma_multiply(if ed.is_kit { 0.2 } else { 0.55 });
     if x_in > rect.left() {
         painter.rect_filled(Rect::from_x_y_ranges(rect.left()..=x_in.min(rect.right()), lanes.y_range()), 0.0, dim);
     }
@@ -265,7 +265,9 @@ pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: R
     let lane_h = lanes.height() / n_ch as f32;
     let gain = ed.gain();
     let wave_in = crate::ui::theme::WAVE;
-    let wave_out = vis.weak_text_color();
+    // In a kit the other slices are content too, so keep them close to the
+    // selected one instead of greying them out like a trimmed-away region.
+    let wave_out = if ed.is_kit { wave_in.gamma_multiply(0.7) } else { vis.weak_text_color() };
 
     for (c, (data, peaks)) in cur.sample.channels.iter().zip(cur.peaks.iter()).enumerate() {
         let lane = Rect::from_min_size(

@@ -51,20 +51,8 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             kit_tab(ui, k, s, out);
             kit_switcher(ui, ed, s, out);
             grid_picker(ui, s.kit_grid, out);
-            if !s.showing_kit
-                && ui
-                    .add_enabled(ed.current.is_some(), egui::Button::new(RichText::new("→").size(20.0).strong()).min_size(egui::vec2(36.0, 0.0)))
-                    .on_hover_text(format!("K — add the selection (as you hear it) to the end of {k}"))
-                    .clicked()
-            {
+            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
                 out.push(EdIntent::AddSlice);
-            }
-            if ui
-                .add_enabled(!s.kit_dirty, egui::Button::new("×").small())
-                .on_hover_text(if s.kit_dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close the kit (the file stays)" })
-                .clicked()
-            {
-                out.push(EdIntent::CloseKit);
             }
         }
         if !s.showing_kit && ed.current.is_some() {
@@ -78,6 +66,49 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             }
         }
     });
+}
+
+/// The → (K) button: a big arrow in a button as tall as its neighbours.
+/// The arrow is painted on top so its large font doesn't make the button taller.
+fn add_slice_button(ui: &mut Ui, enabled: bool, kit: &str) -> bool {
+    let h = ui.spacing().interact_size.y;
+    let resp = ui
+        .add_enabled(enabled, egui::Button::new("").min_size(egui::vec2(h * 1.6, h)))
+        .on_hover_text(format!("K — add the selection (as you hear it) to the end of {kit}"));
+    let color = ui.style().interact(&resp).fg_stroke.color;
+    let color = if enabled { color } else { ui.visuals().weak_text_color() };
+    ui.painter().text(
+        resp.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "→",
+        egui::FontId::proportional(20.0),
+        color,
+    );
+    resp.clicked()
+}
+
+/// The × at the right end of the kit tab. Added after the tab so clicks on
+/// it reach it rather than the tab. Returns true when clicked.
+fn close_x(ui: &mut Ui, tab: egui::Rect, dirty: bool) -> bool {
+    let size = tab.height().min(16.0);
+    let rect = egui::Rect::from_center_size(egui::pos2(tab.right() - size / 2.0 - 3.0, tab.center().y), egui::vec2(size, size));
+    let resp = ui
+        .interact(rect, egui::Id::unique("kit_tab_close"), egui::Sense::click())
+        .on_hover_text(if dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close this kit (the file stays)" });
+    let v = ui.visuals();
+    let color = if dirty {
+        v.weak_text_color()
+    } else if resp.hovered() {
+        v.strong_text_color()
+    } else {
+        v.text_color()
+    };
+    if resp.hovered() && !dirty {
+        ui.painter().rect_filled(rect, 3.0, v.widgets.hovered.bg_fill);
+    }
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), color);
+    // A dirty kit refuses to close and says why in the status bar.
+    resp.clicked()
 }
 
 /// The Kit tab. Clicking it while the kit is showing (or double-clicking it)
@@ -116,12 +147,16 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
         if s.kit_dirty {
             label.push_str(" ●");
         }
+        // Room on the right for the × painted inside the tab.
+        label.push_str("     ");
         let resp = ui.selectable_label(s.showing_kit, label).on_hover_text(
             "B — the slice kit. [n] = slices so far; [n/8] = slots used of the grid's 8.\n\
              K adds the sample's selection to its end. ⌘S here saves the whole kit.\n\
              Click again (or double-click) to rename it — a saved kit's file is renamed too.",
         );
-        if resp.double_clicked() || (resp.clicked() && s.showing_kit) {
+        if close_x(ui, resp.rect, s.kit_dirty) {
+            out.push(EdIntent::CloseKit);
+        } else if resp.double_clicked() || (resp.clicked() && s.showing_kit) {
             let stem = k.strip_suffix(".wav").or_else(|| k.strip_suffix(".WAV")).unwrap_or(k);
             buf = Some(stem.to_owned());
         }
@@ -170,7 +205,7 @@ fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
         }
     })
     .response
-    .on_hover_text("Open kits — pick the one K adds to. Right-click a file → Start kit to open another.");
+    .on_hover_text("Open kits — pick the one K adds to. Right-click a file → Load as kit to open another.");
 }
 
 /// Free / 4 / 8 / 16 switch for the kit's layout.
@@ -427,13 +462,15 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
             // Save over the open file, no overwrite question. A kit that
             // lives in the destination already gets that from the button above.
             if !save_kit {
-                let tip = if showing_kit {
-                    "⌘S — write the whole kit back over its file"
+                let tip = if showing_kit && !slots.kit_on_disk {
+                    "The kit isn't saved anywhere yet — Export kit writes it to the destination first (⌘S does that too)"
+                } else if showing_kit {
+                    "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)"
                 } else {
                     "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file"
                 };
-                let can = !ed.exporting && if showing_kit { ed.is_dirty() } else { ed.can_save() };
-                if ui.add_enabled(can, egui::Button::new("Save in place")).on_hover_text(tip).clicked() {
+                let can = !ed.exporting && if showing_kit { slots.kit_on_disk && ed.is_dirty() } else { ed.can_save() };
+                if ui.add_enabled(can, egui::Button::new("Save in place")).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
                     out.push(EdIntent::SaveInPlace);
                 }
             }

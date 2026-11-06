@@ -76,6 +76,8 @@ pub struct Slots {
     /// The kit's file is already in the destination folder: exporting it
     /// would just overwrite it, so the button saves it in place instead.
     pub kit_saves_here: bool,
+    /// The kit's file exists (it was exported or opened from disk).
+    pub kit_on_disk: bool,
     /// Every open kit, sorted by name.
     pub kits: Vec<KitEntry>,
     /// File in the sample slot, shown or not.
