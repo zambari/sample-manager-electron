@@ -4,8 +4,15 @@ use super::*;
 
 pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) {
     ui.horizontal(|ui| {
-        if ui.add(crate::ui::theme::pane_title("Sample Editor", focused)).clicked() {
+        if ui.add(crate::ui::theme::mode_title("Sample Editor", true, focused)).clicked() {
             out.push(EdIntent::TookFocus);
+        }
+        if ui
+            .add(crate::ui::theme::pane_title("Elk Sample Order", false))
+            .on_hover_text("Reorder the sample pool of the project loaded on the Digitakt")
+            .clicked()
+        {
+            out.push(EdIntent::ElkMode);
         }
         ui.separator();
         if let Some(p) = ed.path() {
@@ -41,7 +48,9 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
         let sample = s.sample_name.as_deref().unwrap_or("—");
         if ui
             .selectable_label(!s.showing_kit, crate::app::short_name(sample, 28))
-            .on_hover_text("B — the sample you're browsing. Moving the file cursor always loads here.")
+            .on_hover_text(
+                "B — the sample you're browsing. Moving the file cursor always loads here.",
+            )
             .clicked()
         {
             out.push(EdIntent::ShowKit(false));
@@ -73,10 +82,19 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
 fn add_slice_button(ui: &mut Ui, enabled: bool, kit: &str) -> bool {
     let h = ui.spacing().interact_size.y;
     let resp = ui
-        .add_enabled(enabled, egui::Button::new("").min_size(egui::vec2(h * 1.6, h)))
-        .on_hover_text(format!("K — add the selection (as you hear it) to the end of {kit}"));
+        .add_enabled(
+            enabled,
+            egui::Button::new("").min_size(egui::vec2(h * 1.6, h)),
+        )
+        .on_hover_text(format!(
+            "K — add the selection (as you hear it) to the end of {kit}"
+        ));
     let color = ui.style().interact(&resp).fg_stroke.color;
-    let color = if enabled { color } else { ui.visuals().weak_text_color() };
+    let color = if enabled {
+        color
+    } else {
+        ui.visuals().weak_text_color()
+    };
     ui.painter().text(
         resp.rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -91,10 +109,21 @@ fn add_slice_button(ui: &mut Ui, enabled: bool, kit: &str) -> bool {
 /// it reach it rather than the tab. Returns true when clicked.
 fn close_x(ui: &mut Ui, tab: egui::Rect, dirty: bool) -> bool {
     let size = tab.height().min(16.0);
-    let rect = egui::Rect::from_center_size(egui::pos2(tab.right() - size / 2.0 - 3.0, tab.center().y), egui::vec2(size, size));
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(tab.right() - size / 2.0 - 3.0, tab.center().y),
+        egui::vec2(size, size),
+    );
     let resp = ui
-        .interact(rect, egui::Id::unique("kit_tab_close"), egui::Sense::click())
-        .on_hover_text(if dirty { "Save the kit (⌘S in kit view) before closing it" } else { "Close this kit (the file stays)" });
+        .interact(
+            rect,
+            egui::Id::unique("kit_tab_close"),
+            egui::Sense::click(),
+        )
+        .on_hover_text(if dirty {
+            "Save the kit (⌘S in kit view) before closing it"
+        } else {
+            "Close this kit (the file stays)"
+        });
     let v = ui.visuals();
     let color = if dirty {
         v.weak_text_color()
@@ -104,9 +133,16 @@ fn close_x(ui: &mut Ui, tab: egui::Rect, dirty: bool) -> bool {
         v.text_color()
     };
     if resp.hovered() && !dirty {
-        ui.painter().rect_filled(rect, 3.0, v.widgets.hovered.bg_fill);
+        ui.painter()
+            .rect_filled(rect, 3.0, v.widgets.hovered.bg_fill);
     }
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), color);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        egui::FontId::proportional(14.0),
+        color,
+    );
     // A dirty kit refuses to close and says why in the status bar.
     resp.clicked()
 }
@@ -122,7 +158,11 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
     }
     if let Some(text) = &mut buf {
         ui.label("Kit:");
-        let resp = ui.add(egui::TextEdit::singleline(text).id(field_id).desired_width(180.0));
+        let resp = ui.add(
+            egui::TextEdit::singleline(text)
+                .id(field_id)
+                .desired_width(180.0),
+        );
         let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
         if !resp.has_focus() && !resp.lost_focus() {
             resp.request_focus();
@@ -157,7 +197,10 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
         if close_x(ui, resp.rect, s.kit_dirty) {
             out.push(EdIntent::CloseKit);
         } else if resp.double_clicked() || (resp.clicked() && s.showing_kit) {
-            let stem = k.strip_suffix(".wav").or_else(|| k.strip_suffix(".WAV")).unwrap_or(k);
+            let stem = k
+                .strip_suffix(".wav")
+                .or_else(|| k.strip_suffix(".WAV"))
+                .unwrap_or(k);
             buf = Some(stem.to_owned());
         }
         if resp.clicked() && !s.showing_kit {
@@ -177,7 +220,11 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
 /// ▾ menu next to the Kit tab: the open kits, to pick which one K adds to,
 /// and "New kit" to start another.
 fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
-    let label = if s.kits.len() > 1 { format!("▾ {}", s.kits.len()) } else { "▾".to_owned() };
+    let label = if s.kits.len() > 1 {
+        format!("▾ {}", s.kits.len())
+    } else {
+        "▾".to_owned()
+    };
     ui.menu_button(label, |ui| {
         for k in &s.kits {
             let mut text = k.name.clone();
@@ -205,7 +252,9 @@ fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
         }
     })
     .response
-    .on_hover_text("Open kits — pick the one K adds to. Right-click a file → Load as kit to open another.");
+    .on_hover_text(
+        "Open kits — pick the one K adds to. Right-click a file → Load as kit to open another.",
+    );
 }
 
 /// Free / 4 / 8 / 16 switch for the kit's layout.
@@ -241,31 +290,55 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         let items: [(&mut bool, &str, &str); 9] = [
-            (&mut p.transport, "Transport", "Play, loop, follow, snap and auto-load / auto-play"),
+            (
+                &mut p.transport,
+                "Transport",
+                "Play, loop, follow, snap and auto-load / auto-play",
+            ),
             (&mut p.gain, "Gain", "Gain and normalize"),
             (&mut p.tools, "Tools", "Undo, crop, loop scaling, export"),
             (&mut p.wave, "Wave", "Main waveform"),
-            (&mut p.nums, "Nums", "In / out / len / playhead readout, under the waveform"),
-            (&mut p.scalpel, "Scalpel", "40 ms extreme-zoom strip around the playhead"),
-            (&mut p.minimap, "Map", "Minimap: the whole file, click to jump"),
+            (
+                &mut p.nums,
+                "Nums",
+                "In / out / len / playhead readout, under the waveform",
+            ),
+            (
+                &mut p.scalpel,
+                "Scalpel",
+                "40 ms extreme-zoom strip around the playhead",
+            ),
+            (
+                &mut p.minimap,
+                "Map",
+                "Minimap: the whole file, click to jump",
+            ),
             (&mut p.stats, "Stats", "Stats table and phase meter"),
             (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
         for (v, label, hover) in items {
-            ui.add(vis_toggle(v, label)).on_hover_text(format!("Show / hide: {hover}"));
+            ui.add(vis_toggle(v, label))
+                .on_hover_text(format!("Show / hide: {hover}"));
         }
     });
 }
 
-pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
+pub(super) fn toolbar(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    pv: &PlayView,
+    can_export: bool,
+    slots: &Slots,
+    out: &mut Vec<EdIntent>,
+) {
     let showing_kit = slots.showing_kit;
     let save_kit = showing_kit && slots.kit_saves_here;
     let playing = pv.playing;
     let has = ed.current.is_some();
     let pn = ed.prefs.panels.clone();
     if pn.transport {
-    section_header(ui, "Transport");
-    ui.horizontal_wrapped(|ui| {
+        section_header(ui, "Transport");
+        ui.horizontal_wrapped(|ui| {
         let icon = if playing { "⏹" } else { "▶" };
         let hover = if playing { "Stop (Space)" } else { "Play (Space)" };
         if ui.add_enabled(has, egui::Button::new(icon)).on_hover_text(hover).clicked() {
@@ -303,36 +376,44 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
     });
     }
     if pn.gain {
-    section_header(ui, "Gain");
-    ui.horizontal_wrapped(|ui| {
-        ui.add_enabled_ui(has, |ui| {
-            ui.label("Gain");
-            ui.add(
-                egui::Slider::new(&mut ed.gain_db, -36.0..=36.0)
-                    .suffix(" dB")
-                    .step_by(0.1)
-                    .clamping(egui::SliderClamping::Never),
-            )
-            .on_hover_text("Double-click the number to type a value");
-            if ui.button("Normalize").on_hover_text("N — set gain so the region peaks at the target").clicked() {
-                ed.normalize();
-            }
-            ui.add(
-                egui::DragValue::new(&mut ed.prefs.normalize_db)
-                    .range(-24.0..=0.0)
-                    .speed(0.05)
-                    .suffix(" dB"),
-            )
-            .on_hover_text("Normalize target peak");
-            if ui.button("Reset").on_hover_text("Whole file, 0 dB").clicked() {
-                ed.reset();
-            }
+        section_header(ui, "Gain");
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(has, |ui| {
+                ui.label("Gain");
+                ui.add(
+                    egui::Slider::new(&mut ed.gain_db, -36.0..=36.0)
+                        .suffix(" dB")
+                        .step_by(0.1)
+                        .clamping(egui::SliderClamping::Never),
+                )
+                .on_hover_text("Double-click the number to type a value");
+                if ui
+                    .button("Normalize")
+                    .on_hover_text("N — set gain so the region peaks at the target")
+                    .clicked()
+                {
+                    ed.normalize();
+                }
+                ui.add(
+                    egui::DragValue::new(&mut ed.prefs.normalize_db)
+                        .range(-24.0..=0.0)
+                        .speed(0.05)
+                        .suffix(" dB"),
+                )
+                .on_hover_text("Normalize target peak");
+                if ui
+                    .button("Reset")
+                    .on_hover_text("Whole file, 0 dB")
+                    .clicked()
+                {
+                    ed.reset();
+                }
+            });
         });
-    });
     }
     if pn.tools {
-    section_header(ui, "Tools");
-    ui.horizontal_wrapped(|ui| {
+        section_header(ui, "Tools");
+        ui.horizontal_wrapped(|ui| {
         ui.add_enabled_ui(has, |ui| {
             if ui.add_enabled(ed.can_undo(), egui::Button::new("↶ Undo")).on_hover_text("⌘Z").clicked() {
                 ed.undo();
@@ -490,20 +571,28 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
 /// In / out / length / playhead readout. In and out are drag-or-type fields
 /// in frames for when the mouse isn't precise enough.
 pub(super) fn positions(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
-    let Some(s) = ed.sample().cloned() else { return };
+    let Some(s) = ed.sample().cloned() else {
+        return;
+    };
     let frames = s.frames();
     let secs = |f: usize| format!("{:.3}s", s.seconds(f));
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("In").color(IN_COLOR));
         let mut i = ed.sel.0;
-        if ui.add(egui::DragValue::new(&mut i).range(0..=frames).speed(1.0)).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut i).range(0..=frames).speed(1.0))
+            .changed()
+        {
             ed.sel.0 = i.min(ed.sel.1.saturating_sub(1));
         }
         ui.label(RichText::new(secs(ed.sel.0)).weak().monospace());
         ui.separator();
         ui.label(RichText::new("Out").color(OUT_COLOR));
         let mut o = ed.sel.1;
-        if ui.add(egui::DragValue::new(&mut o).range(0..=frames).speed(1.0)).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut o).range(0..=frames).speed(1.0))
+            .changed()
+        {
             ed.sel.1 = o.max(ed.sel.0 + 1).min(frames);
         }
         ui.label(RichText::new(secs(ed.sel.1)).weak().monospace());
@@ -511,7 +600,15 @@ pub(super) fn positions(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
         let len = ed.sel.1 - ed.sel.0;
         ui.label(RichText::new(format!("Len {} · {len} fr", secs(len))).monospace());
         ui.separator();
-        let (label, f) = if pv.playing { ("▶", pv.pos) } else { ("▸", ed.playhead) };
-        ui.label(RichText::new(format!("{label} {}", secs(f.min(frames)))).color(PLAY_COLOR).monospace());
+        let (label, f) = if pv.playing {
+            ("▶", pv.pos)
+        } else {
+            ("▸", ed.playhead)
+        };
+        ui.label(
+            RichText::new(format!("{label} {}", secs(f.min(frames))))
+                .color(PLAY_COLOR)
+                .monospace(),
+        );
     });
 }

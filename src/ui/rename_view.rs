@@ -17,7 +17,10 @@ pub fn show(ui: &mut Ui, mr: &mut MultiRename, pane_focused: bool) -> Option<Out
     let mut out = None;
     let rows = mr.preview();
     let n_change = rows.iter().filter(|r| r.status == Status::Ok).count();
-    let n_bad = rows.iter().filter(|r| matches!(r.status, Status::Problem(_))).count();
+    let n_bad = rows
+        .iter()
+        .filter(|r| matches!(r.status, Status::Problem(_)))
+        .count();
     let can_apply = n_change > 0 && n_bad == 0;
 
     ui.add_space(4.0);
@@ -29,23 +32,30 @@ pub fn show(ui: &mut Ui, mr: &mut MultiRename, pane_focused: bool) -> Option<Out
     ui.add_space(4.0);
 
     let mut field_focused = false;
-    egui::Grid::new("multi_rename_fields").num_columns(2).spacing([6.0, 4.0]).show(ui, |ui| {
-        ui.label("Find");
-        let find = ui.add(
-            egui::TextEdit::singleline(&mut mr.find).desired_width(f32::INFINITY).hint_text("text to replace"),
-        );
-        if std::mem::take(&mut mr.focus_find) {
-            find.request_focus();
-        }
-        field_focused |= find.has_focus() || find.lost_focus();
-        ui.end_row();
-        ui.label("Replace");
-        let rep = ui.add(
-            egui::TextEdit::singleline(&mut mr.replace).desired_width(f32::INFINITY).hint_text("replace with (empty removes)"),
-        );
-        field_focused |= rep.has_focus() || rep.lost_focus();
-        ui.end_row();
-    });
+    egui::Grid::new("multi_rename_fields")
+        .num_columns(2)
+        .spacing([6.0, 4.0])
+        .show(ui, |ui| {
+            ui.label("Find");
+            let find = ui.add(
+                egui::TextEdit::singleline(&mut mr.find)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("text to replace"),
+            );
+            if std::mem::take(&mut mr.focus_find) {
+                find.request_focus();
+            }
+            field_focused |= find.has_focus() || find.lost_focus();
+            ui.end_row();
+            ui.label("Replace");
+            let rep = ui.add(
+                egui::TextEdit::singleline(&mut mr.replace)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("replace with (empty removes)"),
+            );
+            field_focused |= rep.has_focus() || rep.lost_focus();
+            ui.end_row();
+        });
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut mr.match_case, "Match case");
         ui.checkbox(&mut mr.keep_ext, "Keep extensions")
@@ -57,53 +67,79 @@ pub fn show(ui: &mut Ui, mr: &mut MultiRename, pane_focused: bool) -> Option<Out
         if ui.button("Cancel").on_hover_text("Esc").clicked() {
             out = Some(Outcome::Cancel);
         }
-        if ui.button("Clear").on_hover_text("Empty both fields").clicked() {
+        if ui
+            .button("Clear")
+            .on_hover_text("Empty both fields")
+            .clicked()
+        {
             mr.find.clear();
             mr.replace.clear();
             mr.focus_find = true;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = if n_change == 0 { "Apply".to_owned() } else { format!("Apply ({n_change})") };
-            let tip = if n_bad > 0 { "Fix the problems marked in red first" } else { "↩" };
-            if ui.add_enabled(can_apply, egui::Button::new(label)).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+            let label = if n_change == 0 {
+                "Apply".to_owned()
+            } else {
+                format!("Apply ({n_change})")
+            };
+            let tip = if n_bad > 0 {
+                "Fix the problems marked in red first"
+            } else {
+                "↩"
+            };
+            if ui
+                .add_enabled(can_apply, egui::Button::new(label))
+                .on_hover_text(tip)
+                .on_disabled_hover_text(tip)
+                .clicked()
+            {
                 out = Some(Outcome::Apply(Vec::new()));
             }
         });
     });
 
     let summary = {
-        let mut s = format!("{n_change} will change · {} unchanged", rows.len() - n_change - n_bad);
+        let mut s = format!(
+            "{n_change} will change · {} unchanged",
+            rows.len() - n_change - n_bad
+        );
         if n_bad > 0 {
             s += &format!(" · {n_bad} problem{}", if n_bad == 1 { "" } else { "s" });
         }
         s
     };
-    ui.label(RichText::new(summary).small().color(if n_bad > 0 { ui.visuals().error_fg_color } else { ui.visuals().weak_text_color() }));
+    ui.label(RichText::new(summary).small().color(if n_bad > 0 {
+        ui.visuals().error_fg_color
+    } else {
+        ui.visuals().weak_text_color()
+    }));
     ui.separator();
 
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let font = FontId::monospace(12.0);
-        let text = ui.visuals().text_color();
-        let weak = ui.visuals().weak_text_color();
-        let err = ui.visuals().error_fg_color;
-        for r in &rows {
-            match &r.status {
-                Status::Unchanged => {
-                    ui.label(job("", &r.old, &[], &font, weak, weak, false));
-                }
-                Status::Ok | Status::Problem(_) => {
-                    let bad = matches!(r.status, Status::Problem(_));
-                    ui.label(job("", &r.old, &r.old_hits, &font, weak, HIT_OLD, true));
-                    let (color, hit) = if bad { (err, err) } else { (text, HIT_NEW) };
-                    ui.label(job("→ ", &r.new, &r.new_hits, &font, color, hit, false));
-                    if let Status::Problem(why) = &r.status {
-                        ui.label(RichText::new(format!("  ⚠ {why}")).small().color(err));
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let font = FontId::monospace(12.0);
+            let text = ui.visuals().text_color();
+            let weak = ui.visuals().weak_text_color();
+            let err = ui.visuals().error_fg_color;
+            for r in &rows {
+                match &r.status {
+                    Status::Unchanged => {
+                        ui.label(job("", &r.old, &[], &font, weak, weak, false));
+                    }
+                    Status::Ok | Status::Problem(_) => {
+                        let bad = matches!(r.status, Status::Problem(_));
+                        ui.label(job("", &r.old, &r.old_hits, &font, weak, HIT_OLD, true));
+                        let (color, hit) = if bad { (err, err) } else { (text, HIT_NEW) };
+                        ui.label(job("→ ", &r.new, &r.new_hits, &font, color, hit, false));
+                        if let Status::Problem(why) = &r.status {
+                            ui.label(RichText::new(format!("  ⚠ {why}")).small().color(err));
+                        }
                     }
                 }
+                ui.add_space(3.0);
             }
-            ui.add_space(3.0);
-        }
-    });
+        });
 
     // Enter applies, Esc cancels -- from the fields, or anywhere in this pane.
     if field_focused || pane_focused {
@@ -129,7 +165,15 @@ pub fn show(ui: &mut Ui, mr: &mut MultiRename, pane_focused: bool) -> Option<Out
 /// `prefix` then `text`, with `hits` drawn in `hit` (struck through with
 /// `strike`) and the rest in `base`. Labels wrap, so long names stay
 /// readable in a narrow pane.
-fn job(prefix: &str, text: &str, hits: &[std::ops::Range<usize>], font: &FontId, base: Color32, hit: Color32, strike: bool) -> LayoutJob {
+fn job(
+    prefix: &str,
+    text: &str,
+    hits: &[std::ops::Range<usize>],
+    font: &FontId,
+    base: Color32,
+    hit: Color32,
+    strike: bool,
+) -> LayoutJob {
     let mut j = LayoutJob::default();
     let plain = TextFormat::simple(font.clone(), base);
     let mut marked = TextFormat::simple(font.clone(), hit);

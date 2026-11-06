@@ -30,7 +30,10 @@ pub fn volumes() -> Vec<Volume> {
         for c in 'A'..='Z' {
             let path = PathBuf::from(format!("{c}:\\"));
             if path.is_dir() {
-                out.push(Volume { name: format!("{c}:"), path });
+                out.push(Volume {
+                    name: format!("{c}:"),
+                    path,
+                });
             }
         }
         return out;
@@ -42,11 +45,19 @@ pub fn volumes() -> Vec<Volume> {
     let parents: Vec<PathBuf> = if cfg!(target_os = "macos") {
         vec!["/Volumes".into()]
     } else {
-        let user = std::env::var_os("USER").map(PathBuf::from).unwrap_or_default();
-        vec![Path::new("/media").join(&user), Path::new("/run/media").join(&user), "/mnt".into()]
+        let user = std::env::var_os("USER")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        vec![
+            Path::new("/media").join(&user),
+            Path::new("/run/media").join(&user),
+            "/mnt".into(),
+        ]
     };
     for dir in parents {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
@@ -64,10 +75,18 @@ pub fn volumes() -> Vec<Volume> {
         }
     }
     mounts.sort();
-    out.push(Volume { name: root_name, path: root });
-    out.extend(mounts.into_iter().map(|path| Volume {
-        name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-        path,
+    out.push(Volume {
+        name: root_name,
+        path: root,
+    });
+    out.extend(mounts.into_iter().map(|path| {
+        Volume {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path,
+        }
     }));
     out
 }
@@ -115,7 +134,9 @@ impl Entry {
 /// it stays cheap even for huge folders. Unreadable folders aren't "empty".
 fn dir_is_empty(path: &Path) -> bool {
     match std::fs::read_dir(path) {
-        Ok(rd) => !rd.flatten().any(|de| !de.file_name().to_string_lossy().starts_with('.')),
+        Ok(rd) => !rd
+            .flatten()
+            .any(|de| !de.file_name().to_string_lossy().starts_with('.')),
         Err(_) => false,
     }
 }
@@ -221,7 +242,9 @@ fn take_number(it: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u128 {
         }
         it.next();
         // Saturate rather than wrap on absurdly long digit runs.
-        n = n.saturating_mul(10).saturating_add((c as u8 - b'0') as u128);
+        n = n
+            .saturating_mul(10)
+            .saturating_add((c as u8 - b'0') as u128);
     }
     n
 }
@@ -294,7 +317,11 @@ mod tests {
             is_audio: false,
             empty: false,
         };
-        let mut v = vec![mk("zed.wav", false), mk("alpha", true), mk("abc.wav", false)];
+        let mut v = vec![
+            mk("zed.wav", false),
+            mk("alpha", true),
+            mk("abc.wav", false),
+        ];
         sort_entries(&mut v, SortKey::Name, true);
         assert_eq!(
             v.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),

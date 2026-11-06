@@ -36,8 +36,18 @@ pub fn apply(ctx: &egui::Context) {
         v.window_stroke = Stroke::new(1.0, Color32::from_gray(56));
         v.window_corner_radius = CornerRadius::same(3);
         v.menu_corner_radius = CornerRadius::same(3);
-        v.window_shadow = Shadow { offset: [0, 8], blur: 18, spread: 0, color: Color32::from_black_alpha(110) };
-        v.popup_shadow = Shadow { offset: [0, 4], blur: 10, spread: 0, color: Color32::from_black_alpha(100) };
+        v.window_shadow = Shadow {
+            offset: [0, 8],
+            blur: 18,
+            spread: 0,
+            color: Color32::from_black_alpha(110),
+        };
+        v.popup_shadow = Shadow {
+            offset: [0, 4],
+            blur: 10,
+            spread: 0,
+            color: Color32::from_black_alpha(100),
+        };
 
         v.selection.bg_fill = ACCENT;
         v.selection.stroke = Stroke::new(1.0, ON_ACCENT);
@@ -67,7 +77,13 @@ pub fn apply(ctx: &egui::Context) {
         w.open.weak_bg_fill = Color32::from_gray(46);
         w.open.bg_stroke = Stroke::new(1.0, Color32::from_gray(70));
 
-        for wv in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+        for wv in [
+            &mut w.noninteractive,
+            &mut w.inactive,
+            &mut w.hovered,
+            &mut w.active,
+            &mut w.open,
+        ] {
             wv.corner_radius = r;
             wv.expansion = 0.0;
         }
@@ -80,13 +96,32 @@ pub fn apply(ctx: &egui::Context) {
 /// A column's title (Source / Sample Editor / Destination): plain text that
 /// lights up orange with an underline when that column has keyboard focus.
 pub fn pane_title(label: &str, focused: bool) -> impl egui::Widget + '_ {
+    mode_title(label, focused, focused)
+}
+
+/// A title that doubles as a mode switch (Sample Editor / Elk Sample Order):
+/// the active mode is always underlined so you can tell which one you're in;
+/// it lights up orange only when its column also has keyboard focus.
+pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget + '_ {
     move |ui: &mut egui::Ui| {
-        let text = egui::RichText::new(label.to_uppercase()).size(12.0).strong();
-        let text = if focused { text.color(ACCENT_BRIGHT) } else { text.color(ui.visuals().weak_text_color()) };
+        let text = egui::RichText::new(label.to_uppercase())
+            .size(12.0)
+            .strong();
+        let text = if focused {
+            text.color(ACCENT_BRIGHT)
+        } else if active {
+            text.color(ui.visuals().strong_text_color())
+        } else {
+            text.color(ui.visuals().weak_text_color())
+        };
         let resp = ui.add(egui::Button::new(text).frame(false));
-        if focused {
+        if active {
             let r = resp.rect;
-            ui.painter().hline(r.x_range().shrink(4.0), r.bottom(), Stroke::new(2.0, ACCENT));
+            ui.painter().hline(
+                r.x_range().shrink(4.0),
+                r.bottom(),
+                Stroke::new(2.0, ACCENT),
+            );
         }
         resp
     }
@@ -102,7 +137,11 @@ pub fn pane_tab(label: &str, active: bool) -> impl egui::Widget + '_ {
     move |ui: &mut egui::Ui| {
         let pad = egui::vec2(10.0, 3.0);
         let font = egui::TextStyle::Button.resolve(ui.style());
-        let color = if active { ACCENT_BRIGHT } else { ui.visuals().text_color() };
+        let color = if active {
+            ACCENT_BRIGHT
+        } else {
+            ui.visuals().text_color()
+        };
         let galley = ui.painter().layout_no_wrap(label.to_owned(), font, color);
         let size = galley.size() + pad * 2.0;
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -112,16 +151,28 @@ pub fn pane_tab(label: &str, active: bool) -> impl egui::Widget + '_ {
 
         let p = ui.painter();
         let rad = TAB_RADIUS as u8;
-        let corners = CornerRadius { nw: rad, ne: rad, sw: 0, se: 0 };
+        let corners = CornerRadius {
+            nw: rad,
+            ne: rad,
+            sw: 0,
+            se: 0,
+        };
         let w = &ui.visuals().widgets;
         if active {
             if resp.hovered() {
                 p.rect_filled(rect, corners, w.inactive.weak_bg_fill.gamma_multiply(0.5));
             }
             let stroke = Stroke::new(1.0, ACCENT_BRIGHT.gamma_multiply(0.8));
-            p.add(egui::Shape::line(open_tab_outline(rect.shrink(0.5)), stroke));
+            p.add(egui::Shape::line(
+                open_tab_outline(rect.shrink(0.5)),
+                stroke,
+            ));
         } else {
-            let fill = if resp.hovered() { w.hovered.weak_bg_fill } else { w.inactive.weak_bg_fill };
+            let fill = if resp.hovered() {
+                w.hovered.weak_bg_fill
+            } else {
+                w.inactive.weak_bg_fill
+            };
             p.rect_filled(rect, corners, fill);
         }
         p.galley(rect.min + pad, galley, color);
@@ -141,8 +192,18 @@ fn open_tab_outline(r: egui::Rect) -> Vec<egui::Pos2> {
         }
     };
     let mut pts = vec![r.left_bottom()];
-    arc(egui::pos2(r.left() + rad, r.top() + rad), PI, PI + FRAC_PI_2, &mut pts);
-    arc(egui::pos2(r.right() - rad, r.top() + rad), -FRAC_PI_2, 0.0, &mut pts);
+    arc(
+        egui::pos2(r.left() + rad, r.top() + rad),
+        PI,
+        PI + FRAC_PI_2,
+        &mut pts,
+    );
+    arc(
+        egui::pos2(r.right() - rad, r.top() + rad),
+        -FRAC_PI_2,
+        0.0,
+        &mut pts,
+    );
     pts.push(r.right_bottom());
     pts
 }
@@ -166,7 +227,11 @@ pub fn section_header(ui: &mut egui::Ui, label: &str) {
     let line_x = rect.left() + galley.size().x + 5.0;
     p.galley(text_pos, galley, color);
     if line_x < rect.right() {
-        p.hline(line_x..=rect.right(), y + 0.5, Stroke::new(1.0, Color32::from_gray(44)));
+        p.hline(
+            line_x..=rect.right(),
+            y + 0.5,
+            Stroke::new(1.0, Color32::from_gray(44)),
+        );
     }
 }
 
@@ -179,9 +244,18 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
         let dot_r = 3.0;
         let gap = 4.0;
         let pad = egui::vec2(3.0, 1.0);
-        let text_color = if *on { ui.visuals().text_color() } else { ui.visuals().weak_text_color().gamma_multiply(0.7) };
-        let galley = ui.painter().layout_no_wrap(label.to_owned(), font, text_color);
-        let size = egui::vec2(dot_r * 2.0 + gap + galley.size().x, galley.size().y.max(dot_r * 2.0)) + pad * 2.0;
+        let text_color = if *on {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color().gamma_multiply(0.7)
+        };
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label.to_owned(), font, text_color);
+        let size = egui::vec2(
+            dot_r * 2.0 + gap + galley.size().x,
+            galley.size().y.max(dot_r * 2.0),
+        ) + pad * 2.0;
         let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
         if resp.clicked() {
             *on = !*on;
@@ -192,16 +266,55 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
         }
         let p = ui.painter();
         if resp.hovered() {
-            p.rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
+            p.rect_filled(
+                rect,
+                2.0,
+                ui.visuals()
+                    .widgets
+                    .hovered
+                    .weak_bg_fill
+                    .gamma_multiply(0.6),
+            );
         }
         let c = egui::pos2(rect.left() + pad.x + dot_r, rect.center().y);
         if *on {
             p.circle_filled(c, dot_r, ACCENT_BRIGHT);
         } else {
-            p.circle_stroke(c, dot_r - 0.5, Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.7)));
+            p.circle_stroke(
+                c,
+                dot_r - 0.5,
+                Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.7)),
+            );
         }
         let tp = egui::pos2(c.x + dot_r + gap, rect.center().y - galley.size().y / 2.0);
         p.galley(tp, galley, text_color);
         resp
     }
+}
+
+/// Font family for device-screen text (Silkscreen pixel font).
+pub const OLED_FAMILY: &str = "oled";
+
+/// Registers the pixel font as `OLED_FAMILY`, falling back to the default
+/// fonts for glyphs it lacks (accents, symbols).
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "silkscreen".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/slkscr.ttf"
+        ))),
+    );
+    let mut fam = vec!["silkscreen".to_owned()];
+    fam.extend(
+        fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(OLED_FAMILY.into()), fam);
+    ctx.set_fonts(fonts);
 }

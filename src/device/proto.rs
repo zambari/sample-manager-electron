@@ -25,6 +25,13 @@ pub const READ: u8 = 0x32;
 pub const WRITE_OPEN: u8 = 0x40;
 pub const WRITE_CLOSE: u8 = 0x41;
 pub const WRITE: u8 = 0x42;
+/// `hash, length` → path of that file on the +Drive.
+pub const SAMPLE_INFO: u8 = 0x23;
+/// Data API (saved projects, sounds): list a folder.
+pub const DATA_LIST: u8 = 0x53;
+/// Data API writes, moves, copies, clears and swaps. These change saved
+/// projects on the +Drive; never sent (see project_discovery.md §0).
+pub const FORBIDDEN: [u8; 7] = [0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D];
 
 /// Bytes per read/write chunk, as elk-herd uses.
 pub const CHUNK: usize = 0x2000;
@@ -95,7 +102,10 @@ impl Args {
     pub fn str(mut self, s: &str) -> Self {
         // Latin-1 is Windows-1252 apart from 0x80-0x9F; close enough for
         // file names. Anything wider becomes '?'.
-        self.0.extend(s.chars().map(|c| if (c as u32) < 0x100 { c as u8 } else { b'?' }));
+        self.0.extend(
+            s.chars()
+                .map(|c| if (c as u32) < 0x100 { c as u8 } else { b'?' }),
+        );
         self.0.push(0);
         self
     }
@@ -170,7 +180,11 @@ pub fn parse_listing(args: &[u8]) -> Result<Vec<DirEntry>, String> {
         let kind = r.u8()?;
         let name = r.str()?;
         if !name.is_empty() {
-            out.push(DirEntry { size, is_dir: kind == b'D', name });
+            out.push(DirEntry {
+                size,
+                is_dir: kind == b'D',
+                name,
+            });
         }
     }
     Ok(out)

@@ -25,10 +25,17 @@ fn path() -> Option<PathBuf> {
 
 pub fn line(msg: impl AsRef<str>) {
     let Some(p) = path() else { return };
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let t = secs % 86_400;
     let stamp = format!("{:02}:{:02}:{:02} UTC", t / 3600, t / 60 % 60, t % 60);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
         let _ = writeln!(f, "{stamp}  {}", msg.as_ref());
     }
 }

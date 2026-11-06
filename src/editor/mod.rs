@@ -17,7 +17,7 @@ mod clip;
 mod grid;
 mod history;
 
-pub use grid::{slot_prefix, AUTO_GRID, GRID_SIZES};
+pub use grid::{AUTO_GRID, GRID_SIZES, slot_prefix};
 mod selection;
 
 use history::History;
@@ -73,7 +73,17 @@ pub struct Panels {
 
 impl Default for Panels {
     fn default() -> Self {
-        Self { transport: true, nums: true, gain: true, tools: true, wave: true, scalpel: true, minimap: true, stats: true, help: true }
+        Self {
+            transport: true,
+            nums: true,
+            gain: true,
+            tools: true,
+            wave: true,
+            scalpel: true,
+            minimap: true,
+            stats: true,
+            help: true,
+        }
     }
 }
 
@@ -113,8 +123,15 @@ pub struct Loaded {
 
 impl Loaded {
     fn new(sample: Sample) -> Self {
-        let peaks = sample.channels.iter().map(|c| ChannelPeaks::build(c)).collect();
-        Self { sample: Arc::new(sample), peaks: Arc::new(peaks) }
+        let peaks = sample
+            .channels
+            .iter()
+            .map(|c| ChannelPeaks::build(c))
+            .collect();
+        Self {
+            sample: Arc::new(sample),
+            peaks: Arc::new(peaks),
+        }
     }
 }
 
@@ -132,7 +149,12 @@ pub struct Memo {
 impl Memo {
     /// "Open it fresh": the out-of-range selection makes `install` fall back
     /// to the whole file at unity gain.
-    const FRESH: Memo = Memo { sel: (0, usize::MAX), playhead: 0, gain_db: 0.0, crop: None };
+    const FRESH: Memo = Memo {
+        sel: (0, usize::MAX),
+        playhead: 0,
+        gain_db: 0.0,
+        crop: None,
+    };
 }
 
 /// Audio cut or copied in the editor, kept across file switches so it can be
@@ -184,13 +206,24 @@ impl AudioClip {
     }
 }
 
-
 enum Ev {
     /// `cues`: slice markers stored in the file, for a kit.
-    Loaded { generation: u64, path: PathBuf, result: Result<Loaded, String>, cues: Vec<usize> },
+    Loaded {
+        generation: u64,
+        path: PathBuf,
+        result: Result<Loaded, String>,
+        cues: Vec<usize>,
+    },
     /// `rev` is the content revision that was rendered.
-    Exported { rev: u64, result: Result<PathBuf, String> },
-    BatchExported { dest_dir: PathBuf, done: usize, errors: Vec<String> },
+    Exported {
+        rev: u64,
+        result: Result<PathBuf, String>,
+    },
+    BatchExported {
+        dest_dir: PathBuf,
+        done: usize,
+        errors: Vec<String>,
+    },
 }
 
 /// What the app needs to react to after a drain.
@@ -303,7 +336,11 @@ impl Editor {
             playhead: 0,
             gain_db: 0.0,
             prefs,
-            view: View { start: 0.0, fpp: 1.0, fit_pending: true },
+            view: View {
+                start: 0.0,
+                fpp: 1.0,
+                fit_pending: true,
+            },
             drag: None,
             wave_rect: None,
             exporting: false,
@@ -386,11 +423,21 @@ impl Editor {
                 format: s.format.clone(),
                 file_len: s.file_len,
             };
-            Loaded { sample: Arc::new(sample), peaks: l.peaks.clone() }
+            Loaded {
+                sample: Arc::new(sample),
+                peaks: l.peaks.clone(),
+            }
         };
-        let shared = self.full.as_ref().is_some_and(|f| Arc::ptr_eq(&f.sample, &cur.sample));
+        let shared = self
+            .full
+            .as_ref()
+            .is_some_and(|f| Arc::ptr_eq(&f.sample, &cur.sample));
         let new_cur = renamed(cur);
-        self.full = if shared { Some(new_cur.clone()) } else { self.full.as_ref().map(renamed) };
+        self.full = if shared {
+            Some(new_cur.clone())
+        } else {
+            self.full.as_ref().map(renamed)
+        };
         self.current = Some(new_cur);
         if let Some(m) = self.memos.remove(&old) {
             self.memos.insert(path, m);
@@ -411,19 +458,31 @@ impl Editor {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let path = path.to_path_buf();
-        let _ = std::thread::Builder::new().name("decode".into()).spawn(move || {
-            let result = decode::decode(&path).map(Loaded::new);
-            let cues = cues::read(&path);
-            let _ = tx.send(Ev::Loaded { generation, path, result, cues });
-            ctx.request_repaint();
-        });
+        let _ = std::thread::Builder::new()
+            .name("decode".into())
+            .spawn(move || {
+                let result = decode::decode(&path).map(Loaded::new);
+                let cues = cues::read(&path);
+                let _ = tx.send(Ev::Loaded {
+                    generation,
+                    path,
+                    result,
+                    cues,
+                });
+                ctx.request_repaint();
+            });
     }
 
     pub fn drain(&mut self) -> Vec<Outcome> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                Ev::Loaded { generation, path, result, cues } => {
+                Ev::Loaded {
+                    generation,
+                    path,
+                    result,
+                    cues,
+                } => {
                     if generation != self.generation {
                         continue; // the cursor moved on
                     }
@@ -454,8 +513,16 @@ impl Editor {
                         Err(e) => Outcome::Error(format!("export failed: {e}")),
                     });
                 }
-                Ev::BatchExported { dest_dir, done, errors } => {
-                    out.extend(errors.into_iter().map(|e| Outcome::Error(format!("export failed: {e}"))));
+                Ev::BatchExported {
+                    dest_dir,
+                    done,
+                    errors,
+                } => {
+                    out.extend(
+                        errors
+                            .into_iter()
+                            .map(|e| Outcome::Error(format!("export failed: {e}"))),
+                    );
                     out.push(Outcome::BatchExported(dest_dir, done));
                 }
             }
@@ -476,7 +543,9 @@ impl Editor {
     /// Positions only make sense for the file as it is on disk: once its
     /// audio was cut or pasted into, forget them instead.
     fn remember(&mut self) {
-        let Some(path) = self.path().map(Path::to_path_buf) else { return };
+        let Some(path) = self.path().map(Path::to_path_buf) else {
+            return;
+        };
         if self.rev != self.loaded_rev || std::mem::take(&mut self.forget_on_load) {
             self.memos.remove(&path);
             return;
@@ -487,8 +556,16 @@ impl Editor {
 
     /// The loaded file and its edits, for saving.
     pub fn session(&self) -> Option<Session> {
-        let memo = if self.rev == self.loaded_rev { self.memo() } else { Memo::FRESH };
-        Some(Session { path: self.path()?.to_path_buf(), memo, auto_grid: self.auto_grid })
+        let memo = if self.rev == self.loaded_rev {
+            self.memo()
+        } else {
+            Memo::FRESH
+        };
+        Some(Session {
+            path: self.path()?.to_path_buf(),
+            memo,
+            auto_grid: self.auto_grid,
+        })
     }
 
     /// Reload a saved session: the edits are re-applied once the file decodes.
@@ -500,11 +577,20 @@ impl Editor {
 
     fn install(&mut self, loaded: Loaded, cues: Vec<usize>) {
         let frames = loaded.sample.frames();
-        self.markers = if self.is_kit { cues.into_iter().filter(|&m| m > 0 && m < frames).collect() } else { Vec::new() };
+        self.markers = if self.is_kit {
+            cues.into_iter().filter(|&m| m > 0 && m < frames).collect()
+        } else {
+            Vec::new()
+        };
         // No cue points (stripped by another tool, or made elsewhere): an
         // "[8] name" file is read as 8 equal slices.
         if self.is_kit && self.markers.is_empty() {
-            let stem = loaded.sample.path.file_stem().unwrap_or_default().to_string_lossy();
+            let stem = loaded
+                .sample
+                .path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
             if let Some((n, _)) = grid::slot_prefix(&stem).filter(|&(n, _)| n <= frames) {
                 self.markers = (1..n).map(|i| i * frames / n).collect();
             }
@@ -537,7 +623,10 @@ impl Editor {
         self.rev = self.next_rev;
         self.loaded_rev = self.rev;
         self.clean_rev = self.rev;
-        self.history = History { committed: Some(self.state()), ..History::default() };
+        self.history = History {
+            committed: Some(self.state()),
+            ..History::default()
+        };
         self.grid = self.infer_grid();
         let want = self.auto_on_load.take();
         let restore_auto = want.is_some() && want.as_deref() == self.path();
@@ -567,7 +656,10 @@ impl Editor {
         self.current = Some(Loaded::new(sample));
         self.crop = Some((a, b));
         let map = |f: usize| f.saturating_sub(a).min(len);
-        self.sel = (map(self.sel.0), map(self.sel.1).max(map(self.sel.0) + 1).min(len));
+        self.sel = (
+            map(self.sel.0),
+            map(self.sel.1).max(map(self.sel.0) + 1).min(len),
+        );
         self.playhead = map(self.playhead);
         self.stats_key = None;
         self.view.fit_pending = true;
@@ -588,7 +680,9 @@ impl Editor {
 
     pub fn uncrop(&mut self) {
         let Some((a, _)) = self.crop else { return };
-        let Some(full) = self.full.clone() else { return };
+        let Some(full) = self.full.clone() else {
+            return;
+        };
         self.sel = (self.sel.0 + a, self.sel.1 + a);
         self.playhead += a;
         self.current = Some(full);
@@ -619,7 +713,13 @@ impl Editor {
             self.phase = Phase::default();
             return;
         };
-        let key = (self.sel.0, self.sel.1, self.gain().to_bits(), c.sample.frames(), mono);
+        let key = (
+            self.sel.0,
+            self.sel.1,
+            self.gain().to_bits(),
+            c.sample.frames(),
+            mono,
+        );
         if self.stats_key == Some(key) {
             return;
         }
@@ -637,7 +737,9 @@ impl Editor {
 
     /// Correlation in a short window around `frame`, for the live meter.
     pub fn phase_at(&self, frame: usize) -> Phase {
-        let Some(s) = self.sample() else { return Phase::default() };
+        let Some(s) = self.sample() else {
+            return Phase::default();
+        };
         let half = (s.rate as usize / 40).max(256); // ~50 ms window
         stats::phase(&s.channels, frame.saturating_sub(half), frame + half)
     }
@@ -648,7 +750,10 @@ impl Editor {
 
     /// Have the trim, gain or audio moved away from "the file as it is"?
     pub fn is_edited(&self) -> bool {
-        self.rev != self.loaded_rev || self.crop.is_some() || self.sel != (0, self.frames()) || self.gain_db.abs() > 0.001
+        self.rev != self.loaded_rev
+            || self.crop.is_some()
+            || self.sel != (0, self.frames())
+            || self.gain_db.abs() > 0.001
     }
 
     /// Give up on the unsaved audio edits. They stay on screen until the
@@ -659,12 +764,16 @@ impl Editor {
 
     /// Length of the whole file (ignoring any crop), in seconds.
     pub fn file_seconds(&self) -> f64 {
-        self.full.as_ref().map_or(0.0, |l| l.sample.seconds(l.sample.frames()))
+        self.full
+            .as_ref()
+            .map_or(0.0, |l| l.sample.seconds(l.sample.frames()))
     }
 
     /// In / out or a crop leave part of the file out of what you hear.
     pub fn is_trimmed(&self) -> bool {
-        !self.is_kit && self.current.is_some() && (self.crop.is_some() || self.sel != (0, self.frames()))
+        !self.is_kit
+            && self.current.is_some()
+            && (self.crop.is_some() || self.sel != (0, self.frames()))
     }
 
     /// Anything a save in place would change: cut / paste, gain or a trim.
@@ -691,7 +800,6 @@ impl Editor {
         }
     }
 
-
     // ---- export -----------------------------------------------------------
 
     /// Write the edited region to exactly `target` (overwriting it).
@@ -705,26 +813,47 @@ impl Editor {
     /// ignoring in / out and the crop.
     pub fn export_with(&mut self, target: PathBuf, mono: Option<Fold>, whole: bool) {
         let kit = self.is_kit || whole;
-        let shown = if kit { self.full.as_ref().map(|l| &l.sample) } else { self.sample() };
+        let shown = if kit {
+            self.full.as_ref().map(|l| &l.sample)
+        } else {
+            self.sample()
+        };
         let Some(sample) = shown.cloned() else { return };
         if self.exporting {
             return;
         }
         self.exporting = true;
         let r = if kit {
-            Render { start: 0, end: sample.frames(), gain: self.gain(), mono }
+            Render {
+                start: 0,
+                end: sample.frames(),
+                gain: self.gain(),
+                mono,
+            }
         } else {
-            Render { start: self.sel.0, end: self.sel.1, gain: self.gain(), mono }
+            Render {
+                start: self.sel.0,
+                end: self.sel.1,
+                gain: self.gain(),
+                mono,
+            }
         };
-        let marks = if self.is_kit { self.markers.clone() } else { Vec::new() };
+        let marks = if self.is_kit {
+            self.markers.clone()
+        } else {
+            Vec::new()
+        };
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         let rev = self.rev;
-        let _ = std::thread::Builder::new().name("export".into()).spawn(move || {
-            let result = export::write_wav(&sample, &r, &target).and_then(|p| cues::append(&p, &marks).map(|_| p));
-            let _ = tx.send(Ev::Exported { rev, result });
-            ctx.request_repaint();
-        });
+        let _ = std::thread::Builder::new()
+            .name("export".into())
+            .spawn(move || {
+                let result = export::write_wav(&sample, &r, &target)
+                    .and_then(|p| cues::append(&p, &marks).map(|_| p));
+                let _ = tx.send(Ev::Exported { rev, result });
+                ctx.request_repaint();
+            });
     }
 
     /// Fold whole files to mono, untrimmed and at unity gain, each `(src,
@@ -733,21 +862,32 @@ impl Editor {
     pub fn export_mono_batch(&self, jobs: Vec<(PathBuf, PathBuf)>, dest_dir: PathBuf, fold: Fold) {
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
-        let _ = std::thread::Builder::new().name("export-batch".into()).spawn(move || {
-            let mut done = 0;
-            let mut errors = Vec::new();
-            for (p, target) in jobs {
-                let res = decode::decode(&p).and_then(|s| {
-                    let r = Render { start: 0, end: s.frames(), gain: 1.0, mono: Some(fold) };
-                    export::write_wav(&s, &r, &target)
-                });
-                match res {
-                    Ok(_) => done += 1,
-                    Err(e) => errors.push(format!("{}: {e}", p.display())),
+        let _ = std::thread::Builder::new()
+            .name("export-batch".into())
+            .spawn(move || {
+                let mut done = 0;
+                let mut errors = Vec::new();
+                for (p, target) in jobs {
+                    let res = decode::decode(&p).and_then(|s| {
+                        let r = Render {
+                            start: 0,
+                            end: s.frames(),
+                            gain: 1.0,
+                            mono: Some(fold),
+                        };
+                        export::write_wav(&s, &r, &target)
+                    });
+                    match res {
+                        Ok(_) => done += 1,
+                        Err(e) => errors.push(format!("{}: {e}", p.display())),
+                    }
                 }
-            }
-            let _ = tx.send(Ev::BatchExported { dest_dir, done, errors });
-            ctx.request_repaint();
-        });
+                let _ = tx.send(Ev::BatchExported {
+                    dest_dir,
+                    done,
+                    errors,
+                });
+                ctx.request_repaint();
+            });
     }
 }

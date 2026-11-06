@@ -45,7 +45,11 @@ pub struct Row {
 impl MultiRename {
     /// `listed`: names in each parent folder, for the device (the local disk
     /// is read here instead, so hidden files count too).
-    pub fn new(items: Vec<(PathBuf, bool)>, device: bool, listed: impl Fn(&Path) -> Vec<String>) -> Self {
+    pub fn new(
+        items: Vec<(PathBuf, bool)>,
+        device: bool,
+        listed: impl Fn(&Path) -> Vec<String>,
+    ) -> Self {
         let mut taken: HashMap<PathBuf, HashSet<String>> = HashMap::new();
         for (p, _) in &items {
             let Some(parent) = p.parent() else { continue };
@@ -56,10 +60,17 @@ impl MultiRename {
                 listed(parent)
             } else {
                 std::fs::read_dir(parent)
-                    .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                    .map(|rd| {
+                        rd.flatten()
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
                     .unwrap_or_default()
             };
-            taken.insert(parent.to_path_buf(), names.into_iter().map(|n| n.to_lowercase()).collect());
+            taken.insert(
+                parent.to_path_buf(),
+                names.into_iter().map(|n| n.to_lowercase()).collect(),
+            );
         }
         Self {
             items,
@@ -78,9 +89,16 @@ impl MultiRename {
             .items
             .iter()
             .map(|(p, is_dir)| {
-                let old = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let old = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 // The part Find may touch: everything, or the stem.
-                let end = if self.keep_ext && !is_dir { stem_end(&old) } else { old.len() };
+                let end = if self.keep_ext && !is_dir {
+                    stem_end(&old)
+                } else {
+                    old.len()
+                };
                 let old_hits = find_all(&old[..end], &self.find, self.match_case);
                 let mut new = String::new();
                 let mut new_hits = Vec::new();
@@ -95,8 +113,19 @@ impl MultiRename {
                     at = h.end;
                 }
                 new.push_str(&old[at..]);
-                let status = if new == old { Status::Unchanged } else { Status::Ok };
-                Row { from: p.clone(), old, new, old_hits, new_hits, status }
+                let status = if new == old {
+                    Status::Unchanged
+                } else {
+                    Status::Ok
+                };
+                Row {
+                    from: p.clone(),
+                    old,
+                    new,
+                    old_hits,
+                    new_hits,
+                    status,
+                }
             })
             .collect();
 
@@ -110,7 +139,12 @@ impl MultiRename {
             let parent = r.from.parent().unwrap_or(Path::new("")).to_path_buf();
             if let Some(why) = invalid(&r.new) {
                 r.status = Status::Problem(why.to_owned());
-            } else if targets.get(&(parent, r.new.to_lowercase())).copied().unwrap_or(0) > 1 {
+            } else if targets
+                .get(&(parent, r.new.to_lowercase()))
+                .copied()
+                .unwrap_or(0)
+                > 1
+            {
                 r.status = Status::Problem("another item gets this name too".to_owned());
             }
         }
@@ -131,7 +165,8 @@ impl MultiRename {
                     continue; // only the case changes
                 }
                 let problem = if freed.contains(&(parent.clone(), low.clone())) {
-                    self.device.then(|| "taken by another item being renamed (not possible on the device)")
+                    self.device
+                        .then(|| "taken by another item being renamed (not possible on the device)")
                 } else if self.taken.get(&parent).is_some_and(|t| t.contains(&low)) {
                     Some("a file with this name already exists")
                 } else {
@@ -163,12 +198,15 @@ pub fn plan(rows: &[Row]) -> (Vec<(PathBuf, PathBuf)>, Vec<(PathBuf, PathBuf)>) 
         .collect();
     finals.sort_by_key(|(f, _)| std::cmp::Reverse(f.components().count()));
 
-    let sources: HashSet<String> =
-        finals.iter().map(|(f, _)| f.to_string_lossy().to_lowercase()).collect();
+    let sources: HashSet<String> = finals
+        .iter()
+        .map(|(f, _)| f.to_string_lossy().to_lowercase())
+        .collect();
     let mut steps = Vec::new();
     let mut later = Vec::new();
     for (i, (from, to)) in finals.iter().enumerate() {
-        let case_only = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+        let case_only =
+            from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
         if !case_only && sources.contains(&to.to_string_lossy().to_lowercase()) {
             let tmp = from.with_file_name(format!(".sm-rename-{}-{i}", std::process::id()));
             steps.push((from.clone(), tmp.clone()));
@@ -209,7 +247,10 @@ fn find_all(hay: &str, needle: &str, match_case: bool) -> Vec<Range<usize>> {
         return Vec::new();
     }
     if match_case {
-        return hay.match_indices(needle).map(|(i, m)| i..i + m.len()).collect();
+        return hay
+            .match_indices(needle)
+            .map(|(i, m)| i..i + m.len())
+            .collect();
     }
     let mut out = Vec::new();
     let mut i = 0;

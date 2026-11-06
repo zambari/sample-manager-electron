@@ -6,7 +6,9 @@ impl App {
     // ---- playback ---------------------------------------------------------
 
     pub(super) fn playing_current(&self) -> bool {
-        self.engine.is_playing() && self.voice_path.is_some() && self.voice_path.as_deref() == self.editor.path()
+        self.engine.is_playing()
+            && self.voice_path.is_some()
+            && self.voice_path.as_deref() == self.editor.path()
     }
 
     /// Play from wherever the toolbar's "From" setting says.
@@ -18,10 +20,16 @@ impl App {
     /// playhead (falling back to the in point if the playhead is outside
     /// the region).
     pub(super) fn start_play_from(&mut self, from_in: bool) {
-        let Some(s) = self.editor.sample().cloned() else { return };
+        let Some(s) = self.editor.sample().cloned() else {
+            return;
+        };
         let (a, b) = self.editor.sel;
         let ph = self.editor.playhead;
-        let from = if !from_in && (a..b).contains(&ph) { ph } else { a };
+        let from = if !from_in && (a..b).contains(&ph) {
+            ph
+        } else {
+            a
+        };
         self.voice_path = Some(s.path.clone());
         self.voice_sample = Some(s.clone());
         self.engine.play(
@@ -122,7 +130,10 @@ impl App {
                 break;
             }
         }
-        let path = tab.cursor_entry().filter(|e| e.is_audio).map(|e| e.path.clone());
+        let path = tab
+            .cursor_entry()
+            .filter(|e| e.is_audio)
+            .map(|e| e.path.clone());
         if let Some(p) = path {
             // Explicit request: load even when auto-load is off.
             self.last_cursor = Some(p.clone());
@@ -145,11 +156,23 @@ impl App {
     }
 
     pub(super) fn export_to(&mut self, dest: PathBuf, to_dev: bool, mono: Option<Fold>) {
-        let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        let Some(src) = self.editor.path().map(Path::to_path_buf) else {
+            return;
+        };
         if to_dev {
             let dst = device::upload_target(&src, &dest);
-            let op = ops::Op { conflict: self.device_has(&dst), approx_bytes: 0, src, dst, is_dir: false };
-            let plan = Plan { kind: Kind::Copy, ops: vec![op], rejected: Vec::new() };
+            let op = ops::Op {
+                conflict: self.device_has(&dst),
+                approx_bytes: 0,
+                src,
+                dst,
+                is_dir: false,
+            };
+            let plan = Plan {
+                kind: Kind::Copy,
+                ops: vec![op],
+                rejected: Vec::new(),
+            };
             return self.offer(plan, PlanKind::DeviceExport { mono });
         }
         let mut dst = crate::audio::export::target_for(&src, &dest);
@@ -163,11 +186,20 @@ impl App {
         // instead of offering to overwrite.
         if dst.exists() {
             let free = crate::fs_model::unique_sibling(&dst);
-            let stem = |p: &Path| p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let stem = |p: &Path| {
+                p.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            };
             self.export_naming = Some(ExportNaming {
                 dir: dest,
                 name: stem(&free),
-                taken: dst.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                taken: dst
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
                 mono,
             });
             return;
@@ -183,7 +215,11 @@ impl App {
         if let Some(p) = self.editor.path().map(Path::to_path_buf) {
             self.mark_committed([p]);
         }
-        self.status = format!("Exporting{} to {}…", mono.map_or(String::new(), |f| format!(" (mono {})", f.short())), dst.display());
+        self.status = format!(
+            "Exporting{} to {}…",
+            mono.map_or(String::new(), |f| format!(" (mono {})", f.short())),
+            dst.display()
+        );
         self.saving.insert(dst.clone(), None);
         self.editor.export(dst, mono);
     }
@@ -209,14 +245,19 @@ impl App {
 
     /// `whole`: write the whole file (with gain), ignoring in / out and crop.
     pub(super) fn save_in_place_as(&mut self, whole: bool) {
-        let Some(src) = self.editor.path().map(Path::to_path_buf) else { return };
+        let Some(src) = self.editor.path().map(Path::to_path_buf) else {
+            return;
+        };
         if self.editor.exporting {
             return;
         }
         let Some(dir) = src.parent() else { return };
         // A kit is saved whole (see `Editor::export`), whatever is selected.
         let target = crate::audio::export::target_for(&src, dir);
-        self.status = format!("Saving {}…", target.file_name().unwrap_or_default().to_string_lossy());
+        self.status = format!(
+            "Saving {}…",
+            target.file_name().unwrap_or_default().to_string_lossy()
+        );
         let mono = self.editor.fold();
         self.saving.insert(target.clone(), None);
         self.editor.export_with(target, mono, whole);
@@ -227,6 +268,7 @@ impl App {
         match leave {
             Leave::Audition(p, play) => self.audition(&p, play),
             Leave::LoadEditor(p) => self.load_into_editor(&p),
+            Leave::CloseKit => self.close_kit_now = true,
             // Another slot or kit has unsaved edits too: ask about those next.
             Leave::Quit if self.front_dirty() => self.leave_pending = Some(Leave::Quit),
             Leave::Quit => {
@@ -245,6 +287,10 @@ impl App {
         match choice {
             LeaveChoice::Cancel => {
                 self.status = "Kept editing — the edits are still unsaved".to_owned();
+            }
+            LeaveChoice::Discard if matches!(leave, Leave::CloseKit) => {
+                self.kit_mut().discard();
+                self.finish_leave(leave);
             }
             LeaveChoice::Discard => {
                 self.editor.discard();
@@ -292,7 +338,11 @@ impl App {
                 } else {
                     ed.step_out(dir);
                 }
-                let f = if matches!(a, EdAction::InZero(_)) { ed.sel.0 } else { ed.sel.1 };
+                let f = if matches!(a, EdAction::InZero(_)) {
+                    ed.sel.0
+                } else {
+                    ed.sel.1
+                };
                 if let Some(r) = wave {
                     editor_view::ensure_visible(ed, r.width(), f);
                 }
@@ -315,13 +365,18 @@ impl App {
                     Nudge::TenPixels => px * 10,
                     Nudge::Frame => 1,
                 };
-                ed.playhead = (ed.playhead as isize + step * dir as isize).clamp(0, frames as isize) as usize;
+                ed.playhead =
+                    (ed.playhead as isize + step * dir as isize).clamp(0, frames as isize) as usize;
                 if let Some(r) = wave {
                     editor_view::ensure_visible(ed, r.width(), ed.playhead);
                 }
             }
             EdAction::JumpIn | EdAction::JumpOut => {
-                ed.playhead = if a == EdAction::JumpIn { ed.sel.0 } else { ed.sel.1.saturating_sub(1) };
+                ed.playhead = if a == EdAction::JumpIn {
+                    ed.sel.0
+                } else {
+                    ed.sel.1.saturating_sub(1)
+                };
                 if let Some(r) = wave {
                     editor_view::ensure_visible(ed, r.width(), ed.playhead);
                 }
@@ -331,7 +386,11 @@ impl App {
                     let factor = if a == EdAction::ZoomIn { 0.5 } else { 2.0 };
                     // Zoom around the playhead when it's on screen.
                     let xp = r.left() + ((ed.playhead as f64 - ed.view.start) / ed.view.fpp) as f32;
-                    let anchor = if r.x_range().contains(xp) { xp } else { r.center().x };
+                    let anchor = if r.x_range().contains(xp) {
+                        xp
+                    } else {
+                        r.center().x
+                    };
                     editor_view::zoom_at(ed, r, anchor, factor);
                 }
             }
@@ -352,7 +411,8 @@ impl App {
             EdAction::Export => self.export(),
             EdAction::Delete => {
                 if !ed.delete() {
-                    self.status = "Can't delete everything — select part of the file first".to_owned();
+                    self.status =
+                        "Can't delete everything — select part of the file first".to_owned();
                 }
             }
             EdAction::SaveInPlace => self.save_in_place(),
@@ -377,9 +437,15 @@ impl App {
     pub(super) fn start_device_load(&mut self, src: PathBuf, bytes: u64) {
         // Mirror the device path, so same-named files in different folders
         // don't overwrite each other.
-        let rel = src.parent().and_then(|p| p.strip_prefix("/").ok()).unwrap_or(Path::new(""));
+        let rel = src
+            .parent()
+            .and_then(|p| p.strip_prefix("/").ok())
+            .unwrap_or(Path::new(""));
         let dir = std::env::temp_dir().join("sample_manager_device").join(rel);
-        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let local = dir.join(device::wav_name(&name));
         let task = device::Task::Transfer {
             dir: device::Dir::Download,
@@ -415,19 +481,30 @@ impl App {
     /// `is_kit`: `editor` is the kit slot right now.
     pub(super) fn absorb_editor(&mut self, is_kit: bool) {
         let fade = std::time::Duration::from_secs_f32(crate::ui::file_table::SAVE_FLASH_SECS);
-        self.saving.retain(|_, done| done.is_none_or(|at| at.elapsed() < fade));
+        self.saving
+            .retain(|_, done| done.is_none_or(|at| at.elapsed() < fade));
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
                     if let (true, Some((c, grid))) = (is_kit, self.kit_pending.take()) {
-                        let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+                        let name = self
+                            .editor
+                            .path()
+                            .and_then(|p| p.file_name())
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
                         // A grid was asked for and the file isn't on it yet.
                         let regrid = match grid {
-                            Some(_) if self.editor.grid_mode() != grid => self.editor.set_grid(grid),
+                            Some(_) if self.editor.grid_mode() != grid => {
+                                self.editor.set_grid(grid)
+                            }
                             _ => Ok(()),
                         };
                         self.status = match regrid.and_then(|()| self.editor.append(&c)) {
-                            Ok(()) => format!("Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it"),
+                            Ok(()) => format!(
+                                "Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it"
+                            ),
                             Err(e) => format!("{name}: {e}"),
                         };
                     }
@@ -435,7 +512,9 @@ impl App {
                         self.start_play();
                     }
                 }
-                Outcome::Exported(p) if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) => {
+                Outcome::Exported(p)
+                    if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) =>
+                {
                     let s = self.staged_upload.take().expect("checked above");
                     let leave = self.leave_after_save.take();
                     let task = device::Task::Transfer {
@@ -452,8 +531,12 @@ impl App {
                     }
                 }
                 Outcome::Exported(p) => {
-                    self.saving.insert(p.clone(), Some(std::time::Instant::now()));
-                    self.status = format!("Exported {}", p.file_name().unwrap_or_default().to_string_lossy());
+                    self.saving
+                        .insert(p.clone(), Some(std::time::Instant::now()));
+                    self.status = format!(
+                        "Exported {}",
+                        p.file_name().unwrap_or_default().to_string_lossy()
+                    );
                     // A kit exported somewhere new: name it right away.
                     let rename = is_kit && self.editor.path() != Some(p.as_path());
                     // Replaced the file that's open: show what's on disk now.
@@ -507,9 +590,20 @@ impl App {
             kits: self.kit_list(),
             kit_saves_here: self.kit_saves_here(),
             kit_on_disk: self.kit().path().is_some_and(Path::is_file),
-            sample_name: self.browser().path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
+            sample_name: self
+                .browser()
+                .path()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned()),
         };
-        let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export, &slots);
+        let intents = editor_view::show(
+            ui,
+            &mut self.editor,
+            pv,
+            self.editor_focused,
+            can_export,
+            &slots,
+        );
         for i in intents {
             match i {
                 EdIntent::TookFocus => self.editor_focused = true,
@@ -529,6 +623,7 @@ impl App {
                 }
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
+                EdIntent::ElkMode => self.enter_elk(),
                 EdIntent::CloseKit => self.close_kit(),
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
                 EdIntent::RenameKit(name) => self.rename_kit(&name),
@@ -549,7 +644,10 @@ pub(super) struct ExportNaming {
 
 /// `[n] name.wav`, replacing a slot count already at the start of the name.
 fn with_slot_count(path: &Path, n: usize) -> PathBuf {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let base = crate::editor::slot_prefix(&stem).map_or(stem.trim_start(), |(_, rest)| rest);
     path.with_file_name(format!("[{n}] {base}.wav"))
 }

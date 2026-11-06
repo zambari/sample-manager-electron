@@ -7,15 +7,25 @@ use super::*;
 /// One undoable file operation. `App::undo` holds them, newest last.
 pub(super) enum FileUndo {
     /// Items now at `.1` that came from `.0`: a move or a rename.
-    Moved { pairs: Vec<(PathBuf, PathBuf)>, what: &'static str, replaced: bool },
+    Moved {
+        pairs: Vec<(PathBuf, PathBuf)>,
+        what: &'static str,
+        replaced: bool,
+    },
     /// New copies; undoing sends them to the Trash.
-    Copied { paths: Vec<PathBuf>, replaced: bool },
+    Copied {
+        paths: Vec<PathBuf>,
+        replaced: bool,
+    },
     /// Items sent to the Trash: `(original, where it landed)`.
     Trashed(Vec<(PathBuf, PathBuf)>),
     NewFolder(PathBuf),
     /// Items moved into a folder that was made for them: move them back,
     /// then remove the folder.
-    Grouped { folder: PathBuf, pairs: Vec<(PathBuf, PathBuf)> },
+    Grouped {
+        folder: PathBuf,
+        pairs: Vec<(PathBuf, PathBuf)>,
+    },
 }
 
 /// What a running job is, so its `Ev::Applied` becomes the right undo step.
@@ -38,13 +48,22 @@ impl App {
 
     /// A job reported what it did: keep it for undo if it's one we track.
     pub(super) fn applied(&mut self, job: u64, done: Vec<(PathBuf, PathBuf)>, replaced: bool) {
-        let Some(kind) = self.undo_jobs.remove(&job) else { return };
+        let Some(kind) = self.undo_jobs.remove(&job) else {
+            return;
+        };
         if done.is_empty() {
             return;
         }
         let step = match kind {
-            UndoJob::Move => FileUndo::Moved { pairs: done, what: "move", replaced },
-            UndoJob::Copy => FileUndo::Copied { paths: done.into_iter().map(|(_, d)| d).collect(), replaced },
+            UndoJob::Move => FileUndo::Moved {
+                pairs: done,
+                what: "move",
+                replaced,
+            },
+            UndoJob::Copy => FileUndo::Copied {
+                paths: done.into_iter().map(|(_, d)| d).collect(),
+                replaced,
+            },
             UndoJob::Trash => FileUndo::Trashed(done),
         };
         self.push_undo(step);
@@ -58,7 +77,12 @@ impl App {
         }
         if on_dev {
             let n = paths.len();
-            self.run_device(crate::device::Task::Trash { paths }, "Moving to /trash", n, 0);
+            self.run_device(
+                crate::device::Task::Trash { paths },
+                "Moving to /trash",
+                n,
+                0,
+            );
         } else {
             self.trash_local(paths);
         }
@@ -76,7 +100,12 @@ impl App {
     }
 
     /// `run_local`, with a merge-move's clean-up afterwards.
-    pub(super) fn run_local_then(&mut self, kind: Kind, ops: Vec<ops::Op>, tidy: Option<crate::jobs::Tidy>) -> u64 {
+    pub(super) fn run_local_then(
+        &mut self,
+        kind: Kind,
+        ops: Vec<ops::Op>,
+        tidy: Option<crate::jobs::Tidy>,
+    ) -> u64 {
         let total_items = ops.len();
         let total_bytes = ops.iter().map(|o| o.approx_bytes).sum();
         let id = self.jobs.execute_then(kind, ops, tidy);
@@ -97,8 +126,12 @@ impl App {
     /// Copy `dir`'s samples to a new "<name> Mono" folder beside it, stereo
     /// files folded down each of `folds` ways. Undo trashes the new folder.
     pub(super) fn mono_copy(&mut self, dir: PathBuf, folds: Vec<crate::audio::stats::Fold>) {
-        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else { return };
-        let dst = crate::fs_model::unique_sibling(&parent.join(format!("{} Mono", name.to_string_lossy())));
+        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+            return;
+        };
+        let dst = crate::fs_model::unique_sibling(
+            &parent.join(format!("{} Mono", name.to_string_lossy())),
+        );
         let id = self.jobs.mono_copy(dir, dst, folds);
         self.active_jobs.push(ActiveJob {
             id,
@@ -126,17 +159,32 @@ impl App {
         };
         let lost = " — what it replaced can't be brought back";
         match step {
-            FileUndo::Moved { pairs, what, replaced } => {
+            FileUndo::Moved {
+                pairs,
+                what,
+                replaced,
+            } => {
                 let n = self.move_back(&pairs);
-                self.status = format!("Undid {what}: {n} of {} item(s) back{}", pairs.len(), if replaced { lost } else { "" });
+                self.status = format!(
+                    "Undid {what}: {n} of {} item(s) back{}",
+                    pairs.len(),
+                    if replaced { lost } else { "" }
+                );
             }
             FileUndo::Copied { paths, replaced } => {
-                let there: Vec<PathBuf> = paths.into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok()).collect();
+                let there: Vec<PathBuf> = paths
+                    .into_iter()
+                    .filter(|p| std::fs::symlink_metadata(p).is_ok())
+                    .collect();
                 if there.is_empty() {
                     self.status = "Nothing to undo: the copies are already gone".to_owned();
                     return;
                 }
-                self.status = format!("Undid copy: {} item(s) moved to the Trash{}", there.len(), if replaced { lost } else { "" });
+                self.status = format!(
+                    "Undid copy: {} item(s) moved to the Trash{}",
+                    there.len(),
+                    if replaced { lost } else { "" }
+                );
                 self.jobs.trash(there);
             }
             FileUndo::Trashed(pairs) => {
@@ -144,7 +192,10 @@ impl App {
                 let n = self.move_back(&pairs);
                 #[cfg(not(target_os = "macos"))]
                 let n = self.restore_trashed(&pairs);
-                self.status = format!("Undid move to Trash: {n} of {} item(s) put back", pairs.len());
+                self.status = format!(
+                    "Undid move to Trash: {n} of {} item(s) put back",
+                    pairs.len()
+                );
             }
             FileUndo::Grouped { folder, pairs } => {
                 let n = self.move_back(&pairs);
@@ -157,9 +208,10 @@ impl App {
             FileUndo::NewFolder(path) => {
                 match std::fs::remove_dir(&path) {
                     Ok(()) => self.status = format!("Undid new folder {}", path.display()),
-                    Err(_) if path.is_dir() => {
-                        self.errors.push(format!("{} isn't empty any more, left it in place", path.display()))
-                    }
+                    Err(_) if path.is_dir() => self.errors.push(format!(
+                        "{} isn't empty any more, left it in place",
+                        path.display()
+                    )),
                     Err(e) => self.errors.push(format!("{}: {e}", path.display())),
                 }
                 if let Some(p) = path.parent() {
@@ -172,25 +224,38 @@ impl App {
     /// Put each item at `.1` back at `.0`. Returns how many went back (or
     /// started going back, for moves across disks, which run as a job).
     fn move_back(&mut self, pairs: &[(PathBuf, PathBuf)]) -> usize {
-        let nows: std::collections::HashSet<&Path> = pairs.iter().map(|(_, n)| n.as_path()).collect();
+        let nows: std::collections::HashSet<&Path> =
+            pairs.iter().map(|(_, n)| n.as_path()).collect();
         // A rename that only changed case finds its old name "taken" by itself
         // on a case-insensitive disk.
-        let case_only = |a: &Path, b: &Path| a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase();
+        let case_only = |a: &Path, b: &Path| {
+            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        };
         let mut todo: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (old, now) in pairs {
             if std::fs::symlink_metadata(now).is_err() {
-                self.errors.push(format!("{} is gone, can't move it back", now.display()));
+                self.errors
+                    .push(format!("{} is gone, can't move it back", now.display()));
             } else if old.exists() && !nows.contains(old.as_path()) && !case_only(old, now) {
-                self.errors.push(format!("{} exists again, left {} where it is", old.display(), now.display()));
+                self.errors.push(format!(
+                    "{} exists again, left {} where it is",
+                    old.display(),
+                    now.display()
+                ));
             } else {
                 todo.push((old.clone(), now.clone()));
             }
         }
         // Renames that traded names (a→b, b→a) step aside first.
-        let swaps = todo.iter().any(|(o, n)| nows.contains(o.as_path()) && o != n);
+        let swaps = todo
+            .iter()
+            .any(|(o, n)| nows.contains(o.as_path()) && o != n);
         if swaps {
             for (_, now) in todo.iter_mut() {
-                let name = now.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = now
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let aside = fs_model::unique_sibling(&now.with_file_name(format!("{name}.undo")));
                 match std::fs::rename(&*now, &aside) {
                     Ok(()) => *now = aside,
@@ -219,8 +284,18 @@ impl App {
                 Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                     let md = std::fs::symlink_metadata(&now).ok();
                     let is_dir = md.as_ref().is_some_and(|m| m.is_dir());
-                    let approx_bytes = if is_dir { self.sizes.bytes_of(&now).unwrap_or(0) } else { md.map_or(0, |m| m.len()) };
-                    slow.push(ops::Op { src: now, dst: old, approx_bytes, is_dir, conflict: false });
+                    let approx_bytes = if is_dir {
+                        self.sizes.bytes_of(&now).unwrap_or(0)
+                    } else {
+                        md.map_or(0, |m| m.len())
+                    };
+                    slow.push(ops::Op {
+                        src: now,
+                        dst: old,
+                        approx_bytes,
+                        is_dir,
+                        conflict: false,
+                    });
                     moved += 1;
                 }
                 Err(e) => self.errors.push(format!("{}: {e}", now.display())),
@@ -252,7 +327,8 @@ impl App {
     /// most recently deleted item for each path.
     #[cfg(not(target_os = "macos"))]
     fn restore_trashed(&mut self, pairs: &[(PathBuf, PathBuf)]) -> usize {
-        let want: std::collections::HashSet<&Path> = pairs.iter().map(|(o, _)| o.as_path()).collect();
+        let want: std::collections::HashSet<&Path> =
+            pairs.iter().map(|(o, _)| o.as_path()).collect();
         let items = match trash::os_limited::list() {
             Ok(items) => items,
             Err(e) => {
@@ -266,14 +342,21 @@ impl App {
             if !want.contains(orig.as_path()) {
                 continue;
             }
-            if pick.get(&orig).is_none_or(|p| p.time_deleted < it.time_deleted) {
+            if pick
+                .get(&orig)
+                .is_none_or(|p| p.time_deleted < it.time_deleted)
+            {
                 pick.insert(orig, it);
             }
         }
         let n = pick.len();
-        let dirs: Vec<PathBuf> = pick.keys().filter_map(|p| p.parent().map(Path::to_path_buf)).collect();
+        let dirs: Vec<PathBuf> = pick
+            .keys()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect();
         if let Err(e) = trash::os_limited::restore_all(pick.into_values()) {
-            self.errors.push(format!("restore from the recycle bin failed: {e}"));
+            self.errors
+                .push(format!("restore from the recycle bin failed: {e}"));
         }
         for d in dirs {
             self.sizes.invalidate_subtree(&d);

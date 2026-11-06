@@ -2,7 +2,14 @@
 
 use super::*;
 
-pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, focused: bool, out: &mut Vec<EdIntent>) {
+pub(super) fn waveform(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    pv: &PlayView,
+    rect: Rect,
+    focused: bool,
+    out: &mut Vec<EdIntent>,
+) {
     ed.wave_rect = Some(rect);
     let frames = ed.frames();
     if ed.view.fit_pending && rect.width() > 1.0 {
@@ -43,7 +50,12 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     }
     clamp_view(ed, rect.width());
 
-    let m = Map { rect, start: ed.view.start, fpp: ed.view.fpp, frames };
+    let m = Map {
+        rect,
+        start: ed.view.start,
+        fpp: ed.view.fpp,
+        frames,
+    };
     let x_in = m.x(ed.sel.0 as f64);
     let x_out = m.x(ed.sel.1 as f64);
     let marks = if ed.is_kit { ed.marks() } else { Vec::new() };
@@ -88,7 +100,10 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     };
     // Range bar: the ruler strip between the markers drags the whole region.
     let on_bar = |p: Pos2| {
-        p.y >= rect.top() && p.y <= rect.top() + RULER_H && p.x > x_in + GRAB_PX && p.x < x_out - GRAB_PX
+        p.y >= rect.top()
+            && p.y <= rect.top() + RULER_H
+            && p.x > x_in + GRAB_PX
+            && p.x < x_out - GRAB_PX
     };
     let mut bar_hot = matches!(ed.drag, Some(Drag::Move(..)));
     if let Some(p) = resp.hover_pos() {
@@ -106,12 +121,16 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     }
     if resp.drag_started() {
         out.push(EdIntent::TookFocus);
-        let origin = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos());
+        let origin = ui
+            .input(|i| i.pointer.press_origin())
+            .or(resp.interact_pointer_pos());
         let alt = ui.input(|i| i.modifiers.alt);
         ed.drag = origin.map(|o| {
             if resp.dragged_by(egui::PointerButton::Middle) || alt {
                 Drag::Pan
-            } else if near(x_in, o) && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs()) {
+            } else if near(x_in, o)
+                && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs())
+            {
                 Drag::In
             } else if near(x_out, o) {
                 Drag::Out
@@ -194,7 +213,10 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     let lanes = Rect::from_min_max(Pos2::new(rect.left(), ruler.bottom()), rect.max);
 
     // Region background.
-    let reg = Rect::from_x_y_ranges(x_in.max(rect.left())..=x_out.min(rect.right()), lanes.y_range());
+    let reg = Rect::from_x_y_ranges(
+        x_in.max(rect.left())..=x_out.min(rect.right()),
+        lanes.y_range(),
+    );
     if reg.width() > 0.0 {
         painter.rect_filled(reg, 0.0, vis.selection.bg_fill.gamma_multiply(0.12));
     }
@@ -202,14 +224,19 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     draw_ruler(&painter, &m, ruler, ed.sample().map_or(1, |s| s.rate), &vis);
 
     // Range bar across the ruler between the markers.
-    let bar = Rect::from_x_y_ranges(x_in.max(rect.left())..=x_out.min(rect.right()), ruler.y_range());
+    let bar = Rect::from_x_y_ranges(
+        x_in.max(rect.left())..=x_out.min(rect.right()),
+        ruler.y_range(),
+    );
     if bar.width() > 0.0 {
         let a = if bar_hot { 0.45 } else { 0.25 };
         painter.rect_filled(bar, 0.0, vis.selection.bg_fill.gamma_multiply(a));
         // Grip dots in the middle hint that it can be dragged.
         let c = bar.center();
         if bar.width() > 30.0 {
-            let col = vis.strong_text_color().gamma_multiply(if bar_hot { 0.8 } else { 0.45 });
+            let col = vis
+                .strong_text_color()
+                .gamma_multiply(if bar_hot { 0.8 } else { 0.45 });
             for dx in [-6.0, -2.0, 2.0, 6.0] {
                 for dy in [-2.5, 2.5] {
                     painter.circle_filled(Pos2::new(c.x + dx, c.y + dy), 1.0, col);
@@ -221,12 +248,22 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     draw_lanes(&painter, ed, &m, lanes, &vis);
 
     // Dim outside the region on top of the wave.
-    let dim = vis.extreme_bg_color.gamma_multiply(if ed.is_kit { 0.2 } else { 0.55 });
+    let dim = vis
+        .extreme_bg_color
+        .gamma_multiply(if ed.is_kit { 0.2 } else { 0.55 });
     if x_in > rect.left() {
-        painter.rect_filled(Rect::from_x_y_ranges(rect.left()..=x_in.min(rect.right()), lanes.y_range()), 0.0, dim);
+        painter.rect_filled(
+            Rect::from_x_y_ranges(rect.left()..=x_in.min(rect.right()), lanes.y_range()),
+            0.0,
+            dim,
+        );
     }
     if x_out < rect.right() {
-        painter.rect_filled(Rect::from_x_y_ranges(x_out.max(rect.left())..=rect.right(), lanes.y_range()), 0.0, dim);
+        painter.rect_filled(
+            Rect::from_x_y_ranges(x_out.max(rect.left())..=rect.right(), lanes.y_range()),
+            0.0,
+            dim,
+        );
     }
 
     slice_marks(&painter, &m, rect, RULER_H, &marks);
@@ -236,10 +273,17 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     // Parked playhead: thin line + small triangle in the ruler.
     let xp = m.x(ed.playhead as f64);
     if rect.x_range().contains(xp) {
-        painter.line_segment([Pos2::new(xp, ruler.bottom()), Pos2::new(xp, rect.bottom())], Stroke::new(1.0, vis.strong_text_color().gamma_multiply(0.7)));
+        painter.line_segment(
+            [Pos2::new(xp, ruler.bottom()), Pos2::new(xp, rect.bottom())],
+            Stroke::new(1.0, vis.strong_text_color().gamma_multiply(0.7)),
+        );
         let t = ruler.bottom();
         painter.add(egui::Shape::convex_polygon(
-            vec![Pos2::new(xp - 5.0, t - 7.0), Pos2::new(xp + 5.0, t - 7.0), Pos2::new(xp, t)],
+            vec![
+                Pos2::new(xp - 5.0, t - 7.0),
+                Pos2::new(xp + 5.0, t - 7.0),
+                Pos2::new(xp, t),
+            ],
             vis.strong_text_color(),
             Stroke::NONE,
         ));
@@ -247,18 +291,32 @@ pub(super) fn waveform(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
     if pv.playing {
         let x = m.x(pv.pos as f64);
         if rect.x_range().contains(x) {
-            painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.5, PLAY_COLOR));
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                Stroke::new(1.5, PLAY_COLOR),
+            );
         }
     }
 
     if focused {
-        painter.rect_stroke(rect, 2.0, Stroke::new(1.0, crate::ui::theme::ACCENT_BRIGHT.gamma_multiply(0.6)), egui::StrokeKind::Inside);
+        painter.rect_stroke(
+            rect,
+            2.0,
+            Stroke::new(1.0, crate::ui::theme::ACCENT_BRIGHT.gamma_multiply(0.6)),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
 /// Waveform lanes (one per channel), min/max bars or individual samples
 /// depending on zoom. Shared by the main view and the scope strip.
-pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: Rect, vis: &egui::Visuals) {
+pub(super) fn draw_lanes(
+    painter: &egui::Painter,
+    ed: &Editor,
+    m: &Map,
+    lanes: Rect,
+    vis: &egui::Visuals,
+) {
     let Some(cur) = &ed.current else { return };
     let rect = m.rect;
     let n_ch = cur.sample.channels.len().max(1);
@@ -267,7 +325,11 @@ pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: R
     let wave_in = crate::ui::theme::WAVE;
     // In a kit the other slices are content too, so keep them close to the
     // selected one instead of greying them out like a trimmed-away region.
-    let wave_out = if ed.is_kit { wave_in.gamma_multiply(0.7) } else { vis.weak_text_color() };
+    let wave_out = if ed.is_kit {
+        wave_in.gamma_multiply(0.7)
+    } else {
+        vis.weak_text_color()
+    };
 
     for (c, (data, peaks)) in cur.sample.channels.iter().zip(cur.peaks.iter()).enumerate() {
         let lane = Rect::from_min_size(
@@ -315,10 +377,19 @@ pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: R
                 let (lo, hi) = peaks.range(data, f0, f1);
                 let inside = f1 > ed.sel.0 && f0 < ed.sel.1;
                 let clip = hi * gain >= 1.0 || lo * gain <= -1.0;
-                let col = if clip && inside { CLIP_COLOR } else if inside { wave_in } else { wave_out };
+                let col = if clip && inside {
+                    CLIP_COLOR
+                } else if inside {
+                    wave_in
+                } else {
+                    wave_out
+                };
                 let x = rect.left() + px as f32 + 0.5;
                 let (ya, yb) = (y(hi.max(0.0)), y(lo.min(0.0)));
-                painter.line_segment([Pos2::new(x, ya), Pos2::new(x, yb.max(ya + 1.0))], Stroke::new(1.0, col));
+                painter.line_segment(
+                    [Pos2::new(x, ya), Pos2::new(x, yb.max(ya + 1.0))],
+                    Stroke::new(1.0, col),
+                );
             }
         } else {
             // Few samples per pixel: a filled area between the zero line and
@@ -328,7 +399,9 @@ pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: R
             if f1 <= f0 {
                 continue;
             }
-            let pts: Vec<Pos2> = (f0..f1).map(|f| Pos2::new(m.x(f as f64), y(data[f]))).collect();
+            let pts: Vec<Pos2> = (f0..f1)
+                .map(|f| Pos2::new(m.x(f as f64), y(data[f])))
+                .collect();
             let inside = |f: usize| f >= ed.sel.0 && f < ed.sel.1;
             let fill_col = |f: usize, s: f32| {
                 let base = if !inside(f) {
@@ -374,19 +447,29 @@ pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: R
                 let now_in = inside(f0 + i);
                 if now_in != run_in && !run.is_empty() {
                     run.push(*p); // join to the next run without a gap
-                    painter.line(std::mem::take(&mut run), Stroke::new(1.2, if run_in { wave_in } else { wave_out }));
+                    painter.line(
+                        std::mem::take(&mut run),
+                        Stroke::new(1.2, if run_in { wave_in } else { wave_out }),
+                    );
                     run_in = now_in;
                 }
                 run.push(*p);
             }
             if run.len() > 1 {
-                painter.line(run, Stroke::new(1.2, if run_in { wave_in } else { wave_out }));
+                painter.line(
+                    run,
+                    Stroke::new(1.2, if run_in { wave_in } else { wave_out }),
+                );
             }
 
             if 1.0 / m.fpp >= 6.0 {
                 for (i, p) in pts.iter().enumerate() {
                     let f = f0 + i;
-                    let col = if f >= ed.sel.0 && f < ed.sel.1 { wave_in } else { wave_out };
+                    let col = if f >= ed.sel.0 && f < ed.sel.1 {
+                        wave_in
+                    } else {
+                        wave_out
+                    };
                     painter.circle_filled(*p, 2.2, col);
                 }
             }
@@ -396,17 +479,32 @@ pub(super) fn draw_lanes(painter: &egui::Painter, ed: &Editor, m: &Map, lanes: R
 
 /// Kit slice starts: a line down the whole view, a tab in the ruler and the
 /// slice number beside it.
-pub(super) fn slice_marks(painter: &egui::Painter, m: &Map, rect: Rect, ruler_h: f32, marks: &[usize]) {
+pub(super) fn slice_marks(
+    painter: &egui::Painter,
+    m: &Map,
+    rect: Rect,
+    ruler_h: f32,
+    marks: &[usize],
+) {
     for (i, &f) in marks.iter().enumerate() {
         let x = m.x(f as f64);
         if !(rect.left() - 1.0..=rect.right() + 1.0).contains(&x) {
             continue;
         }
-        painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.0, MARK_COLOR.gamma_multiply(0.85)));
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(1.0, MARK_COLOR.gamma_multiply(0.85)),
+        );
         if ruler_h > 0.0 {
             let r = Rect::from_min_size(Pos2::new(x, rect.top()), vec2(4.0, ruler_h));
             painter.rect_filled(r, 0.0, MARK_COLOR);
-            painter.text(Pos2::new(x + 6.0, rect.top() + ruler_h + 2.0), Align2::LEFT_TOP, format!("{}", i + 2), FontId::monospace(10.0), MARK_COLOR);
+            painter.text(
+                Pos2::new(x + 6.0, rect.top() + ruler_h + 2.0),
+                Align2::LEFT_TOP,
+                format!("{}", i + 2),
+                FontId::monospace(10.0),
+                MARK_COLOR,
+            );
         }
     }
 }
@@ -415,29 +513,50 @@ pub(super) fn marker(painter: &egui::Painter, rect: Rect, x: f32, col: Color32, 
     if !(rect.left() - 1.0..=rect.right() + 1.0).contains(&x) {
         return;
     }
-    painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.5, col));
+    painter.line_segment(
+        [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+        Stroke::new(1.5, col),
+    );
     // A flag pointing into the region, so in and out can't be confused.
     let top = rect.top() + RULER_H;
     let dx = if is_in { 9.0 } else { -9.0 };
     painter.add(egui::Shape::convex_polygon(
         if is_in {
-            vec![Pos2::new(x, top), Pos2::new(x + dx, top + 5.0), Pos2::new(x, top + 10.0)]
+            vec![
+                Pos2::new(x, top),
+                Pos2::new(x + dx, top + 5.0),
+                Pos2::new(x, top + 10.0),
+            ]
         } else {
-            vec![Pos2::new(x + dx, top + 5.0), Pos2::new(x, top), Pos2::new(x, top + 10.0)]
+            vec![
+                Pos2::new(x + dx, top + 5.0),
+                Pos2::new(x, top),
+                Pos2::new(x, top + 10.0),
+            ]
         },
         col,
         Stroke::NONE,
     ));
 }
 
-pub(super) fn draw_ruler(painter: &egui::Painter, m: &Map, r: Rect, rate: u32, vis: &egui::Visuals) {
+pub(super) fn draw_ruler(
+    painter: &egui::Painter,
+    m: &Map,
+    r: Rect,
+    rate: u32,
+    vis: &egui::Visuals,
+) {
     painter.rect_filled(r, 0.0, vis.faint_bg_color);
     let pps = rate as f64 / m.fpp; // pixels per second
     const STEPS: &[f64] = &[
-        0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0,
-        30.0, 60.0, 120.0, 300.0,
+        0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
+        5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     ];
-    let step = STEPS.iter().copied().find(|s| s * pps >= 80.0).unwrap_or(600.0);
+    let step = STEPS
+        .iter()
+        .copied()
+        .find(|s| s * pps >= 80.0)
+        .unwrap_or(600.0);
     let decimals = (-step.log10()).ceil().max(0.0) as usize;
     let t0 = (m.start / rate as f64 / step).floor() * step;
     let t1 = (m.start + r.width() as f64 * m.fpp) / rate as f64;
@@ -446,13 +565,25 @@ pub(super) fn draw_ruler(painter: &egui::Painter, m: &Map, r: Rect, rate: u32, v
     while t <= t1 + step {
         let x = m.x(t * rate as f64);
         if x >= r.left() - 1.0 {
-            painter.line_segment([Pos2::new(x, r.bottom() - 6.0), Pos2::new(x, r.bottom())], Stroke::new(1.0, col));
+            painter.line_segment(
+                [Pos2::new(x, r.bottom() - 6.0), Pos2::new(x, r.bottom())],
+                Stroke::new(1.0, col),
+            );
             // Minor ticks.
             for k in 1..5 {
                 let xm = m.x((t + step * k as f64 / 5.0) * rate as f64);
-                painter.line_segment([Pos2::new(xm, r.bottom() - 3.0), Pos2::new(xm, r.bottom())], Stroke::new(1.0, col.gamma_multiply(0.5)));
+                painter.line_segment(
+                    [Pos2::new(xm, r.bottom() - 3.0), Pos2::new(xm, r.bottom())],
+                    Stroke::new(1.0, col.gamma_multiply(0.5)),
+                );
             }
-            painter.text(Pos2::new(x + 3.0, r.top() + 1.0), Align2::LEFT_TOP, format!("{t:.decimals$}"), FontId::monospace(10.0), col);
+            painter.text(
+                Pos2::new(x + 3.0, r.top() + 1.0),
+                Align2::LEFT_TOP,
+                format!("{t:.decimals$}"),
+                FontId::monospace(10.0),
+                col,
+            );
         }
         t += step;
     }

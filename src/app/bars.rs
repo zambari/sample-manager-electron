@@ -6,29 +6,48 @@ use super::*;
 impl App {
     pub(super) fn device_picker(&mut self, ui: &mut egui::Ui) {
         let mut choice: Option<Option<String>> = None;
-        let name = if self.engine.device_name.is_empty() { "no output".to_owned() } else { self.engine.device_name.clone() };
-        if ui.small_button("⟳").on_hover_text("Rescan audio devices").clicked() {
+        let name = if self.engine.device_name.is_empty() {
+            "no output".to_owned()
+        } else {
+            self.engine.device_name.clone()
+        };
+        if ui
+            .small_button("⟳")
+            .on_hover_text("Rescan audio devices")
+            .clicked()
+        {
             self.devices = Engine::devices();
         }
         egui::ComboBox::from_id_salt("output_device")
             .selected_text(format!("🔈 {name}"))
             .width(220.0)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(self.output_device.is_none(), "System default").clicked() {
+                if ui
+                    .selectable_label(self.output_device.is_none(), "System default")
+                    .clicked()
+                {
                     choice = Some(None);
                 }
                 for d in &self.devices {
                     let on = self.output_device.as_deref() == Some(d.id.as_str());
-                    if ui.selectable_label(on, &d.name).on_hover_text(&d.id).clicked() {
+                    if ui
+                        .selectable_label(on, &d.name)
+                        .on_hover_text(&d.id)
+                        .clicked()
+                    {
                         choice = Some(Some(d.id.clone()));
                     }
                 }
             });
         if self.engine.device_rate > 0 {
             ui.label(
-                egui::RichText::new(format!("{:.1} kHz · {} ch", self.engine.device_rate as f64 / 1000.0, self.engine.device_channels))
-                    .weak()
-                    .small(),
+                egui::RichText::new(format!(
+                    "{:.1} kHz · {} ch",
+                    self.engine.device_rate as f64 / 1000.0,
+                    self.engine.device_channels
+                ))
+                .weak()
+                .small(),
             );
         }
         ui.separator();
@@ -96,7 +115,11 @@ impl App {
                 let xa = x_of(crate::audio::stats::from_db(a));
                 let xb = x_of(crate::audio::stats::from_db(b)).min(lvl);
                 if xb > xa {
-                    p.rect_filled(egui::Rect::from_x_y_ranges(xa..=xb, y0..=y0 + bar_h), 0.0, c);
+                    p.rect_filled(
+                        egui::Rect::from_x_y_ranges(xa..=xb, y0..=y0 + bar_h),
+                        0.0,
+                        c,
+                    );
                 }
             }
             if self.meter_hold[k] > 1e-4 {
@@ -115,10 +138,15 @@ impl App {
                 egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
             );
         }
-        let hold_db = crate::audio::stats::to_db(self.meter_hold[0].max(self.meter_hold[1]).max(1e-6));
+        let hold_db =
+            crate::audio::stats::to_db(self.meter_hold[0].max(self.meter_hold[1]).max(1e-6));
         resp.on_hover_text(format!(
             "Output level, top L, bottom R (-48..0 dBFS)\nPeak {}",
-            if hold_db < -90.0 { "-inf dB".to_owned() } else { format!("{hold_db:.1} dB") }
+            if hold_db < -90.0 {
+                "-inf dB".to_owned()
+            } else {
+                format!("{hold_db:.1} dB")
+            }
         ));
 
         let active = self.engine.is_playing() || self.meter_hold.iter().any(|&h| h > 1e-4);
@@ -129,7 +157,10 @@ impl App {
         // From the slider to the right-hand controls, full bar height.
         // Bar's clip rect gives its edges; capped near the row in case the
         // clip is wider than the panel.
-        let ys = ui.clip_rect().intersect(ui.max_rect().expand2(egui::vec2(0.0, 8.0))).y_range();
+        let ys = ui
+            .clip_rect()
+            .intersect(ui.max_rect().expand2(egui::vec2(0.0, 8.0)))
+            .y_range();
         let strip = egui::Rect::from_x_y_ranges(strip_left..=ui.max_rect().right(), ys);
         if strip.width() > 4.0 {
             let mut shapes = vec![egui::Shape::rect_filled(strip, 0.0, egui::Color32::BLACK)];
@@ -150,7 +181,13 @@ impl App {
         let r = strip.width() / 2.0;
         let s = std::f32::consts::FRAC_1_SQRT_2;
         let guide = egui::Stroke::new(1.0, egui::Color32::from_gray(28));
-        shapes.push(egui::Shape::line_segment([egui::pos2(c.x, strip.top()), egui::pos2(c.x, strip.bottom())], guide));
+        shapes.push(egui::Shape::line_segment(
+            [
+                egui::pos2(c.x, strip.top()),
+                egui::pos2(c.x, strip.bottom()),
+            ],
+            guide,
+        ));
 
         // Cut the trace into runs that stay inside the strip, so lines don't
         // get drawn across the clipped-away parts.
@@ -181,8 +218,15 @@ impl App {
         if ll * rr2 > 1e-12 {
             let corr = (lr / (ll * rr2).sqrt()).clamp(-1.0, 1.0);
             let x = c.x + corr * strip.width() / 2.0;
-            let col = if corr < 0.0 { egui::Color32::from_rgb(222, 60, 50) } else { theme::ACCENT_BRIGHT };
-            let bar = egui::Rect::from_x_y_ranges(c.x.min(x)..=c.x.max(x), strip.bottom() - 2.0..=strip.bottom());
+            let col = if corr < 0.0 {
+                egui::Color32::from_rgb(222, 60, 50)
+            } else {
+                theme::ACCENT_BRIGHT
+            };
+            let bar = egui::Rect::from_x_y_ranges(
+                c.x.min(x)..=c.x.max(x),
+                strip.bottom() - 2.0..=strip.bottom(),
+            );
             shapes.push(egui::Shape::rect_filled(bar, 0.0, col.gamma_multiply(0.6)));
         }
     }
@@ -232,7 +276,10 @@ impl App {
 
     /// The job the status bar shows: the oldest one that is running.
     pub(super) fn shown_job(&self) -> Option<&ActiveJob> {
-        self.active_jobs.iter().find(|a| a.started).or(self.active_jobs.first())
+        self.active_jobs
+            .iter()
+            .find(|a| a.started)
+            .or(self.active_jobs.first())
     }
 
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -248,11 +295,20 @@ impl App {
             // A waiting device job counts its top-level items until it starts
             // and counts the files inside, so the total can grow.
             let b = &self.batch;
-            let done_items = b.done_items + self.active_jobs.iter().map(|j| j.done_items).sum::<usize>();
-            let total_items = b.total_items + self.active_jobs.iter().map(|j| j.total_items).sum::<usize>();
-            let done_bytes = b.done_bytes + self.active_jobs.iter().map(|j| j.done_bytes).sum::<u64>();
-            let total_bytes = b.total_bytes + self.active_jobs.iter().map(|j| j.total_bytes).sum::<u64>();
-            let bytes_known = !b.bytes_unknown && self.active_jobs.iter().all(|j| j.total_bytes > 0);
+            let done_items =
+                b.done_items + self.active_jobs.iter().map(|j| j.done_items).sum::<usize>();
+            let total_items = b.total_items
+                + self
+                    .active_jobs
+                    .iter()
+                    .map(|j| j.total_items)
+                    .sum::<usize>();
+            let done_bytes =
+                b.done_bytes + self.active_jobs.iter().map(|j| j.done_bytes).sum::<u64>();
+            let total_bytes =
+                b.total_bytes + self.active_jobs.iter().map(|j| j.total_bytes).sum::<u64>();
+            let bytes_known =
+                !b.bytes_unknown && self.active_jobs.iter().all(|j| j.total_bytes > 0);
             let frac = if bytes_known && total_bytes > 0 {
                 done_bytes as f32 / total_bytes as f32
             } else if total_items > 0 {
@@ -267,12 +323,24 @@ impl App {
             let file_bar = self.active_jobs.iter().any(|j| j.file_bar) || self.batch.file_bar;
             // Device folders have no known size up front: show bytes so far.
             let bytes = if bytes_known {
-                format!("{} / {}", fs_model::human_bytes(done_bytes), fs_model::human_bytes(total_bytes))
+                format!(
+                    "{} / {}",
+                    fs_model::human_bytes(done_bytes),
+                    fs_model::human_bytes(total_bytes)
+                )
             } else {
                 fs_model::human_bytes(done_bytes)
             };
-            let label = if a.started || !a.label.is_empty() { a.label.as_str() } else { "Starting…" };
-            let text = format!("{}/{} files · {bytes} · {label}", done_items.min(total_items), total_items);
+            let label = if a.started || !a.label.is_empty() {
+                a.label.as_str()
+            } else {
+                "Starting…"
+            };
+            let text = format!(
+                "{}/{} files · {bytes} · {label}",
+                done_items.min(total_items),
+                total_items
+            );
             // Buttons pinned right; the bar takes the rest so long names fit.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if waiting > 0 && ui.button("Cancel all").clicked() {
@@ -280,24 +348,37 @@ impl App {
                         self.jobs.cancel(j.id);
                     }
                 }
-                if ui.button("Cancel").on_hover_text("Stop the job running now").clicked() {
+                if ui
+                    .button("Cancel")
+                    .on_hover_text("Stop the job running now")
+                    .clicked()
+                {
                     self.jobs.cancel(job_id);
                 }
                 if waiting > 0 {
-                    ui.label(format!("+{waiting} queued"))
-                        .on_hover_text("Waiting jobs start when this one finishes. Their files count in the bar.");
+                    ui.label(format!("+{waiting} queued")).on_hover_text(
+                        "Waiting jobs start when this one finishes. Their files count in the bar.",
+                    );
                 }
                 // This file, chunk by chunk; an empty bar between files.
                 if file_bar {
                     let (frac, text) = match file.filter(|f| f.2 > 0) {
                         Some((phase, done, total)) => (
                             done as f32 / total as f32,
-                            format!("{phase} {} / {}", fs_model::human_bytes(done.min(total)), fs_model::human_bytes(total)),
+                            format!(
+                                "{phase} {} / {}",
+                                fs_model::human_bytes(done.min(total)),
+                                fs_model::human_bytes(total)
+                            ),
                         ),
                         None => (0.0, "preparing…".to_owned()),
                     };
-                    ui.add(egui::ProgressBar::new(frac.clamp(0.0, 1.0)).desired_width(200.0).text(text))
-                        .on_hover_text("Current file");
+                    ui.add(
+                        egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                            .desired_width(200.0)
+                            .text(text),
+                    )
+                    .on_hover_text("Current file");
                 }
                 ui.add(
                     egui::ProgressBar::new(frac.clamp(0.0, 1.0))
@@ -311,11 +392,18 @@ impl App {
         ui.horizontal(|ui| {
             // Counts live in each pane's own footer; here just say which
             // side has focus.
-            ui.label(if self.editor_focused { "Editor" } else { self.focused.label() });
+            ui.label(if self.editor_focused {
+                "Editor"
+            } else {
+                self.focused.label()
+            });
 
             if let Some(p) = self.preview.playing() {
                 ui.separator();
-                ui.label(format!("▶ {}", p.file_name().unwrap_or_default().to_string_lossy()));
+                ui.label(format!(
+                    "▶ {}",
+                    p.file_name().unwrap_or_default().to_string_lossy()
+                ));
             }
 
             if !self.status.is_empty() {

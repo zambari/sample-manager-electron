@@ -20,7 +20,11 @@ pub fn compute(channels: &[Vec<f32>], start: usize, end: usize, gain: f32) -> St
     let mut n = 0usize;
     let mut clipped = 0usize;
     // A sample clips after gain when |s * gain| >= 1.
-    let clip_at = if gain > 0.0 { 1.0 / gain } else { f32::INFINITY };
+    let clip_at = if gain > 0.0 {
+        1.0 / gain
+    } else {
+        f32::INFINITY
+    };
     for ch in channels {
         let end = end.min(ch.len());
         if start >= end {
@@ -50,7 +54,11 @@ pub fn compute(channels: &[Vec<f32>], start: usize, end: usize, gain: f32) -> St
 }
 
 pub fn to_db(lin: f32) -> f32 {
-    if lin <= 0.0 { f32::NEG_INFINITY } else { 20.0 * lin.log10() }
+    if lin <= 0.0 {
+        f32::NEG_INFINITY
+    } else {
+        20.0 * lin.log10()
+    }
 }
 
 pub fn from_db(db: f32) -> f32 {
@@ -58,7 +66,11 @@ pub fn from_db(db: f32) -> f32 {
 }
 
 pub fn fmt_db(db: f32) -> String {
-    if db.is_finite() { format!("{db:+.1} dB") } else { "−∞ dB".to_owned() }
+    if db.is_finite() {
+        format!("{db:+.1} dB")
+    } else {
+        "−∞ dB".to_owned()
+    }
 }
 
 /// How the first two channels relate, and what folding to mono costs.
@@ -110,12 +122,17 @@ impl Fold {
 
 pub fn fold_region(channels: &[Vec<f32>], start: usize, end: usize, fold: Fold) -> Vec<f32> {
     let end = end.min(channels.first().map_or(0, Vec::len));
-    (start.min(end)..end).map(|i| fold.at(channels, i)).collect()
+    (start.min(end)..end)
+        .map(|i| fold.at(channels, i))
+        .collect()
 }
 
 pub fn phase(channels: &[Vec<f32>], start: usize, end: usize) -> Phase {
     if channels.len() < 2 {
-        return Phase { corr: Some(1.0), mono_loss_db: 0.0 };
+        return Phase {
+            corr: Some(1.0),
+            mono_loss_db: 0.0,
+        };
     }
     let (l, r) = (&channels[0], &channels[1]);
     let end = end.min(l.len()).min(r.len());
@@ -132,6 +149,10 @@ pub fn phase(channels: &[Vec<f32>], start: usize, end: usize) -> Phase {
     let corr = (denom > 1e-12).then(|| (lr / denom).clamp(-1.0, 1.0) as f32);
     // Stereo power per channel (average of L and R) vs the mono sum's power.
     let st = (ll + rr) / 2.0;
-    let mono_loss_db = if st > 1e-12 { (10.0 * (mm.max(1e-20) / st).log10()) as f32 } else { 0.0 };
+    let mono_loss_db = if st > 1e-12 {
+        (10.0 * (mm.max(1e-20) / st).log10()) as f32
+    } else {
+        0.0
+    };
     Phase { corr, mono_loss_db }
 }

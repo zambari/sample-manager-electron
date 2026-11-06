@@ -32,11 +32,18 @@ impl App {
                 // An unplugged drive's folder stays listed but can't be opened.
                 let exists = fav.is_dir();
                 ui.horizontal(|ui| {
-                    if ui.small_button("×").on_hover_text("Remove from favourites").clicked() {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Remove from favourites")
+                        .clicked()
+                    {
                         remove = Some(i);
                     }
                     let resp = ui
-                        .add_enabled(exists, egui::Button::new(name).selected(*fav == cwd).frame(false))
+                        .add_enabled(
+                            exists,
+                            egui::Button::new(name).selected(*fav == cwd).frame(false),
+                        )
                         .on_hover_text(fav.display().to_string())
                         .on_disabled_hover_text(format!("{} (not found)", fav.display()));
                     if resp.clicked() {
@@ -46,7 +53,11 @@ impl App {
                 });
             }
             ui.separator();
-            let label = if is_fav { "Remove this folder" } else { "Add this folder" };
+            let label = if is_fav {
+                "Remove this folder"
+            } else {
+                "Add this folder"
+            };
             if ui.button(label).clicked() {
                 toggle_current = true;
                 ui.close();
@@ -81,21 +92,45 @@ impl App {
             ui.set_min_width(180.0);
             // Probing drives can be slow (a sleeping network share), so only
             // while the menu is open, and not every frame.
-            if self.volumes.as_ref().is_none_or(|(t, _)| t.elapsed().as_secs_f32() > 2.0) {
+            if self
+                .volumes
+                .as_ref()
+                .is_none_or(|(t, _)| t.elapsed().as_secs_f32() > 2.0)
+            {
                 self.volumes = Some((std::time::Instant::now(), crate::fs_model::volumes()));
             }
             let home = dirs_home();
-            if ui.add(egui::Button::new("🏠 Home").selected(cwd == home).frame(false)).on_hover_text(home.display().to_string()).clicked() {
+            if ui
+                .add(
+                    egui::Button::new("🏠 Home")
+                        .selected(cwd == home)
+                        .frame(false),
+                )
+                .on_hover_text(home.display().to_string())
+                .clicked()
+            {
                 go = Some(home);
                 ui.close();
             }
             ui.separator();
-            let vols = self.volumes.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
+            let vols = self
+                .volumes
+                .as_ref()
+                .map(|(_, v)| v.as_slice())
+                .unwrap_or_default();
             // The disk holding cwd: the longest volume path it sits under.
-            let current = vols.iter().filter(|v| cwd.starts_with(&v.path)).max_by_key(|v| v.path.as_os_str().len()).map(|v| &v.path);
+            let current = vols
+                .iter()
+                .filter(|v| cwd.starts_with(&v.path))
+                .max_by_key(|v| v.path.as_os_str().len())
+                .map(|v| &v.path);
             for v in vols {
                 let resp = ui
-                    .add(egui::Button::new(v.name.as_str()).selected(current == Some(&v.path)).frame(false))
+                    .add(
+                        egui::Button::new(v.name.as_str())
+                            .selected(current == Some(&v.path))
+                            .frame(false),
+                    )
                     .on_hover_text(v.path.display().to_string());
                 if resp.clicked() {
                     go = Some(v.path.clone());
@@ -115,7 +150,9 @@ impl App {
     /// Typed path in the pane header. Enter goes there, Esc or clicking
     /// away cancels.
     pub(super) fn path_editor(&mut self, ui: &mut egui::Ui, role: Role) {
-        let Some((_, buf)) = self.path_edit.as_mut() else { return };
+        let Some((_, buf)) = self.path_edit.as_mut() else {
+            return;
+        };
         let id = egui::Id::new(("path_edit", role.label()));
         let resp = ui.add(
             egui::TextEdit::singleline(buf)
@@ -128,10 +165,12 @@ impl App {
             ui.memory_mut(|m| m.request_focus(id));
             if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
                 let n = buf.chars().count();
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(0),
-                    egui::text::CCursor::new(n),
-                )));
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(n),
+                    )));
                 state.store(ui.ctx(), id);
             }
             return;
@@ -149,15 +188,23 @@ impl App {
         if !enter {
             return;
         }
-        let Some(path) = typed_path(&typed) else { return };
-        let target = if path.is_file() { path.parent().map(Path::to_path_buf) } else { Some(path.clone()) };
+        let Some(path) = typed_path(&typed) else {
+            return;
+        };
+        let target = if path.is_file() {
+            path.parent().map(Path::to_path_buf)
+        } else {
+            Some(path.clone())
+        };
         match target {
             Some(dir) if dir.is_dir() => {
                 self.focused = role;
                 self.editor_focused = false;
                 self.open_in(role, dir);
             }
-            _ => self.errors.push(format!("{}: no such folder", path.display())),
+            _ => self
+                .errors
+                .push(format!("{}: no such folder", path.display())),
         }
     }
 }

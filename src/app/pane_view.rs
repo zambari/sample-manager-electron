@@ -23,7 +23,8 @@ impl App {
                 }
             }
         }
-        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         let mut text = format!(
             "{} · {} · {}",
             plural(files, "file", "files"),
@@ -62,13 +63,23 @@ impl App {
                 self.path_editor(ui, role);
             } else {
                 let tab = self.pane(role).active_tab();
-                let cwd = if tab.device { crate::device::dev_str(&tab.cwd) } else { tab.cwd.display().to_string() };
+                let cwd = if tab.device {
+                    crate::device::dev_str(&tab.cwd)
+                } else {
+                    tab.cwd.display().to_string()
+                };
                 let size = egui::TextStyle::Small.resolve(ui.style()).size + 1.0;
                 let color = ui.visuals().text_color();
-                let label = egui::Label::new(egui::RichText::new(cwd.clone()).size(size).color(color)).truncate();
+                let label =
+                    egui::Label::new(egui::RichText::new(cwd.clone()).size(size).color(color))
+                        .truncate();
                 if on_dev {
                     ui.add(label);
-                } else if ui.add(label.sense(egui::Sense::click())).on_hover_text("Click to type a path").clicked() {
+                } else if ui
+                    .add(label.sense(egui::Sense::click()))
+                    .on_hover_text("Click to type a path")
+                    .clicked()
+                {
                     self.path_edit = Some((role, cwd));
                 }
             }
@@ -92,7 +103,11 @@ impl App {
                 Role::Source => &self.dest,
                 Role::Dest => &self.source,
             };
-            other.active_tab().cwd.file_name().map(|n| n.to_string_lossy().into_owned())
+            other
+                .active_tab()
+                .cwd
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
         };
         if let Some(mr) = self.pane_mut(role).active_tab_mut().multi_rename.as_mut() {
             let outcome = crate::ui::rename_view::show(ui, mr, focused);
@@ -101,10 +116,17 @@ impl App {
                 self.editor_focused = false;
             }
             if on_device {
-                ui.painter().rect_stroke(area.shrink(1.0), 0.0, theme::device_frame(), egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    area.shrink(1.0),
+                    0.0,
+                    theme::device_frame(),
+                    egui::StrokeKind::Inside,
+                );
             }
             match outcome {
-                Some(crate::ui::rename_view::Outcome::Apply(rows)) => self.apply_multi_rename(role, &rows),
+                Some(crate::ui::rename_view::Outcome::Apply(rows)) => {
+                    self.apply_multi_rename(role, &rows)
+                }
                 Some(crate::ui::rename_view::Outcome::Cancel) => {
                     self.pane_mut(role).active_tab_mut().multi_rename = None;
                     self.status = "Rename cancelled".to_owned();
@@ -144,7 +166,12 @@ impl App {
         };
 
         if on_device {
-            ui.painter().rect_stroke(area.shrink(1.0), 0.0, theme::device_frame(), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(
+                area.shrink(1.0),
+                0.0,
+                theme::device_frame(),
+                egui::StrokeKind::Inside,
+            );
         }
 
         for intent in intents {
@@ -183,7 +210,9 @@ impl App {
                     let on_dev = tab.device;
                     self.do_rename(&from, &to, on_dev);
                 }
-                Intent::BeginMultiRename => self.pane_mut(role).active_tab_mut().begin_multi_rename(),
+                Intent::BeginMultiRename => {
+                    self.pane_mut(role).active_tab_mut().begin_multi_rename()
+                }
                 Intent::CancelRename => {
                     self.pane_mut(role).active_tab_mut().renaming = None;
                 }
@@ -224,7 +253,9 @@ impl App {
                     self.jobs.find_duplicates(paths);
                 }
                 Intent::NewFolder { dir, base } => self.new_folder(role, dir, None, base),
-                Intent::NewFolderNamed { dir, name } => self.new_folder(role, dir, Some(name), None),
+                Intent::NewFolderNamed { dir, name } => {
+                    self.new_folder(role, dir, Some(name), None)
+                }
                 Intent::NewFolderWith { dir, paths } => self.new_folder_with(role, dir, paths),
                 Intent::LoadFromDevice(p) => self.ask_device_load(p),
                 Intent::MonoCopy { dirs, folds } => {
@@ -239,11 +270,24 @@ impl App {
     /// Connection state of the device, shown in a device tab's header.
     pub(super) fn device_badge(&mut self, ui: &mut egui::Ui) {
         let (text, color, tip) = match &self.device_status {
-            Some(Ok(name)) => (format!("● {name}"), egui::Color32::from_rgb(90, 210, 110), "Connected over USB MIDI".to_owned()),
-            Some(Err(e)) => ("● offline".to_owned(), ui.visuals().error_fg_color, e.clone()),
-            None => ("● connecting…".to_owned(), ui.visuals().weak_text_color(), String::new()),
+            Some(Ok(name)) => (
+                format!("● {name}"),
+                egui::Color32::from_rgb(90, 210, 110),
+                "Connected over USB MIDI".to_owned(),
+            ),
+            Some(Err(e)) => (
+                "● offline".to_owned(),
+                ui.visuals().error_fg_color,
+                e.clone(),
+            ),
+            None => (
+                "● connecting…".to_owned(),
+                ui.visuals().weak_text_color(),
+                String::new(),
+            ),
         };
-        ui.label(egui::RichText::new(text).color(color).small()).on_hover_text(tip);
+        ui.label(egui::RichText::new(text).color(color).small())
+            .on_hover_text(tip);
     }
 
     /// Whether a drop moves or copies. On the same storage (computer to
@@ -251,7 +295,11 @@ impl App {
     /// Ctrl makes it a copy. Between the computer and the device, and from
     /// Finder / Explorer, it always copies.
     pub(super) fn drop_kind(&self, ui: &egui::Ui, payload: &DragPayload, to_dev: bool) -> Kind {
-        if payload.external || copy_held(ui.ctx()) || payload.device != to_dev { Kind::Copy } else { Kind::Move }
+        if payload.external || copy_held(ui.ctx()) || payload.device != to_dev {
+            Kind::Copy
+        } else {
+            Kind::Move
+        }
     }
 
     /// Whether `p` (from a drag payload) is a folder. Device paths are looked
@@ -282,7 +330,11 @@ impl App {
         }
         for dir in dirs {
             let id = self.new_tab_id();
-            let tab = if payload.device { DirTab::new_device(id, dir) } else { DirTab::new(id, dir) };
+            let tab = if payload.device {
+                DirTab::new_device(id, dir)
+            } else {
+                DirTab::new(id, dir)
+            };
             self.pane_mut(role).add_tab(tab);
             let i = self.pane(role).active;
             self.reload(role, i);
@@ -376,9 +428,13 @@ impl App {
 
                             let mut tab_h = ui.spacing().interact_size.y;
                             for (i, title, loading) in titles {
-                                let label = if loading { format!("{title} …") } else { title };
-                                let (inner, payload) =
-                                    ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
+                                let label = if loading {
+                                    format!("{title} …")
+                                } else {
+                                    title
+                                };
+                                let (inner, payload) = ui
+                                    .dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
                                         ui.add(theme::pane_tab(&label, i == active))
                                     });
                                 let resp = inner.inner;
@@ -432,7 +488,10 @@ impl App {
                             let w = ui.available_width().max(40.0);
                             let (_, payload) =
                                 ui.dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
-                                    ui.allocate_exact_size(egui::vec2(w, tab_h), egui::Sense::hover())
+                                    ui.allocate_exact_size(
+                                        egui::vec2(w, tab_h),
+                                        egui::Sense::hover(),
+                                    )
                                 });
                             if let Some(p) = payload {
                                 drop_new_tab = Some((*p).clone());
@@ -504,7 +563,11 @@ impl App {
             } else if let Some(src) = self.pane(role).tabs.get(i) {
                 let (cwd, device) = (src.cwd.clone(), src.device);
                 let id = self.new_tab_id();
-                let tab = if device { DirTab::new_device(id, cwd) } else { DirTab::new(id, cwd) };
+                let tab = if device {
+                    DirTab::new_device(id, cwd)
+                } else {
+                    DirTab::new(id, cwd)
+                };
                 self.pane_mut(other).add_tab(tab);
                 let j = self.pane(other).active;
                 self.reload(other, j);
@@ -517,4 +580,3 @@ impl App {
 fn copy_held(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.modifiers.alt || i.modifiers.ctrl)
 }
-

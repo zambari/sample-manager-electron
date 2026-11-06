@@ -124,7 +124,9 @@ impl Editor {
             h.committed = Some(prev);
             return;
         }
-        let coalesce = mask == h.last_mask && mask & (CH_CROP | CH_AUDIO | CH_MARKS) == 0 && now - h.last_time < COALESCE_SECS;
+        let coalesce = mask == h.last_mask
+            && mask & (CH_CROP | CH_AUDIO | CH_MARKS) == 0
+            && now - h.last_time < COALESCE_SECS;
         if !coalesce {
             h.undo.push(prev);
             if h.undo.len() > UNDO_LIMIT {
@@ -147,7 +149,9 @@ impl Editor {
 
     pub fn undo(&mut self) {
         self.track_history(false, f64::INFINITY);
-        let Some(prev) = self.history.undo.pop() else { return };
+        let Some(prev) = self.history.undo.pop() else {
+            return;
+        };
         self.history.redo.push(self.state());
         self.restore(prev);
         self.history.committed = Some(self.state());
@@ -156,7 +160,9 @@ impl Editor {
 
     pub fn redo(&mut self) {
         self.track_history(false, f64::INFINITY);
-        let Some(next) = self.history.redo.pop() else { return };
+        let Some(next) = self.history.redo.pop() else {
+            return;
+        };
         self.history.undo.push(self.state());
         self.restore(next);
         self.history.committed = Some(self.state());

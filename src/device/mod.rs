@@ -12,6 +12,8 @@
 //! `PathBuf`s; they never touch the local filesystem.
 
 mod conn;
+mod elk;
+pub use elk::{ElkCmd, ElkEv, ElkProject, PoolEntry, SavedProject};
 mod proto;
 mod sample;
 mod transfer;
@@ -21,13 +23,13 @@ use crate::jobs::{Emitter, Ev};
 use crate::ops::Policy;
 use conn::{Conn, entries, port_present, rename_checked};
 use proto::{Args, DirEntry, Reader};
-use worker::{Worker, serve_lists};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
+use worker::{Worker, serve_lists};
 
 /// Where elk-herd (and we) put deleted items, so a stray keypress is undoable.
 pub const TRASH: &str = "/trash";
@@ -64,16 +66,33 @@ pub enum Task {
         /// Best guess for the progress bar.
         total_bytes: u64,
     },
-    Rename { from: PathBuf, to: PathBuf },
-    Mkdir { path: PathBuf },
-    Trash { paths: Vec<PathBuf> },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Mkdir {
+        path: PathBuf,
+    },
+    Trash {
+        paths: Vec<PathBuf>,
+    },
     /// Delete outright, folders with everything in them.
-    Delete { paths: Vec<PathBuf> },
+    Delete {
+        paths: Vec<PathBuf>,
+    },
 }
 
 enum Cmd {
-    List { path: PathBuf, generation: u64 },
-    Job { job: u64, cancel: Arc<AtomicBool>, task: Task },
+    List {
+        path: PathBuf,
+        generation: u64,
+    },
+    Job {
+        job: u64,
+        cancel: Arc<AtomicBool>,
+        task: Task,
+    },
+    Elk(ElkCmd),
 }
 
 pub struct Device {
@@ -85,7 +104,20 @@ impl Device {
         let (tx, rx) = channel();
         let _ = std::thread::Builder::new()
             .name("device".into())
-            .spawn(move || Worker { conn: None, em, job: None, rx, later: VecDeque::new(), counted: HashMap::new(), counting: false, busy: Vec::new(), merged: (0, 0, 0) }.run());
+            .spawn(move || {
+                Worker {
+                    conn: None,
+                    em,
+                    job: None,
+                    rx,
+                    later: VecDeque::new(),
+                    counted: HashMap::new(),
+                    counting: false,
+                    busy: Vec::new(),
+                    merged: (0, 0, 0),
+                }
+                .run()
+            });
         Self { tx }
     }
 
@@ -95,6 +127,11 @@ impl Device {
 
     pub fn run(&self, job: u64, cancel: Arc<AtomicBool>, task: Task) {
         let _ = self.tx.send(Cmd::Job { job, cancel, task });
+    }
+
+    /// Project dump work (see [`elk`]): runs in turn with other jobs.
+    pub fn elk(&self, cmd: ElkCmd) {
+        let _ = self.tx.send(Cmd::Elk(cmd));
     }
 }
 
@@ -124,16 +161,25 @@ fn refused<T>(what: impl Into<String>) -> R<T> {
 /// would read as part of a file name.
 pub fn dev_str(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') { s } else { format!("/{s}") }
+    if s.starts_with('/') {
+        s
+    } else {
+        format!("/{s}")
+    }
 }
-
 
 /// Name for a file going to the device: the stem, since the device has no use
 /// for `.wav`.
 fn device_name(local: &Path) -> String {
-    let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = local
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if crate::fs_model::is_audio_path(local) {
-        local.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or(name)
+        local
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(name)
     } else {
         name
     }
@@ -141,12 +187,19 @@ fn device_name(local: &Path) -> String {
 
 /// `name 2`, `name 3`, ... not in `taken`.
 fn unique_name(taken: &HashSet<String>, name: &str) -> String {
-    (2..10_000).map(|n| format!("{name} {n}")).find(|c| !taken.contains(c)).unwrap_or_else(|| name.to_owned())
+    (2..10_000)
+        .map(|n| format!("{name} {n}"))
+        .find(|c| !taken.contains(c))
+        .unwrap_or_else(|| name.to_owned())
 }
 
 /// Where a download of `name` lands.
 pub fn wav_name(name: &str) -> String {
-    if name.to_ascii_lowercase().ends_with(".wav") { name.to_owned() } else { format!("{name}.wav") }
+    if name.to_ascii_lowercase().ends_with(".wav") {
+        name.to_owned()
+    } else {
+        format!("{name}.wav")
+    }
 }
 
 /// Where an upload of `local` lands in `dir`.

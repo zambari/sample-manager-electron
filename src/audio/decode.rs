@@ -46,7 +46,12 @@ pub fn decode(path: &Path) -> Result<Sample, String> {
     }
 
     let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|e| format!("unsupported file: {e}"))?;
 
     let track = format
@@ -109,7 +114,11 @@ pub fn decode(path: &Path) -> Result<Sample, String> {
         rate: rate.max(1),
         channels,
         bits: params.bits_per_sample,
-        format: if ext.is_empty() { "?".to_owned() } else { ext.to_ascii_uppercase() },
+        format: if ext.is_empty() {
+            "?".to_owned()
+        } else {
+            ext.to_ascii_uppercase()
+        },
         file_len,
     })
 }
@@ -123,7 +132,12 @@ pub fn channel_count(path: &Path) -> Option<usize> {
         hint.with_extension(&ext.to_string_lossy().to_ascii_lowercase());
     }
     let format = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .ok()?;
     let track = format.default_track(TrackType::Audio)?;
     let params = track.codec_params.as_ref()?.audio()?;

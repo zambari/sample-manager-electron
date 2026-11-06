@@ -13,9 +13,9 @@ use crate::ops::{Kind, Op};
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::Arc;
 
 /// Results flowing worker -> UI.
 pub enum Ev {
@@ -79,6 +79,8 @@ pub enum Ev {
     DeviceStatus(Result<String, String>),
     /// The device's MIDI port went away (unplugged or switched off).
     DeviceLost,
+    /// Project dump news (sample order view).
+    Elk(crate::device::ElkEv),
     /// A summary to show in place of "Done" when `job` finishes.
     Note { job: u64, text: String },
 }
@@ -124,7 +126,10 @@ impl Jobs {
 
     /// A worker-side handle, for threads that live outside this module.
     pub fn emitter(&self) -> Emitter {
-        Emitter { tx: self.tx.clone(), ctx: self.ctx.clone() }
+        Emitter {
+            tx: self.tx.clone(),
+            ctx: self.ctx.clone(),
+        }
     }
 
     /// A fresh job id with its cancel flag, for work run elsewhere.
@@ -155,7 +160,12 @@ impl Jobs {
     pub fn list(&self, path: PathBuf, generation: u64, show_hidden: bool) {
         self.spawn("list", move |em| {
             let result = fs_model::list_dir(&path, show_hidden).map_err(|e| e.to_string());
-            em.send(Ev::Listed { device: false, generation, path, result });
+            em.send(Ev::Listed {
+                device: false,
+                generation,
+                path,
+                result,
+            });
         });
     }
 
@@ -186,7 +196,9 @@ impl Jobs {
         let job = self.next_job.fetch_add(1, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancels.insert(job, cancel.clone());
-        self.spawn("execute", move |em| execute(em, job, kind, ops, tidy, cancel));
+        self.spawn("execute", move |em| {
+            execute(em, job, kind, ops, tidy, cancel)
+        });
         job
     }
 
@@ -203,7 +215,9 @@ impl Jobs {
     /// are and stereo ones folded down once per entry of `folds`.
     pub fn mono_copy(&mut self, src: PathBuf, dst: PathBuf, folds: Vec<Fold>) -> u64 {
         let (job, cancel) = self.register();
-        self.spawn("mono_copy", move |em| mono_copy(em, job, src, dst, folds, cancel));
+        self.spawn("mono_copy", move |em| {
+            mono_copy(em, job, src, dst, folds, cancel)
+        });
         job
     }
 
@@ -225,7 +239,11 @@ impl Jobs {
                     Err(e) => errors.push(format!("{}: {e}", p.display())),
                 }
             }
-            em.send(Ev::Applied { job, done, replaced: false });
+            em.send(Ev::Applied {
+                job,
+                done,
+                replaced: false,
+            });
             em.send(Ev::Finished {
                 job,
                 touched,
@@ -251,7 +269,9 @@ fn trash_one(p: &Path) -> Result<PathBuf, String> {
     NSFileManager::defaultManager()
         .trashItemAtURL_resultingItemURL_error(&url, Some(&mut landed))
         .map_err(|e| e.localizedDescription().to_string())?;
-    Ok(landed.and_then(|u| u.path()).map_or_else(|| p.to_path_buf(), |s| PathBuf::from(s.to_string())))
+    Ok(landed
+        .and_then(|u| u.path())
+        .map_or_else(|| p.to_path_buf(), |s| PathBuf::from(s.to_string())))
 }
 
 /// Elsewhere the OS can restore by original path, so that's what's kept.
@@ -262,6 +282,7 @@ fn trash_one(p: &Path) -> Result<PathBuf, String> {
 }
 
 /// Worker-side handle for sending events and waking the UI.
+#[derive(Clone)]
 pub struct Emitter {
     tx: Sender<Ev>,
     ctx: egui::Context,
@@ -295,7 +316,10 @@ fn find_duplicates(paths: &[PathBuf]) -> (Vec<DupGroup>, Vec<String>) {
         // Shortest name first (ties alphabetical), so each cluster's first
         // member is the one to keep.
         same_size.sort_by_key(|p| {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             (name.chars().count(), name)
         });
         // Cluster by exact contents: each file joins the first cluster whose
@@ -325,7 +349,11 @@ fn find_duplicates(paths: &[PathBuf]) -> (Vec<DupGroup>, Vec<String>) {
         for mut c in clusters {
             if c.len() > 1 {
                 let keep = c.remove(0);
-                groups.push(DupGroup { keep, remove: c, bytes });
+                groups.push(DupGroup {
+                    keep,
+                    remove: c,
+                    bytes,
+                });
             }
         }
     }
@@ -370,14 +398,25 @@ pub struct Tidy {
     pub roots: Vec<PathBuf>,
 }
 
-fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, tidy: Option<Tidy>, cancel: Arc<AtomicBool>) {
+fn execute(
+    em: Emitter,
+    job: u64,
+    kind: Kind,
+    ops: Vec<Op>,
+    tidy: Option<Tidy>,
+    cancel: Arc<AtomicBool>,
+) {
     let total_bytes: u64 = ops.iter().map(|o| o.approx_bytes).sum();
     // Files, not top-level items, so a folder visibly moves along.
     let counts: Vec<usize> = ops
         .iter()
         .map(|o| {
             if o.is_dir {
-                walkdir::WalkDir::new(&o.src).into_iter().flatten().filter(|d| d.file_type().is_file()).count()
+                walkdir::WalkDir::new(&o.src)
+                    .into_iter()
+                    .flatten()
+                    .filter(|d| d.file_type().is_file())
+                    .count()
             } else {
                 1
             }
@@ -463,7 +502,11 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, tidy: Option<Tidy>, 
         for root in &t.roots {
             // Deepest first, so a folder whose subfolders all emptied goes too.
             // remove_dir refuses non-empty folders: collisions keep theirs.
-            for de in walkdir::WalkDir::new(root).contents_first(true).into_iter().flatten() {
+            for de in walkdir::WalkDir::new(root)
+                .contents_first(true)
+                .into_iter()
+                .flatten()
+            {
                 if de.file_type().is_dir() {
                     let _ = std::fs::remove_dir(de.path());
                 }
@@ -476,7 +519,11 @@ fn execute(em: Emitter, job: u64, kind: Kind, ops: Vec<Op>, tidy: Option<Tidy>, 
         }
     }
 
-    em.send(Ev::Applied { job, done, replaced });
+    em.send(Ev::Applied {
+        job,
+        done,
+        replaced,
+    });
     em.send(Ev::Finished {
         job,
         touched,
@@ -555,10 +602,7 @@ fn copy_tree(
             ));
         }
         let de = de.map_err(std::io::Error::other)?;
-        let rel = de
-            .path()
-            .strip_prefix(src)
-            .map_err(std::io::Error::other)?;
+        let rel = de.path().strip_prefix(src).map_err(std::io::Error::other)?;
         let target = dst.join(rel);
         if de.file_type().is_dir() {
             std::fs::create_dir_all(&target)?;
@@ -604,15 +648,40 @@ fn copy_file(
 
 /// See [`Jobs::mono_copy`]. Only audio files are copied; the folder layout
 /// is kept. Nothing is made unless at least one file is stereo.
-fn mono_copy(em: Emitter, job: u64, src: PathBuf, dst: PathBuf, folds: Vec<Fold>, cancel: Arc<AtomicBool>) {
+fn mono_copy(
+    em: Emitter,
+    job: u64,
+    src: PathBuf,
+    dst: PathBuf,
+    folds: Vec<Fold>,
+    cancel: Arc<AtomicBool>,
+) {
     use crate::audio::{decode, export};
     let finish = |touched: Vec<PathBuf>, errors: Vec<String>, cancelled: bool| {
-        em.send(Ev::Finished { job, touched, device_touched: Vec::new(), errors, cancelled });
+        em.send(Ev::Finished {
+            job,
+            touched,
+            device_touched: Vec::new(),
+            errors,
+            cancelled,
+        });
     };
     let progress = |done_items: usize, total_items: usize, label: String| {
-        em.send(Ev::Progress { job, done_bytes: 0, total_bytes: 0, done_items, total_items, label, file: None });
+        em.send(Ev::Progress {
+            job,
+            done_bytes: 0,
+            total_bytes: 0,
+            done_items,
+            total_items,
+            label,
+            file: None,
+        });
     };
-    let name_of = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name_of = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
 
     // Hidden files include macOS "._" sidecars, which look like audio by name.
     let files: Vec<PathBuf> = walkdir::WalkDir::new(&src)
@@ -638,7 +707,10 @@ fn mono_copy(em: Emitter, job: u64, src: PathBuf, dst: PathBuf, folds: Vec<Fold>
     }
     // Unknown counts get decoded to find out.
     if !chans.iter().any(|c| c.is_none_or(|n| n > 1)) {
-        em.send(Ev::Note { job, text: format!("{}: no stereo files, nothing to do", name_of(&src)) });
+        em.send(Ev::Note {
+            job,
+            text: format!("{}: no stereo files, nothing to do", name_of(&src)),
+        });
         return finish(Vec::new(), Vec::new(), false);
     }
 
@@ -654,29 +726,44 @@ fn mono_copy(em: Emitter, job: u64, src: PathBuf, dst: PathBuf, folds: Vec<Fold>
         progress(i, total, name_of(f));
         let rel = f.strip_prefix(&src).unwrap_or(f);
         let out_dir = dst.join(rel.parent().unwrap_or(Path::new("")));
-        let res = std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string()).and_then(|()| {
-            let copy = |copied: &mut usize| {
-                std::fs::copy(f, fs_model::unique_sibling(&out_dir.join(name_of(f)))).map_err(|e| e.to_string())?;
-                *copied += 1;
+        let res = std::fs::create_dir_all(&out_dir)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                let copy = |copied: &mut usize| {
+                    std::fs::copy(f, fs_model::unique_sibling(&out_dir.join(name_of(f))))
+                        .map_err(|e| e.to_string())?;
+                    *copied += 1;
+                    Ok(())
+                };
+                if *ch == Some(1) {
+                    return copy(&mut copied);
+                }
+                let s = decode::decode(f)?;
+                if s.channels.len() < 2 {
+                    return copy(&mut copied);
+                }
+                let stem = f
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                for &fold in &folds {
+                    // One variant keeps the name; several get " L" / " R" / " Mix".
+                    let name = if folds.len() == 1 {
+                        format!("{stem}.wav")
+                    } else {
+                        format!("{stem} {}.wav", fold.short())
+                    };
+                    let r = export::Render {
+                        start: 0,
+                        end: s.frames(),
+                        gain: 1.0,
+                        mono: Some(fold),
+                    };
+                    export::write_wav(&s, &r, &fs_model::unique_sibling(&out_dir.join(name)))?;
+                }
+                split += 1;
                 Ok(())
-            };
-            if *ch == Some(1) {
-                return copy(&mut copied);
-            }
-            let s = decode::decode(f)?;
-            if s.channels.len() < 2 {
-                return copy(&mut copied);
-            }
-            let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            for &fold in &folds {
-                // One variant keeps the name; several get " L" / " R" / " Mix".
-                let name = if folds.len() == 1 { format!("{stem}.wav") } else { format!("{stem} {}.wav", fold.short()) };
-                let r = export::Render { start: 0, end: s.frames(), gain: 1.0, mono: Some(fold) };
-                export::write_wav(&s, &r, &fs_model::unique_sibling(&out_dir.join(name)))?;
-            }
-            split += 1;
-            Ok(())
-        });
+            });
         if let Err(e) = res {
             errors.push(format!("{}: {e}", f.display()));
         }
@@ -688,11 +775,22 @@ fn mono_copy(em: Emitter, job: u64, src: PathBuf, dst: PathBuf, folds: Vec<Fold>
         let _ = trash_one(&dst);
         return finish(touched, errors, true);
     }
-    let what = folds.iter().map(|f| f.short()).collect::<Vec<_>>().join(" + ");
+    let what = folds
+        .iter()
+        .map(|f| f.short())
+        .collect::<Vec<_>>()
+        .join(" + ");
     em.send(Ev::Note {
         job,
-        text: format!("Made {}: {split} stereo file(s) folded to {what}, {copied} mono file(s) copied", name_of(&dst)),
+        text: format!(
+            "Made {}: {split} stereo file(s) folded to {what}, {copied} mono file(s) copied",
+            name_of(&dst)
+        ),
     });
-    em.send(Ev::Applied { job, done: vec![(src.clone(), dst.clone())], replaced: false });
+    em.send(Ev::Applied {
+        job,
+        done: vec![(src.clone(), dst.clone())],
+        replaced: false,
+    });
     finish(touched, errors, false);
 }

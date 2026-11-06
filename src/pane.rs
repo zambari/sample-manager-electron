@@ -109,7 +109,9 @@ impl Pane {
         if !self.active_tab().device {
             return true;
         }
-        let by_id = self.last_local.and_then(|id| self.tabs.iter().position(|t| t.id == id && !t.device));
+        let by_id = self
+            .last_local
+            .and_then(|id| self.tabs.iter().position(|t| t.id == id && !t.device));
         match by_id.or_else(|| self.tabs.iter().position(|t| !t.device)) {
             Some(i) => {
                 self.active = i;

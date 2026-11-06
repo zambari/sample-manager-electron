@@ -36,16 +36,28 @@ pub fn write_wav(sample: &Sample, r: &Render, target: &Path) -> Result<PathBuf, 
     };
     let mono = r.mono.filter(|_| sample.channels.len() > 1);
     let spec = hound::WavSpec {
-        channels: if mono.is_some() { 1 } else { sample.channels.len() as u16 },
+        channels: if mono.is_some() {
+            1
+        } else {
+            sample.channels.len() as u16
+        },
         sample_rate: sample.rate,
         bits_per_sample: bits,
-        sample_format: if float { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
+        sample_format: if float {
+            hound::SampleFormat::Float
+        } else {
+            hound::SampleFormat::Int
+        },
     };
     let mut w = hound::WavWriter::create(&target, spec).map_err(|e| e.to_string())?;
     let end = r.end.min(sample.frames());
     let scale = ((1i64 << (bits - 1)) - 1) as f32;
     let mut put = |s: f32| -> Result<(), String> {
-        let res = if float { w.write_sample(s) } else { w.write_sample((s.clamp(-1.0, 1.0) * scale).round() as i32) };
+        let res = if float {
+            w.write_sample(s)
+        } else {
+            w.write_sample((s.clamp(-1.0, 1.0) * scale).round() as i32)
+        };
         res.map_err(|e| e.to_string())
     };
     for f in r.start..end {

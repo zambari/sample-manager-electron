@@ -98,12 +98,18 @@ impl DirTab {
     }
 
     pub fn new_device(id: u64, cwd: PathBuf) -> Self {
-        Self { device: true, ..Self::new(id, cwd) }
+        Self {
+            device: true,
+            ..Self::new(id, cwd)
+        }
     }
 
     pub fn title(&self) -> String {
         if self.device {
-            let name = self.cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+            let name = self
+                .cwd
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
             return format!("🎹 {}", name.as_deref().unwrap_or("+Drive"));
         }
         self.cwd
@@ -128,7 +134,11 @@ impl DirTab {
 
     /// Expanded folders whose listings the tree needs, for a full reload.
     pub fn expanded_dirs(&self) -> Vec<PathBuf> {
-        if self.tree { self.expanded.iter().cloned().collect() } else { Vec::new() }
+        if self.tree {
+            self.expanded.iter().cloned().collect()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn accept_listing(&mut self, generation: u64, result: Result<Vec<Entry>, String>) {
@@ -142,11 +152,14 @@ impl DirTab {
                 self.error = None;
                 // Forget folders that vanished, so a later folder of the same
                 // name doesn't reappear expanded.
-                let present: HashSet<&PathBuf> =
-                    self.listing.iter().filter(|e| e.is_dir).map(|e| &e.path).collect();
-                self.expanded.retain(|p| {
-                    p.parent() != Some(self.cwd.as_path()) || present.contains(p)
-                });
+                let present: HashSet<&PathBuf> = self
+                    .listing
+                    .iter()
+                    .filter(|e| e.is_dir)
+                    .map(|e| &e.path)
+                    .collect();
+                self.expanded
+                    .retain(|p| p.parent() != Some(self.cwd.as_path()) || present.contains(p));
                 self.rebuild();
                 let shown: HashSet<&PathBuf> = self.entries.iter().map(|e| &e.path).collect();
                 self.selected.retain(|p| shown.contains(p));
@@ -235,7 +248,11 @@ impl DirTab {
         let mut entries = Vec::new();
         let mut depths = Vec::new();
         self.flatten(&self.listing, 0, &needle, &mut entries, &mut depths);
-        self.short_names = if self.shorten { short_names(&entries) } else { Vec::new() };
+        self.short_names = if self.shorten {
+            short_names(&entries)
+        } else {
+            Vec::new()
+        };
         self.entries = entries;
         self.depths = depths;
 
@@ -329,13 +346,22 @@ impl DirTab {
     /// otherwise just the cursor row.
     /// Every selected row, in display order, with whether it is a folder.
     pub fn selected_rows(&self) -> Vec<(PathBuf, bool)> {
-        self.entries.iter().filter(|e| self.selected.contains(&e.path)).map(|e| (e.path.clone(), e.is_dir)).collect()
+        self.entries
+            .iter()
+            .filter(|e| self.selected.contains(&e.path))
+            .map(|e| (e.path.clone(), e.is_dir))
+            .collect()
     }
 
     /// Names listed in `dir` (the tab's folder or an expanded one).
     pub fn listed_names(&self, dir: &Path) -> Vec<String> {
-        let list = if dir == self.cwd { Some(&self.listing) } else { self.children.get(dir) };
-        list.map(|l| l.iter().map(|e| e.name.clone()).collect()).unwrap_or_default()
+        let list = if dir == self.cwd {
+            Some(&self.listing)
+        } else {
+            self.children.get(dir)
+        };
+        list.map(|l| l.iter().map(|e| e.name.clone()).collect())
+            .unwrap_or_default()
     }
 
     /// Open the Multi-Rename Tool over the selection (or the cursor row).
@@ -348,7 +374,9 @@ impl DirTab {
         }
         if !items.is_empty() {
             self.renaming = None;
-            self.multi_rename = Some(crate::rename::MultiRename::new(items, self.device, |d| self.listed_names(d)));
+            self.multi_rename = Some(crate::rename::MultiRename::new(items, self.device, |d| {
+                self.listed_names(d)
+            }));
         }
     }
 
@@ -368,7 +396,11 @@ impl DirTab {
             out.retain(|p| !dirs.iter().any(|d| d != p && p.starts_with(d)));
             return out;
         }
-        self.cursor_entry().map(|e| vec![e.path.clone()]).into_iter().flatten().collect()
+        self.cursor_entry()
+            .map(|e| vec![e.path.clone()])
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     pub fn set_cursor(&mut self, i: usize) {
@@ -447,7 +479,11 @@ impl DirTab {
     /// folder we just came up out of).
     fn cursor_to_selection(&mut self) {
         if self.cursor.is_none() {
-            if let Some(i) = self.entries.iter().position(|e| self.selected.contains(&e.path)) {
+            if let Some(i) = self
+                .entries
+                .iter()
+                .position(|e| self.selected.contains(&e.path))
+            {
                 self.cursor = Some(i);
                 self.anchor = Some(i);
                 self.scroll_to_cursor = true;
@@ -478,7 +514,11 @@ mod tests {
     }
 
     fn names(t: &DirTab) -> Vec<(u16, &str)> {
-        t.depths.iter().copied().zip(t.entries.iter().map(|e| e.name.as_str())).collect()
+        t.depths
+            .iter()
+            .copied()
+            .zip(t.entries.iter().map(|e| e.name.as_str()))
+            .collect()
     }
 
     fn tab() -> DirTab {
@@ -486,7 +526,11 @@ mod tests {
         let g = t.begin_reload();
         t.accept_listing(
             g,
-            Ok(vec![e("/r/kicks", true), e("/r/a.wav", false), e("/r/notes.txt", false)]),
+            Ok(vec![
+                e("/r/kicks", true),
+                e("/r/a.wav", false),
+                e("/r/notes.txt", false),
+            ]),
         );
         t
     }
@@ -509,7 +553,10 @@ mod tests {
         t.accept_child_listing(
             Path::new("/r/kicks"),
             g,
-            Ok(vec![e("/r/kicks/k1.wav", false), e("/r/kicks/x.txt", false)]),
+            Ok(vec![
+                e("/r/kicks/k1.wav", false),
+                e("/r/kicks/x.txt", false),
+            ]),
         );
         assert_eq!(names(&t), [(0, "kicks"), (1, "k1.wav"), (0, "a.wav")]);
         assert_eq!(t.parent_row(1), Some(0));
@@ -530,7 +577,11 @@ mod tests {
         t.set_tree(true);
         t.expand(Path::new("/r/kicks"));
         let g = t.begin_child_load(Path::new("/r/kicks"));
-        t.accept_child_listing(Path::new("/r/kicks"), g, Ok(vec![e("/r/kicks/k1.wav", false)]));
+        t.accept_child_listing(
+            Path::new("/r/kicks"),
+            g,
+            Ok(vec![e("/r/kicks/k1.wav", false)]),
+        );
         t.select_all();
         assert_eq!(
             t.effective_selection(),

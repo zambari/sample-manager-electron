@@ -102,7 +102,12 @@ impl Editor {
     pub fn can_shift_selection(&self, dir: i32) -> bool {
         let (a, b) = self.sel;
         let half = (b - a) / 2;
-        half > 0 && if dir < 0 { a >= half } else { b + half <= self.frames() }
+        half > 0
+            && if dir < 0 {
+                a >= half
+            } else {
+                b + half <= self.frames()
+            }
     }
 
     /// Move the selection half its length left (-1) or right (+1), keeping its
@@ -113,7 +118,11 @@ impl Editor {
         }
         let (a, b) = self.sel;
         let half = (b - a) / 2;
-        self.sel = if dir < 0 { (a - half, b - half) } else { (a + half, b + half) };
+        self.sel = if dir < 0 {
+            (a - half, b - half)
+        } else {
+            (a + half, b + half)
+        };
     }
 
     /// Off, or fold this way (listening and export alike).
@@ -126,7 +135,11 @@ impl Editor {
 
     /// M: mono off, or back on with the last fold picked.
     pub fn toggle_mono(&mut self) {
-        let m = if self.prefs.mono.is_some() { None } else { Some(self.prefs.fold) };
+        let m = if self.prefs.mono.is_some() {
+            None
+        } else {
+            Some(self.prefs.fold)
+        };
         self.set_mono(m);
     }
 
@@ -153,13 +166,21 @@ impl Editor {
         let frame = frame.min(n);
         // File ends and slice markers are exact targets: zero-snapping
         // must not pull them a few frames off.
-        if !self.prefs.snap_zero || n < 2 || frame == 0 || frame == n || self.marks().contains(&frame) {
+        if !self.prefs.snap_zero
+            || n < 2
+            || frame == 0
+            || frame == n
+            || self.marks().contains(&frame)
+        {
             return frame;
         }
         let mono = |i: usize| -> f32 { s.channels.iter().map(|c| c[i]).sum() };
         let window = (s.rate as usize * 3 / 1000).max(8);
         for d in 0..window {
-            for cand in [frame.checked_sub(d), Some(frame + d)].into_iter().flatten() {
+            for cand in [frame.checked_sub(d), Some(frame + d)]
+                .into_iter()
+                .flatten()
+            {
                 if cand >= 1 && cand < n && (mono(cand - 1) <= 0.0) != (mono(cand) <= 0.0) {
                     return cand;
                 }

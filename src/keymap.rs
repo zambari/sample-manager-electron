@@ -53,13 +53,22 @@ pub struct Chord {
 }
 
 const fn plain(key: Key) -> Chord {
-    Chord { key, mods: Modifiers::NONE }
+    Chord {
+        key,
+        mods: Modifiers::NONE,
+    }
 }
 const fn cmd(key: Key) -> Chord {
-    Chord { key, mods: Modifiers::COMMAND }
+    Chord {
+        key,
+        mods: Modifiers::COMMAND,
+    }
 }
 const fn shift(key: Key) -> Chord {
-    Chord { key, mods: Modifiers::SHIFT }
+    Chord {
+        key,
+        mods: Modifiers::SHIFT,
+    }
 }
 
 pub struct Keymap {
@@ -102,13 +111,31 @@ impl Keymap {
             (cmd(Key::ArrowDown), Action::OpenDir),
             (cmd(Key::ArrowUp), Action::GoUp),
             (cmd(Key::Backspace), Action::Trash),
-            (Chord { key: Key::Backspace, mods: Modifiers { alt: true, ..Modifiers::COMMAND } }, Action::DeleteNow),
+            (
+                Chord {
+                    key: Key::Backspace,
+                    mods: Modifiers {
+                        alt: true,
+                        ..Modifiers::COMMAND
+                    },
+                },
+                Action::DeleteNow,
+            ),
             (cmd(Key::CloseBracket), Action::NextTab),
             (cmd(Key::OpenBracket), Action::PrevTab),
             // ⌃A as well as ⌘A, for hands used to other platforms.
-            (Chord { key: Key::A, mods: Modifiers::CTRL }, Action::SelectAll),
+            (
+                Chord {
+                    key: Key::A,
+                    mods: Modifiers::CTRL,
+                },
+                Action::SelectAll,
+            ),
         ]);
-        Self { name: "macOS", bindings }
+        Self {
+            name: "macOS",
+            bindings,
+        }
     }
 
     pub fn windows() -> Self {
@@ -120,16 +147,29 @@ impl Keymap {
             (plain(Key::Backspace), Action::GoUp),
             (plain(Key::Delete), Action::Trash),
             (shift(Key::Delete), Action::DeleteNow),
-            (Chord { key: Key::Tab, mods: Modifiers::CTRL }, Action::NextTab),
             (
                 Chord {
                     key: Key::Tab,
-                    mods: Modifiers { ctrl: true, shift: true, ..Modifiers::NONE },
+                    mods: Modifiers::CTRL,
+                },
+                Action::NextTab,
+            ),
+            (
+                Chord {
+                    key: Key::Tab,
+                    mods: Modifiers {
+                        ctrl: true,
+                        shift: true,
+                        ..Modifiers::NONE
+                    },
                 },
                 Action::PrevTab,
             ),
         ]);
-        Self { name: "Windows", bindings }
+        Self {
+            name: "Windows",
+            bindings,
+        }
     }
 
     pub fn platform_default() -> Self {
@@ -186,7 +226,13 @@ pub fn format_chord(c: Chord) -> String {
     s.push_str(match c.key {
         Key::Enter => "↩",
         Key::Space => "Space",
-        Key::Backspace => if mac { "⌫" } else { "Backspace" },
+        Key::Backspace => {
+            if mac {
+                "⌫"
+            } else {
+                "Backspace"
+            }
+        }
         Key::ArrowUp => "↑",
         Key::ArrowDown => "↓",
         Key::ArrowLeft => "←",
@@ -274,7 +320,10 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     // `[` / `]` move the in point, with ⇧ (`{` / `}`) the out point. The
     // shifted keys arrive as curly brackets on most layouts.
     let mut zero = Vec::new();
-    for (plain, curly, dir) in [(Key::OpenBracket, Key::OpenCurlyBracket, -1i8), (Key::CloseBracket, Key::CloseCurlyBracket, 1)] {
+    for (plain, curly, dir) in [
+        (Key::OpenBracket, Key::OpenCurlyBracket, -1i8),
+        (Key::CloseBracket, Key::CloseCurlyBracket, 1),
+    ] {
         if !m.command && !m.alt && !m.ctrl {
             if i.key_pressed(curly) || (m.shift && i.key_pressed(plain)) {
                 zero.push(A::OutZero(dir));
@@ -295,7 +344,11 @@ pub fn editor_actions(i: &InputState) -> Vec<EdAction> {
     for (k, dir) in [(Key::ArrowLeft, -1i8), (Key::ArrowRight, 1)] {
         hit(k, none, A::Nudge(Nudge::Pixel, dir));
         hit(k, m.shift_only(), A::Nudge(Nudge::TenPixels, dir));
-        hit(k, m.alt && !m.shift && !m.command, A::Nudge(Nudge::Frame, dir));
+        hit(
+            k,
+            m.alt && !m.shift && !m.command,
+            A::Nudge(Nudge::Frame, dir),
+        );
     }
     hit(Key::Home, none, A::JumpIn);
     hit(Key::End, none, A::JumpOut);

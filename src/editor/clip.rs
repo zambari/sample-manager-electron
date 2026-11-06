@@ -13,8 +13,15 @@ impl Editor {
         let Some(s) = self.sample() else { return false };
         let (a, b) = self.sel;
         let g = self.gain();
-        let channels = s.channels.iter().map(|c| c[a..b].iter().map(|x| x * g).collect()).collect();
-        self.clip = Some(AudioClip { rate: s.rate, channels });
+        let channels = s
+            .channels
+            .iter()
+            .map(|c| c[a..b].iter().map(|x| x * g).collect())
+            .collect();
+        self.clip = Some(AudioClip {
+            rate: s.rate,
+            channels,
+        });
         true
     }
 
@@ -52,10 +59,22 @@ impl Editor {
         }
         let g = self.gain();
         let channels = match self.fold() {
-            Some(f) => vec![stats::fold_region(&s.channels, a, b, f).into_iter().map(|x| x * g).collect()],
-            None => s.channels.iter().map(|c| c[a..b].iter().map(|x| x * g).collect()).collect(),
+            Some(f) => vec![
+                stats::fold_region(&s.channels, a, b, f)
+                    .into_iter()
+                    .map(|x| x * g)
+                    .collect(),
+            ],
+            None => s
+                .channels
+                .iter()
+                .map(|c| c[a..b].iter().map(|x| x * g).collect())
+                .collect(),
         };
-        Some(AudioClip { rate: s.rate, channels })
+        Some(AudioClip {
+            rate: s.rate,
+            channels,
+        })
     }
 
     /// Add `clip` after the end of the whole file (uncropping first), then
@@ -64,7 +83,9 @@ impl Editor {
         if let Some(n) = self.grid {
             return self.append_on_grid(clip, n);
         }
-        let Some(full) = &self.full else { return Err("No kit loaded".to_owned()) };
+        let Some(full) = &self.full else {
+            return Err("No kit loaded".to_owned());
+        };
         let (rate, nch) = (full.sample.rate, full.sample.channels.len());
         self.uncrop();
         let ins = clip.adapt(rate, nch);
@@ -80,18 +101,34 @@ impl Editor {
 
     /// Start a file that isn't on disk yet: `clip` at `path`, unsaved,
     /// laid out on `grid` slots if given.
-    pub fn start_new(&mut self, path: PathBuf, clip: &AudioClip, bits: Option<u32>, grid: Option<usize>) {
+    pub fn start_new(
+        &mut self,
+        path: PathBuf,
+        clip: &AudioClip,
+        bits: Option<u32>,
+        grid: Option<usize>,
+    ) {
         self.generation += 1; // drop any load still on its way
         self.loading = None;
         self.play_when_loaded = false;
         self.memos.remove(&path);
-        let sample = Sample { path, rate: clip.rate, channels: clip.channels.clone(), bits, format: "WAV".into(), file_len: 0 };
+        let sample = Sample {
+            path,
+            rate: clip.rate,
+            channels: clip.channels.clone(),
+            bits,
+            format: "WAV".into(),
+            file_len: 0,
+        };
         self.install(Loaded::new(sample), Vec::new());
         if grid.is_some() && self.set_grid(grid).is_ok() {
             self.sel = (0, self.markers.first().copied().unwrap_or(self.frames()));
             self.playhead = 0;
             // The layout is where the kit starts, not an undo step.
-            self.history = History { committed: Some(self.state()), ..History::default() };
+            self.history = History {
+                committed: Some(self.state()),
+                ..History::default()
+            };
         }
         self.clean_rev = 0; // nothing written yet
     }
@@ -125,7 +162,9 @@ impl Editor {
         if !self.can_paste() {
             return false;
         }
-        let (Some(s), Some(clip)) = (self.sample(), &self.clip) else { return false };
+        let (Some(s), Some(clip)) = (self.sample(), &self.clip) else {
+            return false;
+        };
         let ins = clip.adapt(s.rate, s.channels.len());
         let (a, b) = if self.whole_selected() {
             let p = self.playhead.min(self.frames());
@@ -175,7 +214,11 @@ impl Editor {
     pub fn marks(&self) -> Vec<usize> {
         let off = self.crop_offset();
         let n = self.frames();
-        self.markers.iter().filter(|&&m| m >= off && m - off <= n).map(|&m| m - off).collect()
+        self.markers
+            .iter()
+            .filter(|&&m| m >= off && m - off <= n)
+            .map(|&m| m - off)
+            .collect()
     }
 
     /// The slice around `frame`: from the marker at or before it to the next
@@ -183,8 +226,18 @@ impl Editor {
     pub fn slice_at(&self, frame: usize) -> (usize, usize) {
         let n = self.frames();
         let marks = self.marks();
-        let a = marks.iter().copied().filter(|&m| m <= frame).max().unwrap_or(0);
-        let b = marks.iter().copied().filter(|&m| m > frame).min().unwrap_or(n);
+        let a = marks
+            .iter()
+            .copied()
+            .filter(|&m| m <= frame)
+            .max()
+            .unwrap_or(0);
+        let b = marks
+            .iter()
+            .copied()
+            .filter(|&m| m > frame)
+            .min()
+            .unwrap_or(n);
         (a, b.max(a + 1).min(n.max(1)))
     }
 
@@ -194,7 +247,9 @@ impl Editor {
     /// end of what went in.
     /// Returns where the new audio went in, in whole-file frames, and its length.
     pub(super) fn splice(&mut self, a: usize, b: usize, ins: &[Vec<f32>]) -> (usize, usize) {
-        let Some(full) = &self.full else { return (0, 0) };
+        let Some(full) = &self.full else {
+            return (0, 0);
+        };
         let off = self.crop_offset();
         let (fa, fb) = (a + off, b + off);
         let n = ins.first().map_or(0, Vec::len);

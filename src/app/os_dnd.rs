@@ -31,9 +31,15 @@ fn pointer_in_window(ctx: &egui::Context, raw: &RawInput) -> Option<Pos2> {
     use mouse_position::mouse_position::Mouse;
     let info = raw.viewports.get(&raw.viewport_id)?;
     let inner = info.inner_rect?;
-    let Mouse::Position { x, y } = Mouse::get_mouse_position() else { return None };
+    let Mouse::Position { x, y } = Mouse::get_mouse_position() else {
+        return None;
+    };
     // macOS reports logical points, the others physical pixels.
-    let to_px = if cfg!(target_os = "macos") { info.native_pixels_per_point.unwrap_or(1.0) } else { 1.0 };
+    let to_px = if cfg!(target_os = "macos") {
+        info.native_pixels_per_point.unwrap_or(1.0)
+    } else {
+        1.0
+    };
     let ppp = ctx.pixels_per_point();
     Some(Pos2::new(x as f32 * to_px / ppp, y as f32 * to_px / ppp) - inner.min.to_vec2())
 }
@@ -51,13 +57,28 @@ impl App {
             });
         }
 
-        let dropped: Vec<PathBuf> = raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect();
-        let hovered: Vec<PathBuf> = raw.hovered_files.iter().filter_map(|f| f.path.clone()).collect();
+        let dropped: Vec<PathBuf> = raw
+            .dropped_files
+            .iter()
+            .map(|f| f.path().to_path_buf())
+            .collect();
+        let hovered: Vec<PathBuf> = raw
+            .hovered_files
+            .iter()
+            .filter_map(|f| f.path.clone())
+            .collect();
 
         if !dropped.is_empty() {
             self.os_dnd.hovering = false;
             if let Some(pos) = pointer_in_window(ctx, raw) {
-                DragAndDrop::set_payload(ctx, DragPayload { paths: dropped, device: false, external: true });
+                DragAndDrop::set_payload(
+                    ctx,
+                    DragPayload {
+                        paths: dropped,
+                        device: false,
+                        external: true,
+                    },
+                );
                 raw.events.push(Event::PointerMoved(pos));
                 raw.events.push(Event::PointerButton {
                     pos,
@@ -69,7 +90,14 @@ impl App {
         } else if !hovered.is_empty() {
             if !self.os_dnd.hovering {
                 self.os_dnd.hovering = true;
-                DragAndDrop::set_payload(ctx, DragPayload { paths: hovered, device: false, external: true });
+                DragAndDrop::set_payload(
+                    ctx,
+                    DragPayload {
+                        paths: hovered,
+                        device: false,
+                        external: true,
+                    },
+                );
             }
             if let Some(pos) = pointer_in_window(ctx, raw) {
                 raw.events.push(Event::PointerMoved(pos));
@@ -87,11 +115,15 @@ impl App {
     /// Hand an in-app drag of computer files to the OS once it leaves the window.
     #[cfg(target_os = "macos")]
     pub(super) fn os_drag_out(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let Some(p) = DragAndDrop::payload::<DragPayload>(ctx) else { return };
+        let Some(p) = DragAndDrop::payload::<DragPayload>(ctx) else {
+            return;
+        };
         if p.device || p.external {
             return;
         }
-        let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
+        let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
         if ctx.content_rect().contains(pos) {
             return;
         }
@@ -109,7 +141,8 @@ impl App {
             drag::Options::default(),
         );
         if let Err(e) = res {
-            self.errors.push(format!("couldn't start drag to Finder: {e}"));
+            self.errors
+                .push(format!("couldn't start drag to Finder: {e}"));
         }
     }
 }

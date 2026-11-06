@@ -108,10 +108,15 @@ impl Engine {
 
     pub fn devices() -> Vec<DeviceInfo> {
         let host = cpal::default_host();
-        let Ok(devs) = host.output_devices() else { return Vec::new() };
+        let Ok(devs) = host.output_devices() else {
+            return Vec::new();
+        };
         devs.filter_map(|d| {
             let id = d.id().ok()?.to_string();
-            let name = d.description().map(|x| x.name().to_owned()).unwrap_or_else(|_| id.clone());
+            let name = d
+                .description()
+                .map(|x| x.name().to_owned())
+                .unwrap_or_else(|_| id.clone());
             Some(DeviceInfo { id, name })
         })
         .collect()
@@ -170,7 +175,14 @@ impl Engine {
     }
 
     /// Live parameter changes while playing.
-    pub fn update(&self, loop_start: usize, end: usize, looping: bool, gain: f32, mono: Option<Fold>) {
+    pub fn update(
+        &self,
+        loop_start: usize,
+        end: usize,
+        looping: bool,
+        gain: f32,
+        mono: Option<Fold>,
+    ) {
         let mut v = self.shared.voice.lock().expect("poisoned");
         v.loop_start = loop_start;
         v.end = end;
@@ -205,7 +217,10 @@ impl Engine {
 
     /// Output peaks (L, R) since the last call, then reset.
     pub fn take_peaks(&self) -> [f32; 2] {
-        self.shared.peak.each_ref().map(|p| f32::from_bits(p.swap(0, Ordering::Relaxed)))
+        self.shared
+            .peak
+            .each_ref()
+            .map(|p| f32::from_bits(p.swap(0, Ordering::Relaxed)))
     }
 
     /// Whether the current voice is playing a stereo signal.
@@ -219,8 +234,12 @@ impl Engine {
         let end = self.shared.scope_at.load(Ordering::Acquire);
         (0..n)
             .map(|k| {
-                let bits = self.shared.scope[(end + SCOPE_LEN - n + k) % SCOPE_LEN].load(Ordering::Relaxed);
-                (f32::from_bits(bits as u32), f32::from_bits((bits >> 32) as u32))
+                let bits = self.shared.scope[(end + SCOPE_LEN - n + k) % SCOPE_LEN]
+                    .load(Ordering::Relaxed);
+                (
+                    f32::from_bits(bits as u32),
+                    f32::from_bits((bits >> 32) as u32),
+                )
             })
             .collect()
     }
@@ -231,7 +250,11 @@ impl Engine {
     }
 }
 
-fn build<T>(device: &cpal::Device, config: cpal::StreamConfig, sh: Arc<Shared>) -> Result<cpal::Stream, String>
+fn build<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    sh: Arc<Shared>,
+) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -252,7 +275,12 @@ where
         .map_err(|e| e.to_string())
 }
 
-fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_rate: f64, sh: &Shared) {
+fn render<T: SizedSample + FromSample<f32>>(
+    data: &mut [T],
+    out_ch: usize,
+    dev_rate: f64,
+    sh: &Shared,
+) {
     let silence = T::from_sample(0.0f32);
     let Ok(mut v) = sh.voice.try_lock() else {
         data.fill(silence);
@@ -297,7 +325,13 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
         let t = (v.pos - i as f64) as f32;
         // Interpolate within the region only, so a loop seam sounds exactly as
         // the exported file will when looped on a sampler.
-        let j = if i + 1 < end { i + 1 } else if v.looping { v.loop_start } else { i };
+        let j = if i + 1 < end {
+            i + 1
+        } else if v.looping {
+            v.loop_start
+        } else {
+            i
+        };
         if let Some(fold) = mono {
             let a = fold.at(&sample.channels, i);
             let b = fold.at(&sample.channels, j);
@@ -310,7 +344,13 @@ fn render<T: SizedSample + FromSample<f32>>(data: &mut [T], out_ch: usize, dev_r
         }
         let mut lr = [0.0f32; 2];
         for (k, out) in frame.iter_mut().enumerate() {
-            let c = if src_ch == 1 { 0 } else if k < src_ch { k } else { usize::MAX };
+            let c = if src_ch == 1 {
+                0
+            } else if k < src_ch {
+                k
+            } else {
+                usize::MAX
+            };
             let s = if c == usize::MAX {
                 0.0
             } else {

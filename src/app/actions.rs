@@ -9,7 +9,16 @@ impl App {
         // An open rename editor or modal owns the keyboard.
         let tab = self.pane(self.focused).active_tab();
         let renaming = tab.renaming.is_some() || tab.multi_rename.is_some();
-        if renaming || self.leave_pending.is_some() || self.pending.is_some() || self.device_load_pending.is_some() || self.delete_pending.is_some() || self.dupes_pending.is_some() || self.kit_naming.is_some() || self.save_scope_pending || self.export_naming.is_some() {
+        if renaming
+            || self.leave_pending.is_some()
+            || self.pending.is_some()
+            || self.device_load_pending.is_some()
+            || self.delete_pending.is_some()
+            || self.dupes_pending.is_some()
+            || self.kit_naming.is_some()
+            || self.save_scope_pending
+            || self.export_naming.is_some()
+        {
             return;
         }
         if ui.ctx().text_edit_focused() {
@@ -20,7 +29,12 @@ impl App {
         let clip: Vec<egui::Event> = ui.input(|i| {
             i.events
                 .iter()
-                .filter(|e| matches!(e, egui::Event::Cut | egui::Event::Copy | egui::Event::Paste(_)))
+                .filter(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Cut | egui::Event::Copy | egui::Event::Paste(_)
+                    )
+                })
                 .cloned()
                 .collect()
         });
@@ -48,7 +62,11 @@ impl App {
             if self.engine.is_playing() {
                 self.engine.stop();
             } else {
-                let a = if shift_space { EdAction::TogglePlayAlt } else { EdAction::TogglePlay };
+                let a = if shift_space {
+                    EdAction::TogglePlayAlt
+                } else {
+                    EdAction::TogglePlay
+                };
                 self.perform_editor(a, self.editor.wave_rect);
             }
         }
@@ -57,7 +75,10 @@ impl App {
         // samples and pick slices without clicking into the editor.
         let (k, b) = ui.input(|i| {
             let none = !i.modifiers.any();
-            (none && i.key_pressed(egui::Key::K), none && i.key_pressed(egui::Key::B))
+            (
+                none && i.key_pressed(egui::Key::K),
+                none && i.key_pressed(egui::Key::B),
+            )
         });
         if k {
             self.add_slice();
@@ -74,8 +95,16 @@ impl App {
         let role = self.focused;
         for e in clip {
             match e {
-                egui::Event::Cut => self.set_clipboard(Kind::Move, role, self.pane(role).active_tab().effective_selection()),
-                egui::Event::Copy => self.set_clipboard(Kind::Copy, role, self.pane(role).active_tab().effective_selection()),
+                egui::Event::Cut => self.set_clipboard(
+                    Kind::Move,
+                    role,
+                    self.pane(role).active_tab().effective_selection(),
+                ),
+                egui::Event::Copy => self.set_clipboard(
+                    Kind::Copy,
+                    role,
+                    self.pane(role).active_tab().effective_selection(),
+                ),
                 egui::Event::Paste(_) => self.paste(role, None),
                 _ => {}
             }
@@ -94,7 +123,10 @@ impl App {
                 let ok = if cut { ed.cut() } else { ed.copy() };
                 if let (true, Some(c)) = (ok, &ed.clip) {
                     let verb = if cut { "Cut" } else { "Copied" };
-                    self.status = format!("{verb} {:.3}s of audio — ⌘V pastes it here or into another file", secs(c.frames(), c.rate));
+                    self.status = format!(
+                        "{verb} {:.3}s of audio — ⌘V pastes it here or into another file",
+                        secs(c.frames(), c.rate)
+                    );
                 } else if cut {
                     self.status = "Can't cut everything — select part of the file first".to_owned();
                 }
@@ -106,7 +138,8 @@ impl App {
                         self.status = format!("Pasted {len:.3}s");
                     }
                 } else {
-                    self.status = "Nothing to paste — copy some audio in the editor first".to_owned();
+                    self.status =
+                        "Nothing to paste — copy some audio in the editor first".to_owned();
                 }
             }
             _ => {}
@@ -121,12 +154,18 @@ impl App {
         let n = paths.len();
         let verb = if kind == Kind::Move { "Cut" } else { "Copied" };
         self.status = format!("{verb} {n} item(s) — paste into a folder");
-        self.clipboard = Some(Clipboard { kind, device, paths });
+        self.clipboard = Some(Clipboard {
+            kind,
+            device,
+            paths,
+        });
     }
 
     /// Paste into `target`, or the pane's current folder when `None`.
     pub(super) fn paste(&mut self, role: Role, target: Option<PathBuf>) {
-        let Some(clip) = self.clipboard.clone() else { return };
+        let Some(clip) = self.clipboard.clone() else {
+            return;
+        };
         let tab = self.pane(role).active_tab();
         let to_dev = tab.device;
         let dest = target.unwrap_or_else(|| tab.cwd.clone());
@@ -144,7 +183,9 @@ impl App {
             Action::Rename => {
                 let tab = self.pane_mut(role).active_tab_mut();
                 if tab.selected.len() > 1 {
-                    self.status = "Rename works on one item -- use the Multi-Rename Tool (⇧F2) for several".to_owned();
+                    self.status =
+                        "Rename works on one item -- use the Multi-Rename Tool (⇧F2) for several"
+                            .to_owned();
                 } else if let Some(e) = tab.cursor_entry() {
                     tab.renaming = Some((e.path.clone(), e.name.clone()));
                 }
@@ -184,7 +225,9 @@ impl App {
                 if !tab.tree {
                     return self.go_up(role);
                 }
-                let Some(c) = tab.cursor else { return self.go_up(role) };
+                let Some(c) = tab.cursor else {
+                    return self.go_up(role);
+                };
                 let path = tab.entries[c].path.clone();
                 if tab.is_expanded(&path) {
                     tab.collapse(&path);
@@ -210,7 +253,9 @@ impl App {
                 let tab = self.pane(role).active_tab();
                 let sel = tab.effective_selection();
                 if !tab.device {
-                    self.status = "Delete now is only for the device; files on the computer go to the Trash".to_owned();
+                    self.status =
+                        "Delete now is only for the device; files on the computer go to the Trash"
+                            .to_owned();
                 } else if !sel.is_empty() {
                     self.delete_pending = Some(sel);
                 }
@@ -235,7 +280,11 @@ impl App {
                 let tab = self.pane(role).active_tab();
                 let (cwd, device) = (tab.cwd.clone(), tab.device);
                 let id = self.new_tab_id();
-                let tab = if device { DirTab::new_device(id, cwd) } else { DirTab::new(id, cwd) };
+                let tab = if device {
+                    DirTab::new_device(id, cwd)
+                } else {
+                    DirTab::new(id, cwd)
+                };
                 self.pane_mut(role).add_tab(tab);
                 let i = self.pane(role).active;
                 self.reload(role, i);
@@ -276,7 +325,13 @@ impl App {
     /// Make "New Folder" (or "New Folder 2", ...) in `dir` and open the
     /// inline rename on it. With `base`, propose "<base> 2", "<base> 3", ...
     /// instead. With `named`, make exactly that folder and just select it.
-    pub(super) fn new_folder(&mut self, role: Role, dir: PathBuf, named: Option<String>, base: Option<String>) {
+    pub(super) fn new_folder(
+        &mut self,
+        role: Role,
+        dir: PathBuf,
+        named: Option<String>,
+        base: Option<String>,
+    ) {
         let device = self.pane(role).active_tab().device;
         if let Some(name) = named {
             let path = dir.join(&name);
@@ -288,10 +343,16 @@ impl App {
                     .find_map(|t| t.listing_of(&dir))
                     .is_some_and(|l| l.iter().any(|e| e.name == name));
                 if exists {
-                    self.errors.push(format!("{} already exists", path.display()));
+                    self.errors
+                        .push(format!("{} already exists", path.display()));
                     return;
                 }
-                self.run_device(device::Task::Mkdir { path: path.clone() }, "Creating folder", 1, 0);
+                self.run_device(
+                    device::Task::Mkdir { path: path.clone() },
+                    "Creating folder",
+                    1,
+                    0,
+                );
             } else {
                 if let Err(e) = std::fs::create_dir(&path) {
                     self.errors.push(format!("{}: {e}", path.display()));
@@ -325,7 +386,13 @@ impl App {
         } else {
             Default::default()
         };
-        let free = |n: &String| if device { !taken.contains(n) } else { !dir.join(n).exists() };
+        let free = |n: &String| {
+            if device {
+                !taken.contains(n)
+            } else {
+                !dir.join(n).exists()
+            }
+        };
         let name = first
             .into_iter()
             .chain((2..10_000).map(|n| format!("{base} {n}")))
@@ -333,7 +400,12 @@ impl App {
             .unwrap_or_else(|| format!("{base} new"));
         let path = dir.join(&name);
         if device {
-            self.run_device(device::Task::Mkdir { path: path.clone() }, "Creating folder", 1, 0);
+            self.run_device(
+                device::Task::Mkdir { path: path.clone() },
+                "Creating folder",
+                1,
+                0,
+            );
         } else {
             if let Err(e) = std::fs::create_dir(&path) {
                 self.errors.push(format!("{}: {e}", path.display()));
@@ -342,7 +414,10 @@ impl App {
             self.push_undo(undo::FileUndo::NewFolder(path.clone()));
             self.reload_showing(&dir, false);
         }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.focused = role;
         self.editor_focused = false;
         let tab = self.pane_mut(role).active_tab_mut();
@@ -360,7 +435,10 @@ impl App {
         if paths.is_empty() || self.pane(role).active_tab().device {
             return;
         }
-        let parent_name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "New".to_owned());
+        let parent_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "New".to_owned());
         let folder = fs_model::unique_sibling(&dir.join(format!("{parent_name} Subfolder")));
         if let Err(e) = std::fs::create_dir(&folder) {
             self.errors.push(format!("{}: {e}", folder.display()));
@@ -368,7 +446,9 @@ impl App {
         }
         let mut pairs = Vec::new();
         for src in paths {
-            let Some(name) = src.file_name() else { continue };
+            let Some(name) = src.file_name() else {
+                continue;
+            };
             let dst = folder.join(name);
             match std::fs::rename(&src, &dst) {
                 Ok(()) => {
@@ -385,13 +465,22 @@ impl App {
             let _ = std::fs::remove_dir(&folder);
             return;
         }
-        let dirs: std::collections::BTreeSet<PathBuf> =
-            pairs.iter().filter_map(|(s, _)| s.parent().map(Path::to_path_buf)).chain([dir.clone()]).collect();
-        self.push_undo(undo::FileUndo::Grouped { folder: folder.clone(), pairs });
+        let dirs: std::collections::BTreeSet<PathBuf> = pairs
+            .iter()
+            .filter_map(|(s, _)| s.parent().map(Path::to_path_buf))
+            .chain([dir.clone()])
+            .collect();
+        self.push_undo(undo::FileUndo::Grouped {
+            folder: folder.clone(),
+            pairs,
+        });
         for d in dirs {
             self.reload_showing(&d, false);
         }
-        let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.focused = role;
         self.editor_focused = false;
         let tab = self.pane_mut(role).active_tab_mut();
@@ -428,14 +517,21 @@ impl App {
         for (from, to) in &steps {
             // The preview checked against names seen when it opened; check
             // again, since something may have appeared since.
-            let case_only = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+            let case_only =
+                from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
             if !case_only && to.exists() {
-                self.errors.push(format!("{} already exists, left {} as it was", to.display(), from.display()));
+                self.errors.push(format!(
+                    "{} already exists, left {} as it was",
+                    to.display(),
+                    from.display()
+                ));
                 continue;
             }
             match std::fs::rename(from, to) {
                 Ok(()) => {}
-                Err(e) => self.errors.push(format!("rename {} failed: {e}", from.display())),
+                Err(e) => self
+                    .errors
+                    .push(format!("rename {} failed: {e}", from.display())),
             }
             if let Some(p) = to.parent() {
                 if !parents.iter().any(|x| x == p) {
@@ -454,10 +550,18 @@ impl App {
                 self.committed_dirty = true;
             }
         }
-        let done: Vec<(PathBuf, PathBuf)> = finals.iter().filter(|(_, to)| to.exists()).cloned().collect();
+        let done: Vec<(PathBuf, PathBuf)> = finals
+            .iter()
+            .filter(|(_, to)| to.exists())
+            .cloned()
+            .collect();
         let renamed = done.len();
         if !done.is_empty() {
-            self.push_undo(undo::FileUndo::Moved { pairs: done, what: "rename", replaced: false });
+            self.push_undo(undo::FileUndo::Moved {
+                pairs: done,
+                what: "rename",
+                replaced: false,
+            });
         }
         self.status = format!("Renamed {renamed} of {} item(s)", finals.len());
         for p in parents {
@@ -478,7 +582,10 @@ impl App {
             return;
         }
         if device {
-            let task = device::Task::Rename { from: from.to_path_buf(), to: target };
+            let task = device::Task::Rename {
+                from: from.to_path_buf(),
+                to: target,
+            };
             self.run_device(task, "Renaming", 1, 0);
             return;
         }
@@ -491,7 +598,11 @@ impl App {
         }
         match std::fs::rename(from, &target) {
             Ok(()) => {
-                self.push_undo(undo::FileUndo::Moved { pairs: vec![(from.to_path_buf(), target)], what: "rename", replaced: false });
+                self.push_undo(undo::FileUndo::Moved {
+                    pairs: vec![(from.to_path_buf(), target)],
+                    what: "rename",
+                    replaced: false,
+                });
                 self.sizes.invalidate_subtree(parent);
                 self.reload_showing(parent, false);
             }

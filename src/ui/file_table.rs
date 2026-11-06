@@ -34,12 +34,18 @@ pub enum Intent {
     BeginRename(PathBuf),
     /// Open find-and-replace renaming over the selection.
     BeginMultiRename,
-    CommitRename { from: PathBuf, to: String },
+    CommitRename {
+        from: PathBuf,
+        to: String,
+    },
     CancelRename,
     /// Something was dropped onto this tab's list.
     Dropped(DragPayload),
     /// Something was dropped onto a folder row.
-    DroppedOn { dir: PathBuf, payload: DragPayload },
+    DroppedOn {
+        dir: PathBuf,
+        payload: DragPayload,
+    },
     /// User wants the recursive size of these directories.
     WantSize(Vec<PathBuf>),
     /// The ".." row was activated.
@@ -64,18 +70,30 @@ pub enum Intent {
     RemoveDuplicates(Vec<PathBuf>),
     /// Make a new folder in `dir` and start renaming it. With `base`, the
     /// proposed name starts with that (the right-clicked folder's name).
-    NewFolder { dir: PathBuf, base: Option<String> },
+    NewFolder {
+        dir: PathBuf,
+        base: Option<String>,
+    },
     /// Make a folder with this exact name in this directory.
-    NewFolderNamed { dir: PathBuf, name: String },
+    NewFolderNamed {
+        dir: PathBuf,
+        name: String,
+    },
     /// Make a new folder in `dir`, move these into it, and start renaming it.
-    NewFolderWith { dir: PathBuf, paths: Vec<PathBuf> },
+    NewFolderWith {
+        dir: PathBuf,
+        paths: Vec<PathBuf>,
+    },
     /// Open this file as a slice kit and make it the one K adds to.
     UseAsKit(PathBuf),
     /// Fetch this device file and open it in the editor (after a warning).
     LoadFromDevice(PathBuf),
     /// Make a "<name> Mono" copy of each of these folders, folding stereo
     /// files down each of these ways.
-    MonoCopy { dirs: Vec<PathBuf>, folds: Vec<crate::audio::stats::Fold> },
+    MonoCopy {
+        dirs: Vec<PathBuf>,
+        folds: Vec<crate::audio::stats::Fold>,
+    },
 }
 
 pub struct TableCtx<'a> {
@@ -105,7 +123,11 @@ impl TableCtx<'_> {
     fn paste_label(&self) -> Option<String> {
         let c = self.clipboard?;
         let n = c.paths.len();
-        let what = if n == 1 { "1 item".to_owned() } else { format!("{n} items") };
+        let what = if n == 1 {
+            "1 item".to_owned()
+        } else {
+            format!("{n} items")
+        };
         Some(match c.kind {
             crate::ops::Kind::Move => format!("Move {what} here"),
             crate::ops::Kind::Copy => format!("Paste {what}"),
@@ -211,17 +233,15 @@ fn header(ui: &mut Ui, tab: &mut DirTab) {
     });
 }
 
-fn rows(
-    ui: &mut Ui,
-    tab: &mut DirTab,
-    cx: &TableCtx<'_>,
-    intents: &mut Vec<Intent>,
-) {
+fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Intent>) {
     // A ".." row leads the list whenever there is somewhere to go up to. It is
     // not an entry: it can't be selected, dragged or renamed.
     let up = usize::from(tab.parent().is_some());
     let total = tab.entries.len() + up;
-    let scroll_target = tab.scroll_to_cursor.then(|| tab.cursor.map(|c| c + up)).flatten();
+    let scroll_target = tab
+        .scroll_to_cursor
+        .then(|| tab.cursor.map(|c| c + up))
+        .flatten();
     tab.scroll_to_cursor = false;
 
     let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
@@ -274,7 +294,8 @@ fn rows(
             tab.slow_click_rename = None;
             intents.push(Intent::BeginRename(path));
         } else {
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(at - now));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(at - now));
         }
     }
 }
@@ -288,7 +309,10 @@ fn paint_save_mark(ui: &Ui, rect: egui::Rect, done: Option<std::time::Instant>) 
     let (color, alpha) = match done {
         None => {
             let t = ui.input(|i| i.time) as f32;
-            (egui::Color32::from_rgb(245, 190, 60), 0.25 + 0.2 * (t * 6.0).sin())
+            (
+                egui::Color32::from_rgb(245, 190, 60),
+                0.25 + 0.2 * (t * 6.0).sin(),
+            )
         }
         Some(at) => {
             let k = 1.0 - at.elapsed().as_secs_f32() / SAVE_FLASH_SECS;
@@ -298,29 +322,38 @@ fn paint_save_mark(ui: &Ui, rect: egui::Rect, done: Option<std::time::Instant>) 
             (egui::Color32::from_rgb(90, 210, 120), 0.5 * k)
         }
     };
-    ui.painter().rect_filled(rect, 2.0, color.gamma_multiply(alpha));
-    ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, color.gamma_multiply(alpha * 1.6)), StrokeKind::Inside);
+    ui.painter()
+        .rect_filled(rect, 2.0, color.gamma_multiply(alpha));
+    ui.painter().rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, color.gamma_multiply(alpha * 1.6)),
+        StrokeKind::Inside,
+    );
     ui.ctx().request_repaint();
 }
 
 fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_HEIGHT),
-        Sense::click(),
-    );
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
     // Dropping onto ".." moves the items up into the parent folder.
     if let Some(parent) = tab.parent() {
         if resp.dnd_hover_payload::<DragPayload>().is_some() {
             let color = crate::ui::theme::ACCENT_BRIGHT;
-            ui.painter().rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
+            ui.painter()
+                .rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
         }
         if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
-            intents.push(Intent::DroppedOn { dir: parent, payload: (*p).clone() });
+            intents.push(Intent::DroppedOn {
+                dir: parent,
+                payload: (*p).clone(),
+            });
             return;
         }
     }
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        ui.painter()
+            .rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     // Painted, not label widgets, so the text can't swallow clicks.
@@ -332,13 +365,7 @@ fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
     }
 }
 
-fn row(
-    ui: &mut Ui,
-    tab: &mut DirTab,
-    cx: &TableCtx<'_>,
-    vis_i: usize,
-    intents: &mut Vec<Intent>,
-) {
+fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: &mut Vec<Intent>) {
     let idx = vis_i;
     let entry = tab.entries[idx].clone();
     let depth = tab.depths.get(idx).copied().unwrap_or(0);
@@ -351,10 +378,7 @@ fn row(
         .is_some();
 
     let full_width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(full_width, ROW_HEIGHT),
-        Sense::empty(),
-    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(full_width, ROW_HEIGHT), Sense::empty());
 
     // Backgrounds first, so text draws on top. The hover fill isn't known
     // until the row's response exists, so reserve a slot for it here.
@@ -397,7 +421,11 @@ fn row(
     if tab.tree {
         let r = egui::Rect::from_min_size(inner.min, egui::vec2(ARROW_W, rect.height()));
         if entry.is_dir {
-            let glyph = if tab.is_expanded(&entry.path) { "⏷" } else { "⏵" };
+            let glyph = if tab.is_expanded(&entry.path) {
+                "⏷"
+            } else {
+                "⏵"
+            };
             ui.painter().text(
                 r.center(),
                 egui::Align2::CENTER_CENTER,
@@ -426,7 +454,8 @@ fn row(
         // Painted behind the text (which was laid out before we knew).
         if !is_selected {
             let hover = ui.visuals().widgets.hovered.weak_bg_fill;
-            ui.painter().set(bg, egui::Shape::rect_filled(rect, 2.0, hover));
+            ui.painter()
+                .set(bg, egui::Shape::rect_filled(rect, 2.0, hover));
         }
     }
 
@@ -455,14 +484,20 @@ fn row(
         // Only outline the folder itself; the "here" zone gets no box, since a
         // box on one row reads as "into this row" rather than "into the parent".
         if !in_here_zone
-            && resp.dnd_hover_payload::<DragPayload>().is_some_and(|p| !onto_self(&p))
+            && resp
+                .dnd_hover_payload::<DragPayload>()
+                .is_some_and(|p| !onto_self(&p))
         {
             let color = crate::ui::theme::ACCENT_BRIGHT;
-            ui.painter().rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
+            ui.painter()
+                .rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
         }
         if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
             if let Some(dir) = target.filter(|_| !onto_self(&p)) {
-                intents.push(Intent::DroppedOn { dir, payload: (*p).clone() });
+                intents.push(Intent::DroppedOn {
+                    dir,
+                    payload: (*p).clone(),
+                });
             }
             return;
         }
@@ -727,14 +762,16 @@ fn draw_cells(
         .get(&egui::TextStyle::Monospace)
         .cloned()
         .unwrap_or_else(|| egui::FontId::monospace(12.0));
-    let size_galley =
-        ui.painter().layout_no_wrap(size_text, mono, ui.visuals().weak_text_color());
+    let size_galley = ui
+        .painter()
+        .layout_no_wrap(size_text, mono, ui.visuals().weak_text_color());
     let size_pos = egui::pos2(
         inner.right() - size_galley.size().x,
         inner.center().y - size_galley.size().y / 2.0,
     );
     let size_left = size_pos.x;
-    ui.painter().galley(size_pos, size_galley, egui::Color32::PLACEHOLDER);
+    ui.painter()
+        .galley(size_pos, size_galley, egui::Color32::PLACEHOLDER);
 
     let icon_color = if entry.empty {
         ui.visuals().text_color().gamma_multiply(0.5)
@@ -751,11 +788,17 @@ fn draw_cells(
         let cy = inner.center().y;
         let stroke = Stroke::new(2.0, egui::Color32::from_rgb(90, 210, 110));
         ui.painter().line_segment(
-            [egui::pos2(left, cy), egui::pos2(left + h * 0.35, cy + h * 0.4)],
+            [
+                egui::pos2(left, cy),
+                egui::pos2(left + h * 0.35, cy + h * 0.4),
+            ],
             stroke,
         );
         ui.painter().line_segment(
-            [egui::pos2(left + h * 0.35, cy + h * 0.4), egui::pos2(left + h, cy - h * 0.5)],
+            [
+                egui::pos2(left + h * 0.35, cy + h * 0.4),
+                egui::pos2(left + h, cy - h * 0.5),
+            ],
             stroke,
         );
         x = left + h;
@@ -775,28 +818,58 @@ fn draw_cells(
         egui::Color32::WHITE
     };
     // Cut items fade until they're pasted, like Explorer.
-    let name_color = if cx.is_cut(&entry.path, device) { name_color.gamma_multiply(0.4) } else { name_color };
-    paint_text(ui, name_rect, shown.unwrap_or(&entry.name), body_font(ui, 1.0), name_color);
+    let name_color = if cx.is_cut(&entry.path, device) {
+        name_color.gamma_multiply(0.4)
+    } else {
+        name_color
+    };
+    paint_text(
+        ui,
+        name_rect,
+        shown.unwrap_or(&entry.name),
+        body_font(ui, 1.0),
+        name_color,
+    );
 }
 
-fn paste_button(ui: &mut Ui, cx: &TableCtx<'_>, target: Option<PathBuf>, intents: &mut Vec<Intent>) {
+fn paste_button(
+    ui: &mut Ui,
+    cx: &TableCtx<'_>,
+    target: Option<PathBuf>,
+    intents: &mut Vec<Intent>,
+) {
     let label = match (cx.paste_label(), &target) {
         (Some(l), Some(dir)) => {
-            let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             format!("{l} → {name}")
         }
         (Some(l), None) => l,
         (None, _) => "Paste".to_owned(),
     };
-    if ui.add_enabled(cx.clipboard.is_some(), egui::Button::new(label)).clicked() {
+    if ui
+        .add_enabled(cx.clipboard.is_some(), egui::Button::new(label))
+        .clicked()
+    {
         intents.push(Intent::Paste(target));
         ui.close();
     }
 }
 
-fn new_folder_button(ui: &mut Ui, cx: &TableCtx<'_>, dir: PathBuf, base: Option<String>, intents: &mut Vec<Intent>) {
+fn new_folder_button(
+    ui: &mut Ui,
+    cx: &TableCtx<'_>,
+    dir: PathBuf,
+    base: Option<String>,
+    intents: &mut Vec<Intent>,
+) {
     if ui.button("New folder").clicked() {
-        intents.push(Intent::NewFolder { dir: dir.clone(), base });
+        intents.push(Intent::NewFolder {
+            dir: dir.clone(),
+            base,
+        });
         ui.close();
     }
     if let Some(name) = &cx.other_folder {
@@ -805,14 +878,21 @@ fn new_folder_button(ui: &mut Ui, cx: &TableCtx<'_>, dir: PathBuf, base: Option<
             .on_hover_text("Named after the folder open in the other pane")
             .clicked()
         {
-            intents.push(Intent::NewFolderNamed { dir, name: name.clone() });
+            intents.push(Intent::NewFolderNamed {
+                dir,
+                name: name.clone(),
+            });
             ui.close();
         }
     }
 }
 
 fn reveal_button(ui: &mut Ui, path: PathBuf, intents: &mut Vec<Intent>) {
-    let label = if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in Explorer" };
+    let label = if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else {
+        "Show in Explorer"
+    };
     if ui.button(label).clicked() {
         intents.push(Intent::Reveal(path));
         ui.close();
@@ -828,13 +908,21 @@ fn body_font(ui: &Ui, extra: f32) -> egui::FontId {
 
 /// Paints one line of text left-aligned and vertically centred in `rect`,
 /// eliding with "…" if it doesn't fit. Returns the x where the text ends.
-fn paint_text(ui: &Ui, rect: egui::Rect, text: &str, font: egui::FontId, color: egui::Color32) -> f32 {
+fn paint_text(
+    ui: &Ui,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) -> f32 {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(0.0));
     let galley = ui.painter().layout_job(job);
     let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
     let end = pos.x + galley.size().x;
-    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(pos, galley, color);
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .galley(pos, galley, color);
     end
 }
 
@@ -847,7 +935,9 @@ fn rename_editor(
 ) {
     // Edit a local copy and write it back: handing the field straight to
     // `TextEdit` would borrow `tab` for the rest of the function.
-    let Some((_, current)) = tab.renaming.as_ref() else { return };
+    let Some((_, current)) = tab.renaming.as_ref() else {
+        return;
+    };
     let mut buf = current.clone();
 
     let mut child = ui.new_child(
@@ -929,13 +1019,29 @@ mod tests {
         let (sizes, preview) = (SizeCache::default(), Preview::default());
         let mut got = Vec::new();
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 400.0),
+            )),
             events,
             ..Default::default()
         };
         let mut out = ctx.run_ui(input, |ui| {
             egui::Panel::left("col").default_size(320.0).show(ui, |ui| {
-                got = show(ui, tab, TableCtx { sizes: &sizes, preview: &preview, opened: &Default::default(), committed: &Default::default(), saving: &Default::default(), pane_focused: true, clipboard: None, other_folder: None });
+                got = show(
+                    ui,
+                    tab,
+                    TableCtx {
+                        sizes: &sizes,
+                        preview: &preview,
+                        opened: &Default::default(),
+                        committed: &Default::default(),
+                        saving: &Default::default(),
+                        pane_focused: true,
+                        clipboard: None,
+                        other_folder: None,
+                    },
+                );
             });
             egui::CentralPanel::default().show(ui, |_| {});
         });
@@ -964,7 +1070,11 @@ mod tests {
                 let ctx = egui::Context::default();
                 frame(&ctx, &mut t, vec![]);
                 let pos = egui::pos2(40.0, y);
-                frame(&ctx, &mut t, vec![egui::Event::PointerMoved(pos), press(pos, true)]);
+                frame(
+                    &ctx,
+                    &mut t,
+                    vec![egui::Event::PointerMoved(pos), press(pos, true)],
+                );
                 frame(&ctx, &mut t, vec![press(pos, false)]);
                 t.selected.contains(&PathBuf::from("/folder"))
             })
@@ -984,7 +1094,10 @@ mod tests {
                     opened |= i.iter().any(|i| matches!(i, Intent::Open(_)));
                 }
             }
-            assert!(t.selected.contains(&PathBuf::from("/folder")), "click at x={x} missed");
+            assert!(
+                t.selected.contains(&PathBuf::from("/folder")),
+                "click at x={x} missed"
+            );
             assert!(opened, "double-click at x={x} didn't open");
         }
     }

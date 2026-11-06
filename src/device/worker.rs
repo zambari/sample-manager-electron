@@ -56,7 +56,11 @@ pub(super) fn jumps_queue(task: &Task, busy: &[PathBuf], later: &VecDeque<Cmd>) 
     match task {
         Task::Mkdir { .. } => true,
         Task::Rename { from, to } => {
-            let overlaps = |p: &PathBuf| [from, to].iter().any(|q| p.starts_with(q) || q.starts_with(p));
+            let overlaps = |p: &PathBuf| {
+                [from, to]
+                    .iter()
+                    .any(|q| p.starts_with(q) || q.starts_with(p))
+            };
             let queued = later.iter().flat_map(|c| match c {
                 Cmd::Job { task, .. } => involved(task),
                 _ => Vec::new(),
@@ -70,16 +74,41 @@ pub(super) fn jumps_queue(task: &Task, busy: &[PathBuf], later: &VecDeque<Cmd>) 
 /// Answer listings waiting in `rx` on `c`, mid-transfer; park anything else
 /// in `later`. A link failure is only reported to the listing: the transfer's
 /// next request hits it too and handles the reconnect.
-pub(super) fn serve_lists(c: &mut Conn, rx: &Receiver<Cmd>, later: &mut VecDeque<Cmd>, busy: &[PathBuf], em: &Emitter) {
+pub(super) fn serve_lists(
+    c: &mut Conn,
+    rx: &Receiver<Cmd>,
+    later: &mut VecDeque<Cmd>,
+    busy: &[PathBuf],
+    em: &Emitter,
+) {
     c.probe();
     while let Ok(cmd) = rx.try_recv() {
         match cmd {
             Cmd::List { path, generation } => {
-                let result = c.list(&path).map(|v| entries(&path, v)).map_err(|e| e.to_string());
-                em.send(Ev::Listed { device: true, generation, path, result });
+                let result = c
+                    .list(&path)
+                    .map(|v| entries(&path, v))
+                    .map_err(|e| e.to_string());
+                em.send(Ev::Listed {
+                    device: true,
+                    generation,
+                    path,
+                    result,
+                });
             }
             Cmd::Job { job, task, .. } if jumps_queue(&task, busy, later) => {
-                em.send(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: 1, file: None }.ev(""));
+                em.send(
+                    Prog {
+                        id: job,
+                        done: 0,
+                        last: 0,
+                        total: 0,
+                        item: 0,
+                        items: 1,
+                        file: None,
+                    }
+                    .ev(""),
+                );
                 let (res, at) = match &task {
                     Task::Mkdir { path } => (c.mkdir(path), path),
                     Task::Rename { from, to } => (rename_checked(c, from, to), to),
@@ -87,7 +116,13 @@ pub(super) fn serve_lists(c: &mut Conn, rx: &Receiver<Cmd>, later: &mut VecDeque
                 };
                 let errors = res.err().map(|e| e.to_string()).into_iter().collect();
                 let parent = at.parent().unwrap_or(Path::new("/")).to_path_buf();
-                em.send(Ev::Finished { job, touched: Vec::new(), device_touched: vec![parent], errors, cancelled: false });
+                em.send(Ev::Finished {
+                    job,
+                    touched: Vec::new(),
+                    device_touched: vec![parent],
+                    errors,
+                    cancelled: false,
+                });
             }
             job => later.push_back(job),
         }
@@ -148,7 +183,10 @@ impl Worker {
                 Some(c) => c,
                 None if self.conn.is_some() => {
                     let probed = self.conn.as_ref().map_or_else(Instant::now, |c| c.probed);
-                    match self.rx.recv_timeout(PROBE_EVERY.saturating_sub(probed.elapsed())) {
+                    match self
+                        .rx
+                        .recv_timeout(PROBE_EVERY.saturating_sub(probed.elapsed()))
+                    {
                         Ok(c) => c,
                         Err(RecvTimeoutError::Timeout) => {
                             self.check_alive();
@@ -169,13 +207,19 @@ impl Worker {
                     self.job(job, &cancel, task);
                     self.busy.clear();
                 }
+                Cmd::Elk(cmd) => self.elk(cmd),
             }
         }
     }
 
     pub(super) fn list_now(&mut self, path: PathBuf, generation: u64) {
         let result = self.with_conn(|c| c.list(&path)).map(|v| entries(&path, v));
-        self.em.send(Ev::Listed { device: true, generation, path, result });
+        self.em.send(Ev::Listed {
+            device: true,
+            generation,
+            path,
+            result,
+        });
     }
 
     /// Drop the connection if the device's port is gone.
@@ -188,7 +232,10 @@ impl Worker {
     /// The link broke: drop the connection, and tell the UI whether the
     /// device is gone altogether (unplugged) or just stopped answering.
     pub(super) fn link_failed(&mut self, e: String) -> String {
-        let gone = self.conn.take().is_some_and(|c| c.dead || !port_present(&c.port));
+        let gone = self
+            .conn
+            .take()
+            .is_some_and(|c| c.dead || !port_present(&c.port));
         self.em.send(Ev::DeviceStatus(Err(e.clone())));
         if gone {
             self.em.send(Ev::DeviceLost);
@@ -203,7 +250,9 @@ impl Worker {
             match cmd {
                 Cmd::List { path, generation } => self.list_now(path, generation),
                 // Quick enough to run between the current job's steps.
-                Cmd::Job { job, cancel, task } if jumps_queue(&task, &self.busy, &self.later) => self.job(job, &cancel, task),
+                Cmd::Job { job, cancel, task } if jumps_queue(&task, &self.busy, &self.later) => {
+                    self.job(job, &cancel, task)
+                }
                 job => self.later.push_back(job),
             }
         }
@@ -218,7 +267,11 @@ impl Worker {
             Task::Transfer { dir, items, .. } => {
                 // An upload counts its local file sizes, which is what its
                 // progress adds up to (see `write_raw`'s `worth`).
-                Some((items.iter().map(|(s, _)| s.clone()).collect(), *dir == Dir::Upload, true))
+                Some((
+                    items.iter().map(|(s, _)| s.clone()).collect(),
+                    *dir == Dir::Upload,
+                    true,
+                ))
             }
             // Trash moves bytes; a delete just counts files.
             Task::Trash { paths } => Some((paths.clone(), false, true)),
@@ -262,7 +315,11 @@ impl Worker {
 
     pub(super) fn status(&self) {
         let s = match &self.conn {
-            Some(c) => Ok(format!("{}{}", c.name, if c.stereo { "" } else { " (mono)" })),
+            Some(c) => Ok(format!(
+                "{}{}",
+                c.name,
+                if c.stereo { "" } else { " (mono)" }
+            )),
             None => Err("not connected".to_owned()),
         };
         self.em.send(Ev::DeviceStatus(s));
@@ -331,7 +388,18 @@ impl Worker {
             (_, Task::Transfer { total_bytes, .. }) => *total_bytes,
             _ => 0,
         };
-        self.em.send(Prog { id: job, done: 0, last: 0, total, item: 0, items, file: None }.ev(""));
+        self.em.send(
+            Prog {
+                id: job,
+                done: 0,
+                last: 0,
+                total,
+                item: 0,
+                items,
+                file: None,
+            }
+            .ev(""),
+        );
         let mut counts_for = |w: &mut Self, paths: &[PathBuf], local: bool| match counted.take() {
             Some(c) => c,
             None => {
@@ -356,7 +424,15 @@ impl Worker {
             }
             Task::Trash { paths } => {
                 let trash = PathBuf::from(TRASH);
-                self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
+                self.job = Some(Prog {
+                    id: job,
+                    done: 0,
+                    last: 0,
+                    total: 0,
+                    item: 0,
+                    items: paths.len(),
+                    file: None,
+                });
                 let counts = counts_for(self, &paths, false);
                 self.set_totals(&counts, true);
                 let mut before = (0, 0);
@@ -367,12 +443,24 @@ impl Worker {
                         continue;
                     }
                     let target = self.with_conn(|c| {
-                        if !c.list(Path::new("/"))?.iter().any(|e| e.is_dir && e.name == "trash") {
+                        if !c
+                            .list(Path::new("/"))?
+                            .iter()
+                            .any(|e| e.is_dir && e.name == "trash")
+                        {
                             c.mkdir(&trash)?;
                         }
-                        let taken: HashSet<String> = c.list(&trash)?.into_iter().map(|e| e.name).collect();
-                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        let name = if taken.contains(&name) { unique_name(&taken, &name) } else { name };
+                        let taken: HashSet<String> =
+                            c.list(&trash)?.into_iter().map(|e| e.name).collect();
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let name = if taken.contains(&name) {
+                            unique_name(&taken, &name)
+                        } else {
+                            name
+                        };
                         Ok(trash.join(name))
                     });
                     let res = target.and_then(|t| {
@@ -390,7 +478,15 @@ impl Worker {
                 touch(&mut touched_dev, Path::new("/"));
             }
             Task::Delete { paths } => {
-                self.job = Some(Prog { id: job, done: 0, last: 0, total: 0, item: 0, items: paths.len(), file: None });
+                self.job = Some(Prog {
+                    id: job,
+                    done: 0,
+                    last: 0,
+                    total: 0,
+                    item: 0,
+                    items: paths.len(),
+                    file: None,
+                });
                 let counts = counts_for(self, &paths, false);
                 self.set_totals(&counts, false);
                 let mut before = (0, 0);
@@ -399,7 +495,9 @@ impl Worker {
                         break;
                     }
                     self.catch_up(&mut before, counts.get(i.wrapping_sub(1)), false);
-                    let res = self.stat(&p).and_then(|e| self.remove(&p, e.is_dir, cancel));
+                    let res = self
+                        .stat(&p)
+                        .and_then(|e| self.remove(&p, e.is_dir, cancel));
                     if let Err(e) = res {
                         errors.push(e);
                     }
@@ -407,13 +505,27 @@ impl Worker {
                 }
                 self.job = None;
             }
-            Task::Transfer { dir, items, policy, mono, total_bytes } => {
+            Task::Transfer {
+                dir,
+                items,
+                policy,
+                mono,
+                total_bytes,
+            } => {
                 let n = items.len();
                 crate::log::line(format!("job {job}: {dir:?} {n} item(s), policy {policy:?}"));
                 for (src, dst) in &items {
                     crate::log::line(format!("  {} -> {}", src.display(), dst.display()));
                 }
-                self.job = Some(Prog { id: job, done: 0, last: 0, total: total_bytes, item: 0, items: n, file: None });
+                self.job = Some(Prog {
+                    id: job,
+                    done: 0,
+                    last: 0,
+                    total: total_bytes,
+                    item: 0,
+                    items: n,
+                    file: None,
+                });
                 self.merged = (0, 0, 0);
                 let srcs: Vec<PathBuf> = items.iter().map(|(s, _)| s.clone()).collect();
                 let counts = counts_for(self, &srcs, dir == Dir::Upload);
@@ -424,10 +536,17 @@ impl Worker {
                         break;
                     }
                     self.catch_up(&mut before, counts.get(i.wrapping_sub(1)), scan_bytes);
-                    self.progress(&src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 0);
+                    self.progress(
+                        &src.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        0,
+                    );
                     let res = match dir {
                         Dir::Move => self.move_item(&src, &dst_dir, policy, cancel),
-                        Dir::Upload => self.upload(&src, &dst_dir, policy, mono, cancel, &mut errors),
+                        Dir::Upload => {
+                            self.upload(&src, &dst_dir, policy, mono, cancel, &mut errors)
+                        }
                         Dir::Download => self.download(&src, &dst_dir, policy, cancel, &mut errors),
                         Dir::Copy => self.copy(&src, &dst_dir, policy, cancel, &mut errors),
                     };
@@ -450,7 +569,9 @@ impl Worker {
                         text += &format!(", {dupes} already there skipped");
                     }
                     if clashes > 0 {
-                        text += &format!(", {clashes} with the same name but a different size not copied");
+                        text += &format!(
+                            ", {clashes} with the same name but a different size not copied"
+                        );
                     }
                     self.em.send(Ev::Note { job, text });
                 }
@@ -462,13 +583,24 @@ impl Worker {
         if cancelled {
             errors.retain(|e| !e.ends_with("cancelled"));
         }
-        self.em.send(Ev::Finished { job, touched: touched_local, device_touched: touched_dev, errors, cancelled });
+        self.em.send(Ev::Finished {
+            job,
+            touched: touched_local,
+            device_touched: touched_dev,
+            errors,
+            cancelled,
+        });
     }
 
     /// Files under each of `paths` and their bytes, so the bar can count
     /// files rather than top-level items. `local`: paths on disk (an
     /// upload), filtered the way [`Self::upload`] picks files.
-    pub(super) fn count_files(&mut self, paths: &[PathBuf], local: bool, cancel: &AtomicBool) -> Vec<(usize, u64)> {
+    pub(super) fn count_files(
+        &mut self,
+        paths: &[PathBuf],
+        local: bool,
+        cancel: &AtomicBool,
+    ) -> Vec<(usize, u64)> {
         let mut listings: HashMap<PathBuf, Vec<(String, bool, u64)>> = HashMap::new();
         let mut out = Vec::with_capacity(paths.len());
         for p in paths {
@@ -480,10 +612,21 @@ impl Worker {
             let parent = p.parent().unwrap_or(Path::new("/")).to_path_buf();
             if !listings.contains_key(&parent) {
                 let l = self.with_conn(|c| c.list(&parent)).unwrap_or_default();
-                listings.insert(parent.clone(), l.into_iter().map(|e| (e.name, e.is_dir, e.size as u64)).collect());
+                listings.insert(
+                    parent.clone(),
+                    l.into_iter()
+                        .map(|e| (e.name, e.is_dir, e.size as u64))
+                        .collect(),
+                );
             }
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let found = listings[&parent].iter().find(|e| e.0 == name).map(|e| (e.1, e.2));
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let found = listings[&parent]
+                .iter()
+                .find(|e| e.0 == name)
+                .map(|e| (e.1, e.2));
             out.push(match found {
                 None => (0, 0),
                 Some((false, size)) => (1, size),
@@ -494,14 +637,20 @@ impl Worker {
     }
 
     pub(super) fn count_dir(&mut self, p: &Path, cancel: &AtomicBool) -> (usize, u64) {
-        let Ok(kids) = self.with_conn(|c| c.list(p)) else { return (0, 0) };
+        let Ok(kids) = self.with_conn(|c| c.list(p)) else {
+            return (0, 0);
+        };
         let mut total = (0, 0);
         for k in kids {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
             self.serve_pending();
-            let (n, b) = if k.is_dir { self.count_dir(&p.join(&k.name), cancel) } else { (1, k.size as u64) };
+            let (n, b) = if k.is_dir {
+                self.count_dir(&p.join(&k.name), cancel)
+            } else {
+                (1, k.size as u64)
+            };
             total.0 += n;
             total.1 += b;
         }
@@ -521,7 +670,12 @@ impl Worker {
 
     /// Before the next top-level item: count the previous one (`prev`) as
     /// fully done, so skipped files or a folder renamed in one go still add up.
-    pub(super) fn catch_up(&mut self, before: &mut (usize, u64), prev: Option<&(usize, u64)>, bytes: bool) {
+    pub(super) fn catch_up(
+        &mut self,
+        before: &mut (usize, u64),
+        prev: Option<&(usize, u64)>,
+        bytes: bool,
+    ) {
         let Some(&(n, b)) = prev else { return };
         before.0 += n;
         before.1 += b;

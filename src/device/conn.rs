@@ -9,6 +9,8 @@ pub(super) struct Conn {
     pub(super) rx: Receiver<Vec<u8>>,
     pub(super) next: u16,
     pub(super) stereo: bool,
+    /// Product id from the handshake (12 = Digitakt, 42 = Digitakt II).
+    pub(super) product: u8,
     pub(super) name: String,
     /// The MIDI input port's own name, to notice when it disappears.
     pub(super) port: String,
@@ -20,16 +22,32 @@ pub(super) struct Conn {
 /// Is a MIDI input called `name` still there? A fresh client each time:
 /// a long-lived one may not see ports come and go without a run loop.
 pub(super) fn port_present(name: &str) -> bool {
-    let Ok(input) = midir::MidiInput::new("Sample Manager probe") else { return true };
-    input.ports().iter().any(|p| input.port_name(p).ok().as_deref() == Some(name))
+    let Ok(input) = midir::MidiInput::new("Sample Manager probe") else {
+        return true;
+    };
+    input
+        .ports()
+        .iter()
+        .any(|p| input.port_name(p).ok().as_deref() == Some(name))
 }
 
 /// Could this MIDI port be an Elektron machine?
 pub(super) fn elektron_port(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
-    ["elektron", "digitakt", "digitone", "syntakt", "rytm", "model:samples", "model:cycles", "analog four", "analog keys", "analog heat"]
-        .iter()
-        .any(|k| l.contains(k))
+    [
+        "elektron",
+        "digitakt",
+        "digitone",
+        "syntakt",
+        "rytm",
+        "model:samples",
+        "model:cycles",
+        "analog four",
+        "analog keys",
+        "analog heat",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
 }
 
 /// Elektron product ids (the first byte of the device reply), as listed by
@@ -66,8 +84,12 @@ impl Conn {
     /// has a sample drive wins.
     pub(super) fn open() -> Result<Self, String> {
         let input = midir::MidiInput::new("Sample Manager").map_err(|e| e.to_string())?;
-        let names: Vec<String> =
-            input.ports().iter().filter_map(|p| input.port_name(p).ok()).filter(|n| elektron_port(n)).collect();
+        let names: Vec<String> = input
+            .ports()
+            .iter()
+            .filter_map(|p| input.port_name(p).ok())
+            .filter(|n| elektron_port(n))
+            .collect();
         drop(input);
         if names.is_empty() {
             return Err("No Elektron device found. Connect it by USB \
@@ -102,7 +124,11 @@ impl Conn {
             .ok_or("port went away")?;
         // The output of the same device carries the same name; failing that,
         // the only Elektron output there is.
-        let outs: Vec<_> = output.ports().into_iter().filter_map(|p| Some((output.port_name(&p).ok()?, p))).collect();
+        let outs: Vec<_> = output
+            .ports()
+            .into_iter()
+            .filter_map(|p| Some((output.port_name(&p).ok()?, p)))
+            .collect();
         let out_port = match outs.iter().find(|(n, _)| n == in_name) {
             Some((_, p)) => p.clone(),
             None => {
@@ -137,6 +163,7 @@ impl Conn {
             rx,
             next: 0,
             stereo: false,
+            product: 0,
             port: in_name.to_owned(),
             name: in_name.to_owned(),
             dead: false,
@@ -157,15 +184,22 @@ impl Conn {
         let known = product(id);
         c.name = match rd.str() {
             Ok(n) if !n.is_empty() => n,
-            _ => known.map_or_else(|| format!("Elektron device {id}"), |k| format!("Elektron {}", k.0)),
+            _ => known.map_or_else(
+                || format!("Elektron device {id}"),
+                |k| format!("Elektron {}", k.0),
+            ),
         };
-        crate::log::line(format!("device: {} (product {id}) on {in_name}, commands {cmds:02x?}", c.name));
+        crate::log::line(format!(
+            "device: {} (product {id}) on {in_name}, commands {cmds:02x?}",
+            c.name
+        ));
         // An older firmware may not list its commands; then just try.
         let needed = [proto::DIR_LIST, proto::READ_OPEN, proto::WRITE_OPEN];
         if !cmds.is_empty() && !needed.iter().all(|n| cmds.contains(n)) {
             return Err(format!("{} has no sample drive to browse", c.name));
         }
         c.stereo = known.is_some_and(|k| k.1);
+        c.product = id;
         Ok(c)
     }
 
@@ -190,6 +224,11 @@ impl Conn {
         if self.dead {
             return Err(Fail::Link("Device disconnected".into()));
         }
+        if proto::FORBIDDEN.contains(&cmd) {
+            return refused(format!(
+                "command 0x{cmd:02x} would change saved projects; blocked"
+            ));
+        }
         self.next = self.next.wrapping_add(1).max(1);
         let id = self.next;
         while self.rx.try_recv().is_ok() {} // stale replies
@@ -199,13 +238,10 @@ impl Conn {
         let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            let msg = self
-                .rx
-                .recv_timeout(left)
-                .map_err(|_| {
-                    crate::log::line(format!("device: cmd 0x{cmd:02x} id {id} timed out"));
-                    Fail::Link("The device stopped answering (timed out)".into())
-                })?;
+            let msg = self.rx.recv_timeout(left).map_err(|_| {
+                crate::log::line(format!("device: cmd 0x{cmd:02x} id {id} timed out"));
+                Fail::Link("The device stopped answering (timed out)".into())
+            })?;
             if let Some((c, a)) = proto::unframe(&msg, id) {
                 if c == cmd | 0x80 {
                     return Ok(a);
@@ -220,7 +256,9 @@ impl Conn {
         if Reader::new(&r).bool().unwrap_or(false) {
             Ok(())
         } else {
-            crate::log::line(format!("device: cmd 0x{cmd:02x} refused ({what}), reply {r:02x?}"));
+            crate::log::line(format!(
+                "device: cmd 0x{cmd:02x} refused ({what}), reply {r:02x?}"
+            ));
             refused(what)
         }
     }
@@ -232,27 +270,48 @@ impl Conn {
 
     pub(super) fn mkdir(&mut self, p: &Path) -> R<()> {
         let s = dev_str(p);
-        self.ok(proto::DIR_CREATE, Args::default().str(&s), format!("could not create folder {s}"))
+        self.ok(
+            proto::DIR_CREATE,
+            Args::default().str(&s),
+            format!("could not create folder {s}"),
+        )
     }
 
     /// Remove an empty folder.
     pub(super) fn rmdir(&mut self, p: &Path) -> R<()> {
         let s = dev_str(p);
-        self.ok(proto::DIR_DELETE, Args::default().str(&s), format!("could not remove folder {s}"))
+        self.ok(
+            proto::DIR_DELETE,
+            Args::default().str(&s),
+            format!("could not remove folder {s}"),
+        )
     }
 
     pub(super) fn delete_file(&mut self, p: &Path) -> R<()> {
         let s = dev_str(p);
-        self.ok(proto::FILE_DELETE, Args::default().str(&s), format!("could not delete {s}"))
+        self.ok(
+            proto::FILE_DELETE,
+            Args::default().str(&s),
+            format!("could not delete {s}"),
+        )
     }
 
     pub(super) fn rename(&mut self, from: &Path, to: &Path) -> R<()> {
         let (a, b) = (dev_str(from), dev_str(to));
-        self.ok(proto::ITEM_RENAME, Args::default().str(&a).str(&b), format!("could not move {a} to {b}"))
+        self.ok(
+            proto::ITEM_RENAME,
+            Args::default().str(&a).str(&b),
+            format!("could not move {a} to {b}"),
+        )
     }
 
     /// `on_bytes(conn, chunk, file_total)` after each chunk.
-    pub(super) fn read(&mut self, p: &Path, cancel: &AtomicBool, on_bytes: &mut dyn FnMut(&mut Conn, u64, u64)) -> R<Vec<u8>> {
+    pub(super) fn read(
+        &mut self,
+        p: &Path,
+        cancel: &AtomicBool,
+        on_bytes: &mut dyn FnMut(&mut Conn, u64, u64),
+    ) -> R<Vec<u8>> {
         let s = dev_str(p);
         let r = self.request(proto::READ_OPEN, Args::default().str(&s))?;
         let mut rd = Reader::new(&r);
@@ -274,7 +333,8 @@ impl Conn {
                 // data; asking again for the same chunk usually works.
                 let mut tries = 0;
                 let chunk = loop {
-                    let r = self.request(proto::READ, Args::default().u32(fd).u32(len).u32(start))?;
+                    let r =
+                        self.request(proto::READ, Args::default().u32(fd).u32(len).u32(start))?;
                     let mut rd = Reader::new(&r);
                     let ok = rd.bool().map_err(Fail::Link)?;
                     let _fd = rd.u32().map_err(Fail::Link)?;
@@ -286,7 +346,10 @@ impl Conn {
                         break chunk.to_vec();
                     }
                     tries += 1;
-                    crate::log::line(format!("device: read chunk at {start} of {s} failed (try {tries}, ok={ok}, {} bytes)", chunk.len()));
+                    crate::log::line(format!(
+                        "device: read chunk at {start} of {s} failed (try {tries}, ok={ok}, {} bytes)",
+                        chunk.len()
+                    ));
                     if tries >= CHUNK_TRIES || cancel.load(Ordering::Relaxed) {
                         return refused(format!("read failed: {s}"));
                     }
@@ -305,7 +368,13 @@ impl Conn {
     }
 
     /// `on_bytes(conn, chunk, file_total)` after each chunk.
-    pub(super) fn write(&mut self, p: &Path, data: &[u8], cancel: &AtomicBool, on_bytes: &mut dyn FnMut(&mut Conn, u64, u64)) -> R<()> {
+    pub(super) fn write(
+        &mut self,
+        p: &Path,
+        data: &[u8],
+        cancel: &AtomicBool,
+        on_bytes: &mut dyn FnMut(&mut Conn, u64, u64),
+    ) -> R<()> {
         let s = dev_str(p);
         let total = data.len() as u32;
         let r = self.request(proto::WRITE_OPEN, Args::default().u32(total).str(&s))?;
@@ -321,7 +390,11 @@ impl Conn {
                 if cancel.load(Ordering::Relaxed) {
                     return refused("cancelled");
                 }
-                let args = Args::default().u32(fd).u32(chunk.len() as u32).u32(off as u32).bytes(chunk);
+                let args = Args::default()
+                    .u32(fd)
+                    .u32(chunk.len() as u32)
+                    .u32(off as u32)
+                    .bytes(chunk);
                 let r = self.request(proto::WRITE, args)?;
                 if !Reader::new(&r).bool().unwrap_or(false) {
                     return refused(format!("write failed: {s}"));
@@ -334,11 +407,18 @@ impl Conn {
         match res {
             Ok(()) => {
                 let r = self.request(proto::WRITE_CLOSE, Args::default().u32(fd).u32(total))?;
-                if Reader::new(&r).bool().unwrap_or(false) { Ok(()) } else { refused(format!("could not finish {s}")) }
+                if Reader::new(&r).bool().unwrap_or(false) {
+                    Ok(())
+                } else {
+                    refused(format!("could not finish {s}"))
+                }
             }
             Err(e) => {
                 // Closing with length 0 abandons the file; then remove the stub.
-                if self.request(proto::WRITE_CLOSE, Args::default().u32(fd).u32(0)).is_ok() {
+                if self
+                    .request(proto::WRITE_CLOSE, Args::default().u32(fd).u32(0))
+                    .is_ok()
+                {
                     let _ = self.delete_file(p);
                 }
                 Err(e)
@@ -350,7 +430,10 @@ impl Conn {
 /// Rename `from` to `to`, refusing to replace anything already there.
 pub(super) fn rename_checked(c: &mut Conn, from: &Path, to: &Path) -> R<()> {
     let parent = to.parent().unwrap_or(Path::new("/"));
-    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = to
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if c.list(parent)?.iter().any(|e| e.name == name) {
         return refused(format!("{} already exists", dev_str(to)));
     }

@@ -5,8 +5,16 @@ use super::*;
 impl Batch {
     pub(super) fn absorb(&mut self, a: &ActiveJob, cancelled: bool) {
         // A finished job counts in full; a cancelled one only for what it did.
-        let items = if cancelled { a.done_items } else { a.total_items.max(a.done_items) };
-        let bytes = if cancelled { a.done_bytes } else { a.total_bytes.max(a.done_bytes) };
+        let items = if cancelled {
+            a.done_items
+        } else {
+            a.total_items.max(a.done_items)
+        };
+        let bytes = if cancelled {
+            a.done_bytes
+        } else {
+            a.total_bytes.max(a.done_bytes)
+        };
         self.done_items += items;
         self.total_items += items;
         self.done_bytes += bytes;
@@ -120,7 +128,10 @@ impl App {
     /// pane": the panes have fixed roles here. To get the Commander behaviour,
     /// swap the two role arguments for `(self.focused, self.focused.other())`.
     pub(super) fn commit(&mut self, kind: Kind) {
-        let (src_tab, dst_tab) = (self.pane(Role::Source).active_tab(), self.pane(Role::Dest).active_tab());
+        let (src_tab, dst_tab) = (
+            self.pane(Role::Source).active_tab(),
+            self.pane(Role::Dest).active_tab(),
+        );
         if src_tab.device || dst_tab.device {
             let (from_dev, to_dev) = (src_tab.device, dst_tab.device);
             let sources = src_tab.effective_selection();
@@ -197,7 +208,10 @@ impl App {
                 is_dir: false,
             });
         }
-        let what = PlanKind::Commit { fold: fold.into_iter().collect(), dest_dir };
+        let what = PlanKind::Commit {
+            fold: fold.into_iter().collect(),
+            dest_dir,
+        };
         self.offer(plan, what);
     }
 
@@ -208,7 +222,14 @@ impl App {
 
     /// Copy or move between any two places, either of which may be the
     /// device.
-    pub(super) fn transfer(&mut self, kind: Kind, from_dev: bool, sources: Vec<PathBuf>, to_dev: bool, dest_dir: PathBuf) {
+    pub(super) fn transfer(
+        &mut self,
+        kind: Kind,
+        from_dev: bool,
+        sources: Vec<PathBuf>,
+        to_dev: bool,
+        dest_dir: PathBuf,
+    ) {
         let dir = match (from_dev, to_dev) {
             (false, false) => return self.start_transfer(kind, sources, dest_dir),
             (true, true) if kind == Kind::Move => device::Dir::Move,
@@ -216,11 +237,19 @@ impl App {
             (false, true) => device::Dir::Upload,
             (true, false) => device::Dir::Download,
         };
-        let mut plan = Plan { kind, ops: Vec::new(), rejected: Vec::new() };
+        let mut plan = Plan {
+            kind,
+            ops: Vec::new(),
+            rejected: Vec::new(),
+        };
         for src in sources {
-            let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = src
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let (is_dir, bytes) = if from_dev {
-                self.device_entry(&src).map_or((false, 0), |e| (e.is_dir, e.len))
+                self.device_entry(&src)
+                    .map_or((false, 0), |e| (e.is_dir, e.len))
             } else {
                 let dir = src.is_dir();
                 let bytes = if dir {
@@ -231,12 +260,14 @@ impl App {
                 (dir, bytes)
             };
             if from_dev == to_dev && is_dir && dest_dir.starts_with(&src) {
-                plan.rejected.push((src, "cannot put a folder inside itself".to_owned()));
+                plan.rejected
+                    .push((src, "cannot put a folder inside itself".to_owned()));
                 continue;
             }
             // Also catches a drag let go over its own list.
             if from_dev == to_dev && src.parent() == Some(dest_dir.as_path()) {
-                plan.rejected.push((src, "already in that folder".to_owned()));
+                plan.rejected
+                    .push((src, "already in that folder".to_owned()));
                 continue;
             }
             if dir == device::Dir::Upload && !is_dir && !fs_model::is_audio_path(&src) {
@@ -248,28 +279,51 @@ impl App {
                 device::Dir::Download if !is_dir => dest_dir.join(device::wav_name(&name)),
                 _ => dest_dir.join(&name),
             };
-            let conflict = if to_dev { self.device_has(&dst) } else { dst.exists() };
-            plan.ops.push(ops::Op { src, dst, approx_bytes: bytes, is_dir, conflict });
+            let conflict = if to_dev {
+                self.device_has(&dst)
+            } else {
+                dst.exists()
+            };
+            plan.ops.push(ops::Op {
+                src,
+                dst,
+                approx_bytes: bytes,
+                is_dir,
+                conflict,
+            });
         }
         if kind == Kind::Move && dir != device::Dir::Move {
-            self.status = "Between the computer and the device, Move copies; originals are kept".to_owned();
+            self.status =
+                "Between the computer and the device, Move copies; originals are kept".to_owned();
         }
-        let mono = if dir == device::Dir::Upload { self.editor.prefs.mono } else { None };
+        let mono = if dir == device::Dir::Upload {
+            self.editor.prefs.mono
+        } else {
+            None
+        };
         self.offer(plan, PlanKind::Device { dir, mono });
     }
 
     /// `src` going into `dst_dir` is already part of a queued or running
     /// device transfer: as an item of its own, or inside a queued folder.
     fn device_queued_has(&self, dir: device::Dir, src: &Path, dst_dir: &Path) -> bool {
-        self.device_queued.values().filter(|(d, _)| *d == dir).flat_map(|(_, items)| items).any(|(qs, qd)| {
-            if qs == src {
-                return qd == dst_dir;
-            }
-            // Inside queued folder `qs`: it lands in the same spot under
-            // `qd/<folder name>`.
-            let (Ok(rel), Some(name)) = (src.parent().unwrap_or(src).strip_prefix(qs), qs.file_name()) else { return false };
-            qd.join(name).join(rel) == dst_dir
-        })
+        self.device_queued
+            .values()
+            .filter(|(d, _)| *d == dir)
+            .flat_map(|(_, items)| items)
+            .any(|(qs, qd)| {
+                if qs == src {
+                    return qd == dst_dir;
+                }
+                // Inside queued folder `qs`: it lands in the same spot under
+                // `qd/<folder name>`.
+                let (Ok(rel), Some(name)) =
+                    (src.parent().unwrap_or(src).strip_prefix(qs), qs.file_name())
+                else {
+                    return false;
+                };
+                qd.join(name).join(rel) == dst_dir
+            })
     }
 
     /// A device item as last listed by any device tab.
@@ -279,7 +333,12 @@ impl App {
             .into_iter()
             .flat_map(|p| p.tabs.iter())
             .filter(|t| t.device)
-            .find_map(|t| t.listing_of(parent)?.iter().find(|e| e.path == path).cloned())
+            .find_map(|t| {
+                t.listing_of(parent)?
+                    .iter()
+                    .find(|e| e.path == path)
+                    .cloned()
+            })
     }
 
     pub(super) fn device_has(&self, path: &Path) -> bool {
@@ -287,7 +346,13 @@ impl App {
     }
 
     /// Hand `task` to the device worker as a job with a progress bar.
-    pub(super) fn run_device(&mut self, task: device::Task, label: &str, total_items: usize, total_bytes: u64) -> u64 {
+    pub(super) fn run_device(
+        &mut self,
+        task: device::Task,
+        label: &str,
+        total_items: usize,
+        total_bytes: u64,
+    ) -> u64 {
         let (id, cancel) = self.jobs.register();
         self.device.run(id, cancel, task);
         self.active_jobs.push(ActiveJob {
@@ -318,7 +383,11 @@ impl App {
         // they wouldn't show as conflicts).
         if let PlanKind::Device { dir, .. } = what {
             let before = plan.ops.len();
-            plan.ops.retain(|o| o.dst.parent().is_none_or(|d| !self.device_queued_has(dir, &o.src, d)));
+            plan.ops.retain(|o| {
+                o.dst
+                    .parent()
+                    .is_none_or(|d| !self.device_queued_has(dir, &o.src, d))
+            });
             let n = before - plan.ops.len();
             if n > 0 {
                 self.status = format!("{n} item(s) already queued for there — skipped");
@@ -330,15 +399,19 @@ impl App {
         // A local copy whose destination already holds the same bytes has
         // nothing to do: drop it rather than asking about it. Mono folds are
         // rendered, so their output can't be compared up front.
-        let same_ok = plan.kind == Kind::Copy && matches!(what, PlanKind::Transfer | PlanKind::Commit { .. });
+        let same_ok =
+            plan.kind == Kind::Copy && matches!(what, PlanKind::Transfer | PlanKind::Commit { .. });
         if same_ok {
             let fold = match &what {
                 PlanKind::Commit { fold, .. } => Some(fold),
                 _ => None,
             };
-            let (same, keep): (Vec<ops::Op>, Vec<ops::Op>) = std::mem::take(&mut plan.ops).into_iter().partition(|o| {
-                o.conflict && !fold.is_some_and(|f| f.contains(&o.src)) && ops::already_there(&o.src, &o.dst)
-            });
+            let (same, keep): (Vec<ops::Op>, Vec<ops::Op>) =
+                std::mem::take(&mut plan.ops).into_iter().partition(|o| {
+                    o.conflict
+                        && !fold.is_some_and(|f| f.contains(&o.src))
+                        && ops::already_there(&o.src, &o.dst)
+                });
             plan.ops = keep;
             if !same.is_empty() {
                 let n = same.len();
@@ -380,7 +453,18 @@ impl App {
                 let total_bytes = plan.total_bytes();
                 let n = items.len();
                 let queued = items.clone();
-                let id = self.run_device(device::Task::Transfer { dir, items, policy, mono, total_bytes }, "", n, total_bytes);
+                let id = self.run_device(
+                    device::Task::Transfer {
+                        dir,
+                        items,
+                        policy,
+                        mono,
+                        total_bytes,
+                    },
+                    "",
+                    n,
+                    total_bytes,
+                );
                 self.device_queued.insert(id, (dir, queued));
                 return;
             }
@@ -389,8 +473,14 @@ impl App {
                     self.status = "Export skipped".to_owned();
                     return;
                 }
-                let (Some(op), Some(src)) = (plan.ops.first(), self.editor.path().map(Path::to_path_buf)) else { return };
-                let Some(dest_dir) = op.dst.parent().map(Path::to_path_buf) else { return };
+                let (Some(op), Some(src)) =
+                    (plan.ops.first(), self.editor.path().map(Path::to_path_buf))
+                else {
+                    return;
+                };
+                let Some(dest_dir) = op.dst.parent().map(Path::to_path_buf) else {
+                    return;
+                };
                 let tmp = std::env::temp_dir().join("sample_manager_upload");
                 if let Err(e) = std::fs::create_dir_all(&tmp) {
                     self.errors.push(format!("{}: {e}", tmp.display()));
@@ -399,7 +489,11 @@ impl App {
                 let staged = crate::audio::export::target_for(&src, &tmp);
                 self.mark_committed([src]);
                 self.status = "Rendering for the device…".to_owned();
-                self.staged_upload = Some(StagedUpload { staged: staged.clone(), dest_dir, policy });
+                self.staged_upload = Some(StagedUpload {
+                    staged: staged.clone(),
+                    dest_dir,
+                    policy,
+                });
                 self.editor.export(staged, mono);
                 return;
             }
@@ -408,7 +502,12 @@ impl App {
         let mut resolved = ops::resolve(plan, policy);
         // "Keep both" copies get their name picked by the user once they exist.
         let mut kept: Vec<PathBuf> = if policy == Policy::KeepBoth {
-            plan.ops.iter().zip(&resolved).filter(|(o, _)| o.conflict).map(|(_, r)| r.dst.clone()).collect()
+            plan.ops
+                .iter()
+                .zip(&resolved)
+                .filter(|(o, _)| o.conflict)
+                .map(|(_, r)| r.dst.clone())
+                .collect()
         } else {
             Vec::new()
         };
@@ -419,12 +518,17 @@ impl App {
         match what {
             PlanKind::Transfer | PlanKind::Device { .. } | PlanKind::DeviceExport { .. } => {}
             PlanKind::Commit { fold, dest_dir } => {
-                let (folds, copies): (Vec<_>, Vec<_>) = resolved.into_iter().partition(|o| fold.contains(&o.src));
+                let (folds, copies): (Vec<_>, Vec<_>) =
+                    resolved.into_iter().partition(|o| fold.contains(&o.src));
                 resolved = copies;
                 if !folds.is_empty() {
                     self.mark_committed(folds.iter().map(|o| o.src.clone()));
                     self.status = format!("Folding {} file(s) to mono…", folds.len());
-                    self.editor.export_mono_batch(folds.into_iter().map(|o| (o.src, o.dst)).collect(), dest_dir, self.editor.prefs.mono.unwrap_or_default());
+                    self.editor.export_mono_batch(
+                        folds.into_iter().map(|o| (o.src, o.dst)).collect(),
+                        dest_dir,
+                        self.editor.prefs.mono.unwrap_or_default(),
+                    );
                 }
                 if resolved.is_empty() {
                     return;
@@ -436,7 +540,11 @@ impl App {
         }
         kept.retain(|p| resolved.iter().any(|o| &o.dst == p));
         let id = self.run_local(plan.kind, resolved);
-        let undo = if plan.kind == Kind::Move { undo::UndoJob::Move } else { undo::UndoJob::Copy };
+        let undo = if plan.kind == Kind::Move {
+            undo::UndoJob::Move
+        } else {
+            undo::UndoJob::Copy
+        };
         self.undo_jobs.insert(id, undo);
         if !kept.is_empty() {
             self.rename_after = Some((id, kept));
@@ -450,37 +558,68 @@ impl App {
         // Mono folds are rendered rather than copied, so they can't be
         // compared: they go the normal way, skipping any that exist.
         if let PlanKind::Commit { fold, dest_dir } = what {
-            let (folds, rest): (Vec<_>, Vec<_>) = plan.ops.into_iter().partition(|o| fold.contains(&o.src));
+            let (folds, rest): (Vec<_>, Vec<_>) =
+                plan.ops.into_iter().partition(|o| fold.contains(&o.src));
             plan.ops = rest;
             if !folds.is_empty() {
-                let fp = Plan { kind: plan.kind, ops: folds, rejected: Vec::new() };
+                let fp = Plan {
+                    kind: plan.kind,
+                    ops: folds,
+                    rejected: Vec::new(),
+                };
                 self.launch(&fp, PlanKind::Commit { fold, dest_dir }, Policy::Skip);
             }
         }
         let m = ops::merge(&plan, |_| true);
         let moving = plan.kind == Kind::Move;
         for c in &m.collisions {
-            crate::log::line(format!("merge: left in place (same name, different size): {}", c.display()));
+            crate::log::line(format!(
+                "merge: left in place (same name, different size): {}",
+                c.display()
+            ));
         }
         let mut note = format!("Merged: {} added", m.ops.len());
         if !m.dupes.is_empty() {
-            let fate = if moving { "moved to the Trash" } else { "skipped" };
+            let fate = if moving {
+                "moved to the Trash"
+            } else {
+                "skipped"
+            };
             note += &format!(", {} duplicate(s) {fate}", m.dupes.len());
         }
         if !m.collisions.is_empty() {
-            let place = if moving { "left in the source folder" } else { "not copied" };
-            note += &format!(", {} with the same name but a different size {place}", m.collisions.len());
+            let place = if moving {
+                "left in the source folder"
+            } else {
+                "not copied"
+            };
+            note += &format!(
+                ", {} with the same name but a different size {place}",
+                m.collisions.len()
+            );
         }
         if !moving {
-            self.mark_committed(m.ops.iter().map(|o| o.src.clone()).chain(m.dupes.iter().cloned()));
+            self.mark_committed(
+                m.ops
+                    .iter()
+                    .map(|o| o.src.clone())
+                    .chain(m.dupes.iter().cloned()),
+            );
         }
         if m.ops.is_empty() && (!moving || m.dupes.is_empty()) {
             self.status = note;
             return;
         }
-        let tidy = moving.then(|| crate::jobs::Tidy { dupes: m.dupes, roots: m.roots });
+        let tidy = moving.then(|| crate::jobs::Tidy {
+            dupes: m.dupes,
+            roots: m.roots,
+        });
         let id = self.run_local_then(plan.kind, m.ops, tidy);
-        let undo = if moving { undo::UndoJob::Move } else { undo::UndoJob::Copy };
+        let undo = if moving {
+            undo::UndoJob::Move
+        } else {
+            undo::UndoJob::Copy
+        };
         self.undo_jobs.insert(id, undo);
         self.finish_note = Some((id, note));
     }
@@ -488,9 +627,14 @@ impl App {
     /// Select the "Keep both" copies a finished job made and, for a single
     /// one, open the inline rename on it, in a pane showing its folder.
     pub(super) fn rename_kept(&mut self, paths: Vec<PathBuf>) {
-        let paths: Vec<PathBuf> = paths.into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok()).collect();
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| std::fs::symlink_metadata(p).is_ok())
+            .collect();
         let Some(first) = paths.first() else { return };
-        let Some(dir) = first.parent().map(Path::to_path_buf) else { return };
+        let Some(dir) = first.parent().map(Path::to_path_buf) else {
+            return;
+        };
         let Some(role) = [self.focused, self.focused.other()].into_iter().find(|&r| {
             let t = self.pane(r).active_tab();
             !t.device && (t.cwd == dir || t.expanded.contains(&dir))
@@ -504,7 +648,10 @@ impl App {
         tab.selected = paths.iter().cloned().collect();
         tab.cursor = None;
         if let [only] = paths.as_slice() {
-            let name = only.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = only
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             tab.renaming = Some((only.clone(), name));
         } else {
             self.status += " · new copies selected — ⇧F2 renames them together";
@@ -516,9 +663,19 @@ impl App {
     pub(super) fn absorb(&mut self, events: Vec<Ev>) {
         for ev in events {
             match ev {
-                Ev::Listed { device, generation, path, result } => {
+                Ev::Listed {
+                    device,
+                    generation,
+                    path,
+                    result,
+                } => {
                     for role in [Role::Source, Role::Dest] {
-                        for tab in self.pane_mut(role).tabs.iter_mut().filter(|t| t.device == device) {
+                        for tab in self
+                            .pane_mut(role)
+                            .tabs
+                            .iter_mut()
+                            .filter(|t| t.device == device)
+                        {
                             if tab.cwd == path {
                                 tab.accept_listing(generation, result.clone());
                             } else if tab.expanded.contains(&path) {
@@ -536,7 +693,11 @@ impl App {
                         self.dupes_pending = Some(groups);
                     }
                 }
-                Ev::Applied { job, done, replaced } => self.applied(job, done, replaced),
+                Ev::Applied {
+                    job,
+                    done,
+                    replaced,
+                } => self.applied(job, done, replaced),
                 Ev::Note { job, text } => self.finish_note = Some((job, text)),
                 Ev::DeviceStatus(s) => {
                     if let Err(e) = &s {
@@ -544,6 +705,7 @@ impl App {
                     }
                     self.device_status = Some(s)
                 }
+                Ev::Elk(e) => self.elk_event(e),
                 Ev::DeviceLost => {
                     for role in [Role::Source, Role::Dest] {
                         if !self.pane_mut(role).leave_device() {
@@ -604,7 +766,10 @@ impl App {
                     if self.active_jobs.is_empty() {
                         self.batch = Batch::default();
                     }
-                    let load = self.device_load.take_if(|(id, _)| *id == job).map(|(_, p)| p);
+                    let load = self
+                        .device_load
+                        .take_if(|(id, _)| *id == job)
+                        .map(|(_, p)| p);
                     let load = load.filter(|p| !cancelled && errors.is_empty() && p.is_file());
                     self.status = if cancelled {
                         "Cancelled".to_owned()

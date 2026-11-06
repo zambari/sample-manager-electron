@@ -60,20 +60,21 @@ impl ChannelPeaks {
             return (0.0, 0.0);
         }
         let span = f1 - f0;
-        let level = self
-            .levels
-            .iter()
-            .rev()
-            .find(|l| l.block * 2 <= span);
+        let level = self.levels.iter().rev().find(|l| l.block * 2 <= span);
         match level {
-            None => data[f0..f1].iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &s| {
-                (lo.min(s), hi.max(s))
-            }),
+            None => data[f0..f1]
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &s| {
+                    (lo.min(s), hi.max(s))
+                }),
             Some(l) => {
                 let b0 = f0 / l.block;
                 let b1 = f1.div_ceil(l.block).min(l.min.len());
                 let lo = l.min[b0..b1].iter().copied().fold(f32::INFINITY, f32::min);
-                let hi = l.max[b0..b1].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let hi = l.max[b0..b1]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 (lo, hi)
             }
         }

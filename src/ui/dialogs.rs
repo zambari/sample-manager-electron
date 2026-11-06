@@ -106,10 +106,21 @@ pub fn conflicts(ctx: &Context, plan: &Plan, can_merge: bool) -> Option<Decision
 /// Confirm moving `paths` to the Trash (`device`: the device's /trash
 /// folder), or with `permanent`, deleting them outright. `Some(true)` = go
 /// ahead, `Some(false)` = cancelled, `None` = still open.
-pub fn confirm_trash(ctx: &Context, paths: &[std::path::PathBuf], device: bool, permanent: bool) -> Option<bool> {
+pub fn confirm_trash(
+    ctx: &Context,
+    paths: &[std::path::PathBuf],
+    device: bool,
+    permanent: bool,
+) -> Option<bool> {
     let mut answer = None;
     let bin = if device { "/trash" } else { "Trash" };
-    let verb = |what: &str| if permanent { format!("Delete {what} now?") } else { format!("Move {what} to {bin}?") };
+    let verb = |what: &str| {
+        if permanent {
+            format!("Delete {what} now?")
+        } else {
+            format!("Move {what} to {bin}?")
+        }
+    };
     Modal::new(Id::unique("trash_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
         let n = paths.len();
@@ -179,7 +190,9 @@ pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Op
     let n: usize = groups.iter().map(|g| g.remove.len()).sum();
     let freed: u64 = groups.iter().map(|g| g.bytes * g.remove.len() as u64).sum();
     let name = |p: &std::path::Path| {
-        p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
     };
     Modal::new(Id::unique("dupes_modal")).show(ctx, |ui| {
         ui.set_width(480.0);
@@ -190,25 +203,34 @@ pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Op
             human_bytes(freed)
         ));
         ui.add_space(6.0);
-        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-            for g in groups {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("keep").color(egui::Color32::from_rgb(90, 210, 110)));
-                    ui.label(RichText::new(name(&g.keep)).monospace().strong());
-                    ui.label(RichText::new(human_bytes(g.bytes)).weak());
-                });
-                for r in &g.remove {
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for g in groups {
                     ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(RichText::new("trash").color(ui.visuals().error_fg_color));
-                        ui.label(RichText::new(name(r)).monospace().strikethrough());
+                        ui.label(
+                            RichText::new("keep").color(egui::Color32::from_rgb(90, 210, 110)),
+                        );
+                        ui.label(RichText::new(name(&g.keep)).monospace().strong());
+                        ui.label(RichText::new(human_bytes(g.bytes)).weak());
                     });
+                    for r in &g.remove {
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(RichText::new("trash").color(ui.visuals().error_fg_color));
+                            ui.label(RichText::new(name(r)).monospace().strikethrough());
+                        });
+                    }
+                    ui.add_space(4.0);
                 }
-                ui.add_space(4.0);
-            }
-        });
+            });
         ui.add_space(6.0);
-        ui.label(RichText::new("Contents were compared byte for byte. You can restore them from the Trash.").weak());
+        ui.label(
+            RichText::new(
+                "Contents were compared byte for byte. You can restore them from the Trash.",
+            )
+            .weak(),
+        );
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -242,12 +264,19 @@ pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Op
 /// cancelled, `None` = still open.
 pub fn confirm_device_load(ctx: &Context, path: &std::path::Path, bytes: u64) -> Option<bool> {
     let mut answer = None;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     Modal::new(Id::unique("device_load_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
         ui.heading(format!("Load \"{name}\" into the editor?"));
         ui.add_space(6.0);
-        let size = if bytes > 0 { format!(" ({})", human_bytes(bytes)) } else { String::new() };
+        let size = if bytes > 0 {
+            format!(" ({})", human_bytes(bytes))
+        } else {
+            String::new()
+        };
         ui.label(format!(
             "The sample{size} has to be read from the device over USB MIDI first, \
              which is slow — this can take a while. You can cancel it from the status bar."
@@ -287,23 +316,40 @@ pub enum LeaveChoice {
 /// The editor's audio was cut or pasted into and is about to be left (another
 /// file is loading, or the app is closing). `quitting` changes the wording;
 /// `dest` names the destination folder, `None` when it can't take a commit.
-pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str>) -> Option<LeaveChoice> {
+/// Why the edited file is being left.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LeaveWhy {
+    Open,
+    Quit,
+    CloseKit,
+}
+
+pub fn leave_editor(
+    ctx: &Context,
+    name: &str,
+    why: LeaveWhy,
+    dest: Option<&str>,
+) -> Option<LeaveChoice> {
     let mut choice = None;
     Modal::new(Id::unique("leave_editor_modal")).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.heading(format!("\"{name}\" has unsaved edits"));
         ui.add_space(6.0);
-        ui.label(if quitting {
-            "Audio was cut or pasted into this file. Quitting now throws those edits away."
-        } else {
-            "Audio was cut or pasted into this file. Opening another one throws those edits away \
-             (the clipboard is kept, so you can still paste into the next file)."
+        ui.label(match why {
+            LeaveWhy::Quit => "Audio was cut or pasted into this file. Quitting now throws those edits away.",
+            LeaveWhy::CloseKit => "This kit has slices that haven't been saved. Closing it now throws them away.",
+            LeaveWhy::Open => {
+                "Audio was cut or pasted into this file. Opening another one throws those edits away \
+                 (the clipboard is kept, so you can still paste into the next file)."
+            }
         });
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("Saving writes what you hear, with gain (you'll be asked whether to trim to the selection). Files that aren't WAV are saved as a WAV beside the original.")
-                .weak(),
-        );
+        if why != LeaveWhy::CloseKit {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Saving writes what you hear, with gain (you'll be asked whether to trim to the selection). Files that aren't WAV are saved as a WAV beside the original.")
+                    .weak(),
+            );
+        }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.button("Cancel").on_hover_text("Esc — keep editing").clicked() {
@@ -311,7 +357,11 @@ pub fn leave_editor(ctx: &Context, name: &str, quitting: bool, dest: Option<&str
             }
             if ui
                 .button(RichText::new("Discard edits").color(ui.visuals().error_fg_color))
-                .on_hover_text(if quitting { "Quit without saving" } else { "Open the other file without saving" })
+                .on_hover_text(match why {
+                    LeaveWhy::Quit => "Quit without saving",
+                    LeaveWhy::CloseKit => "Close the kit without saving",
+                    LeaveWhy::Open => "Open the other file without saving",
+                })
                 .clicked()
             {
                 choice = Some(LeaveChoice::Discard);
@@ -374,7 +424,9 @@ pub fn save_scope(ctx: &Context, name: &str, sel: f64, whole: f64) -> Option<Sav
     ctx.input_mut(|i| {
         if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
             choice = Some(SaveScope::Cancel);
-        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) || i.consume_key(egui::Modifiers::NONE, egui::Key::T) {
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::T)
+        {
             choice = Some(SaveScope::Trim);
         } else if i.consume_key(egui::Modifiers::NONE, egui::Key::W) {
             choice = Some(SaveScope::Whole);
@@ -386,7 +438,12 @@ pub fn save_scope(ctx: &Context, name: &str, sel: f64, whole: f64) -> Option<Sav
 /// Export ("save as") found a file of that name in `dir`: pick another.
 /// `name` has no extension. `Some(true)` = go, `Some(false)` = cancelled,
 /// `None` = still open.
-pub fn name_export(ctx: &Context, name: &mut String, dir: &std::path::Path, taken: &str) -> Option<bool> {
+pub fn name_export(
+    ctx: &Context,
+    name: &mut String,
+    dir: &std::path::Path,
+    taken: &str,
+) -> Option<bool> {
     let mut answer = None;
     let clean = name.trim();
     let valid = !clean.is_empty() && !clean.contains('/');
@@ -395,12 +452,19 @@ pub fn name_export(ctx: &Context, name: &mut String, dir: &std::path::Path, take
         ui.set_width(420.0);
         ui.heading("Export as");
         ui.add_space(6.0);
-        ui.label(format!("\"{taken}\" is already in {}. Save the export under a new name:", dir.display()));
+        ui.label(format!(
+            "\"{taken}\" is already in {}. Save the export under a new name:",
+            dir.display()
+        ));
         ui.add_space(8.0);
         let id = Id::unique("name_export_field");
         let resp = ui
             .horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(ui.available_width() - 40.0));
+                let r = ui.add(
+                    egui::TextEdit::singleline(name)
+                        .id(id)
+                        .desired_width(ui.available_width() - 40.0),
+                );
                 ui.label(".wav");
                 r
             })
@@ -413,7 +477,10 @@ pub fn name_export(ctx: &Context, name: &mut String, dir: &std::path::Path, take
         }
         if exists {
             ui.add_space(4.0);
-            ui.label(RichText::new("That file exists too — exporting will overwrite it.").color(ui.visuals().warn_fg_color));
+            ui.label(
+                RichText::new("That file exists too — exporting will overwrite it.")
+                    .color(ui.visuals().warn_fg_color),
+            );
         }
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -422,7 +489,11 @@ pub fn name_export(ctx: &Context, name: &mut String, dir: &std::path::Path, take
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if exists { "Overwrite" } else { "Export" };
-                if ui.add_enabled(valid, egui::Button::new(label)).on_hover_text("↩").clicked() {
+                if ui
+                    .add_enabled(valid, egui::Button::new(label))
+                    .on_hover_text("↩")
+                    .clicked()
+                {
                     answer = Some(true);
                 }
             });
@@ -441,7 +512,12 @@ pub fn name_export(ctx: &Context, name: &mut String, dir: &std::path::Path, take
 /// Name a new slice kit, saved as `<name>.wav` in `dir`. A name that's
 /// already a file there adds to that file instead. `Some(true)` = go,
 /// `Some(false)` = cancelled, `None` = still open.
-pub fn name_kit(ctx: &Context, name: &mut String, dir: &std::path::Path, grid: &mut Option<usize>) -> Option<bool> {
+pub fn name_kit(
+    ctx: &Context,
+    name: &mut String,
+    dir: &std::path::Path,
+    grid: &mut Option<usize>,
+) -> Option<bool> {
     let mut answer = None;
     Modal::new(Id::unique("name_kit_modal")).show(ctx, |ui| {
         ui.set_width(420.0);

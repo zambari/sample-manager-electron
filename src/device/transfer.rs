@@ -7,7 +7,10 @@ impl Worker {
     /// Look up one device item by listing its folder.
     pub(super) fn stat(&mut self, p: &Path) -> Result<DirEntry, String> {
         let parent = p.parent().unwrap_or(Path::new("/")).to_path_buf();
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.with_conn(|c| c.list(&parent))?
             .into_iter()
             .find(|e| e.name == name)
@@ -18,14 +21,22 @@ impl Worker {
     /// `Some((path, existing))`, or `None` to skip. Replacing a file deletes
     /// it first; an existing folder is merged into. On a merge, an existing
     /// file comes back as `existing` for the caller to compare sizes.
-    pub(super) fn place_on_device(&mut self, dir: &Path, name: &str, is_dir: bool, policy: Policy) -> Result<Option<(PathBuf, Option<DirEntry>)>, String> {
+    pub(super) fn place_on_device(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        is_dir: bool,
+        policy: Policy,
+    ) -> Result<Option<(PathBuf, Option<DirEntry>)>, String> {
         let listing = self.with_conn(|c| c.list(dir))?;
         let Some(existing) = listing.iter().find(|e| e.name == name) else {
             return Ok(Some((dir.join(name), None)));
         };
         match policy {
             Policy::Skip => Ok(None),
-            Policy::Merge if is_dir == existing.is_dir => Ok(Some((dir.join(name), Some(existing.clone())))),
+            Policy::Merge if is_dir == existing.is_dir => {
+                Ok(Some((dir.join(name), Some(existing.clone()))))
+            }
             Policy::Merge => {
                 self.left_alone(&dir.join(name));
                 Ok(None)
@@ -34,13 +45,19 @@ impl Worker {
                 let taken: HashSet<String> = listing.iter().map(|e| e.name.clone()).collect();
                 Ok(Some((dir.join(unique_name(&taken, name)), None)))
             }
-            Policy::Replace if is_dir && existing.is_dir => Ok(Some((dir.join(name), Some(existing.clone())))),
+            Policy::Replace if is_dir && existing.is_dir => {
+                Ok(Some((dir.join(name), Some(existing.clone()))))
+            }
             Policy::Replace if !is_dir && !existing.is_dir => {
                 let p = dir.join(name);
                 self.with_conn(|c| c.delete_file(&p))?;
                 Ok(Some((p, None)))
             }
-            Policy::Replace => Err(format!("{}: a {} of that name is in the way", dev_str(&dir.join(name)), if existing.is_dir { "folder" } else { "file" })),
+            Policy::Replace => Err(format!(
+                "{}: a {} of that name is in the way",
+                dev_str(&dir.join(name)),
+                if existing.is_dir { "folder" } else { "file" }
+            )),
         }
     }
 
@@ -56,12 +73,24 @@ impl Worker {
     /// Merge: same name, different size (or file vs folder): left alone.
     pub(super) fn left_alone(&mut self, at: &Path) {
         self.merged.2 += 1;
-        crate::log::line(format!("merge: left in place (same name, different size): {}", dev_str(at)));
+        crate::log::line(format!(
+            "merge: left in place (same name, different size): {}",
+            dev_str(at)
+        ));
     }
 
-    pub(super) fn move_item(&mut self, src: &Path, dst_dir: &Path, policy: Policy, cancel: &AtomicBool) -> Result<(), String> {
+    pub(super) fn move_item(
+        &mut self,
+        src: &Path,
+        dst_dir: &Path,
+        policy: Policy,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
         if dst_dir.starts_with(src) {
-            return Err(format!("{}: cannot move a folder into itself", dev_str(src)));
+            return Err(format!(
+                "{}: cannot move a folder into itself",
+                dev_str(src)
+            ));
         }
         if src.parent() == Some(dst_dir) {
             return Ok(());
@@ -70,14 +99,25 @@ impl Worker {
         let name = entry.name.clone();
         self.progress(&name, 0);
         // A rename can't merge folders: an existing folder is in the way.
-        let policy = if entry.is_dir && policy == Policy::Replace { Policy::KeepBoth } else { policy };
-        let Some((target, _)) = self.place_on_device(dst_dir, &name, entry.is_dir, policy)? else { return Ok(()) };
+        let policy = if entry.is_dir && policy == Policy::Replace {
+            Policy::KeepBoth
+        } else {
+            policy
+        };
+        let Some((target, _)) = self.place_on_device(dst_dir, &name, entry.is_dir, policy)? else {
+            return Ok(());
+        };
         self.relocate(src, &target, entry.is_dir, entry.size as u64, cancel)
     }
 
     /// Delete `p` from the device; a folder is emptied first, since the
     /// device only removes empty ones.
-    pub(super) fn remove(&mut self, p: &Path, is_dir: bool, cancel: &AtomicBool) -> Result<(), String> {
+    pub(super) fn remove(
+        &mut self,
+        p: &Path,
+        is_dir: bool,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
@@ -98,7 +138,10 @@ impl Worker {
 
     /// `parent/name` of a device path, for the status bar.
     pub(super) fn short(p: &Path) -> String {
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         match p.parent().and_then(|d| d.file_name()) {
             Some(d) => format!("{}/{name}", d.to_string_lossy()),
             None => name,
@@ -109,7 +152,14 @@ impl Worker {
     /// folder into another folder, so when a rename is refused, rebuild the
     /// item at `target` piece by piece and remove the source. `size` is the
     /// file's size (0 for folders), counted into progress once it has moved.
-    pub(super) fn relocate(&mut self, src: &Path, target: &Path, is_dir: bool, size: u64, cancel: &AtomicBool) -> Result<(), String> {
+    pub(super) fn relocate(
+        &mut self,
+        src: &Path,
+        target: &Path,
+        is_dir: bool,
+        size: u64,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
@@ -125,7 +175,10 @@ impl Worker {
             }
             return Ok(());
         }
-        crate::log::line(format!("device: rename refused, moving {} piece by piece", dev_str(src)));
+        crate::log::line(format!(
+            "device: rename refused, moving {} piece by piece",
+            dev_str(src)
+        ));
         if is_dir {
             self.progress(&format!("{}/…", Self::short(src)), 0);
             self.with_conn(|c| c.mkdir(target))?;
@@ -134,7 +187,13 @@ impl Worker {
                 // Each child gets its own line, so a big folder visibly moves.
                 self.progress(&Self::short(&src.join(&k.name)), 0);
                 // Stop at the first failure so the source keeps what didn't move.
-                self.relocate(&src.join(&k.name), &target.join(&k.name), k.is_dir, k.size as u64, cancel)?;
+                self.relocate(
+                    &src.join(&k.name),
+                    &target.join(&k.name),
+                    k.is_dir,
+                    k.size as u64,
+                    cancel,
+                )?;
             }
             self.with_conn(|c| c.rmdir(src))?;
         } else {
@@ -148,17 +207,34 @@ impl Worker {
         Ok(())
     }
 
-    pub(super) fn upload(&mut self, src: &Path, dst_dir: &Path, policy: Policy, mono: Option<crate::audio::stats::Fold>, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {
+    pub(super) fn upload(
+        &mut self,
+        src: &Path,
+        dst_dir: &Path,
+        policy: Policy,
+        mono: Option<crate::audio::stats::Fold>,
+        cancel: &AtomicBool,
+        errors: &mut Vec<String>,
+    ) -> Result<(), String> {
         if src.is_dir() {
-            let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let Some((target, existing)) = self.place_on_device(dst_dir, &name, true, policy)? else { return Ok(()) };
+            let name = src
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Some((target, existing)) = self.place_on_device(dst_dir, &name, true, policy)?
+            else {
+                return Ok(());
+            };
             if existing.is_none() {
                 self.with_conn(|c| c.mkdir(&target))?;
             }
             let mut kids: Vec<PathBuf> = std::fs::read_dir(src)
                 .map_err(|e| format!("{}: {e}", src.display()))?
                 .filter_map(|d| d.ok().map(|d| d.path()))
-                .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+                .filter(|p| {
+                    !p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                })
                 .filter(|p| p.is_dir() || crate::fs_model::is_audio_path(p))
                 .collect();
             kids.sort();
@@ -175,19 +251,24 @@ impl Worker {
 
         let name = device_name(src);
         self.progress(&name, 0);
-        let mut s = crate::audio::decode::decode(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let mut s =
+            crate::audio::decode::decode(src).map_err(|e| format!("{}: {e}", src.display()))?;
         if let Some(fold) = mono.filter(|_| s.channels.len() > 1) {
             let one = (0..s.frames()).map(|i| fold.at(&s.channels, i)).collect();
             s.channels = vec![one];
         }
-        let Some((target, existing)) = self.place_on_device(dst_dir, &name, false, policy)? else { return Ok(()) };
+        let Some((target, existing)) = self.place_on_device(dst_dir, &name, false, policy)? else {
+            return Ok(());
+        };
         // Known only once connected, which placing the file made sure of.
         let stereo = mono.is_none() && self.conn.as_ref().is_some_and(|c| c.stereo);
         let raw = sample::to_device(&s, stereo);
         // What goes over the wire (converted, maybe folded) isn't the file's
         // size, which is what the bar's total counts: scale it to that, so
         // the bar doesn't jump when the next file starts.
-        let worth = std::fs::metadata(src).map(|m| m.len()).unwrap_or(raw.len() as u64);
+        let worth = std::fs::metadata(src)
+            .map(|m| m.len())
+            .unwrap_or(raw.len() as u64);
         if let Some(e) = existing {
             // Merging onto a file of that name: compare with what we'd send,
             // with or without the sample header.
@@ -206,7 +287,14 @@ impl Worker {
     /// `half`: this write follows a read of the same bytes (a device-to-device
     /// copy), and each counts for half. `worth`: the bar bytes the whole
     /// write counts for, when not its own length.
-    pub(super) fn write_raw(&mut self, target: &Path, raw: &[u8], half: bool, worth: Option<u64>, cancel: &AtomicBool) -> Result<(), String> {
+    pub(super) fn write_raw(
+        &mut self,
+        target: &Path,
+        raw: &[u8],
+        half: bool,
+        worth: Option<u64>,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
         let len = raw.len().max(1) as u64;
         let mut sent = 0u64;
         if let Some(p) = self.job.as_mut() {
@@ -233,7 +321,9 @@ impl Worker {
                 em.send(p.ev(""));
             }
         };
-        let Some(c) = self.conn.as_mut() else { return Err("not connected".into()) };
+        let Some(c) = self.conn.as_mut() else {
+            return Err("not connected".into());
+        };
         let res = c.write(target, raw, cancel, &mut on);
         let res = match res {
             Ok(()) => Ok(()),
@@ -247,7 +337,12 @@ impl Worker {
     }
 
     /// `half`: see [`Self::write_raw`].
-    pub(super) fn read_raw(&mut self, src: &Path, half: bool, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+    pub(super) fn read_raw(
+        &mut self,
+        src: &Path,
+        half: bool,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, String> {
         if let Some(p) = self.job.as_mut() {
             p.file = None;
         }
@@ -258,7 +353,12 @@ impl Worker {
         loop {
             let res = self.read_once(src, half, cancel);
             match res {
-                Err(e) if attempt < FILE_TRIES && self.conn.is_some() && !cancel.load(Ordering::Relaxed) && e.starts_with("read failed") => {
+                Err(e)
+                    if attempt < FILE_TRIES
+                        && self.conn.is_some()
+                        && !cancel.load(Ordering::Relaxed)
+                        && e.starts_with("read failed") =>
+                {
                     crate::log::line(format!("device: {e} (attempt {attempt}), reading it again"));
                     attempt += 1;
                     if start.is_some() {
@@ -272,7 +372,10 @@ impl Worker {
                 }
                 res => {
                     if res.is_ok() && attempt > 1 {
-                        crate::log::line(format!("device: {} read fine on attempt {attempt}", dev_str(src)));
+                        crate::log::line(format!(
+                            "device: {} read fine on attempt {attempt}",
+                            dev_str(src)
+                        ));
                     }
                     return res;
                 }
@@ -280,7 +383,12 @@ impl Worker {
         }
     }
 
-    pub(super) fn read_once(&mut self, src: &Path, half: bool, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
+    pub(super) fn read_once(
+        &mut self,
+        src: &Path,
+        half: bool,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, String> {
         // `progress` borrows self, so track bytes locally while the
         // connection is borrowed and fold them back in after.
         let mut prog = self.job;
@@ -297,7 +405,9 @@ impl Worker {
                 em.send(p.ev(""));
             }
         };
-        let Some(c) = self.conn.as_mut() else { return Err("not connected".into()) };
+        let Some(c) = self.conn.as_mut() else {
+            return Err("not connected".into());
+        };
         let res = c.read(src, cancel, &mut on);
         let res = match res {
             Ok(v) => Ok(v),
@@ -310,7 +420,14 @@ impl Worker {
         res
     }
 
-    pub(super) fn download(&mut self, src: &Path, dst_dir: &Path, policy: Policy, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {
+    pub(super) fn download(
+        &mut self,
+        src: &Path,
+        dst_dir: &Path,
+        policy: Policy,
+        cancel: &AtomicBool,
+        errors: &mut Vec<String>,
+    ) -> Result<(), String> {
         let entry = self.stat(src)?;
         if entry.is_dir {
             let target = dst_dir.join(&entry.name);
@@ -346,7 +463,12 @@ impl Worker {
                 // whether or not the device's size counts its own header.
                 let have = std::fs::metadata(&target).map_or(0, |m| m.len());
                 let data = entry.size as u64;
-                if [data + 44, (data + 44).saturating_sub(sample::HEADER_LEN as u64)].contains(&have) {
+                if [
+                    data + 44,
+                    (data + 44).saturating_sub(sample::HEADER_LEN as u64),
+                ]
+                .contains(&have)
+                {
                     self.already_there(data);
                 } else {
                     self.left_alone(&target);
@@ -362,14 +484,32 @@ impl Worker {
         Ok(())
     }
 
-    pub(super) fn copy(&mut self, src: &Path, dst_dir: &Path, policy: Policy, cancel: &AtomicBool, errors: &mut Vec<String>) -> Result<(), String> {
+    pub(super) fn copy(
+        &mut self,
+        src: &Path,
+        dst_dir: &Path,
+        policy: Policy,
+        cancel: &AtomicBool,
+        errors: &mut Vec<String>,
+    ) -> Result<(), String> {
         if dst_dir.starts_with(src) {
-            return Err(format!("{}: cannot copy a folder into itself", dev_str(src)));
+            return Err(format!(
+                "{}: cannot copy a folder into itself",
+                dev_str(src)
+            ));
         }
         let entry = self.stat(src)?;
         // Copying into the same folder always makes a second item.
-        let policy = if src.parent() == Some(dst_dir) { Policy::KeepBoth } else { policy };
-        let Some((target, existing)) = self.place_on_device(dst_dir, &entry.name, entry.is_dir, policy)? else { return Ok(()) };
+        let policy = if src.parent() == Some(dst_dir) {
+            Policy::KeepBoth
+        } else {
+            policy
+        };
+        let Some((target, existing)) =
+            self.place_on_device(dst_dir, &entry.name, entry.is_dir, policy)?
+        else {
+            return Ok(());
+        };
         if entry.is_dir {
             if existing.is_none() {
                 self.with_conn(|c| c.mkdir(&target))?;

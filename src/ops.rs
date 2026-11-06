@@ -103,7 +103,10 @@ pub fn plan(
         let dst = dest_dir.join(name);
 
         if dst == *src {
-            rejected.push((src.clone(), "source and destination are the same".to_owned()));
+            rejected.push((
+                src.clone(),
+                "source and destination are the same".to_owned(),
+            ));
             continue;
         }
         // Copying a directory into its own subtree would recurse forever.
@@ -127,7 +130,11 @@ pub fn plan(
         });
     }
 
-    Plan { kind, ops, rejected }
+    Plan {
+        kind,
+        ops,
+        rejected,
+    }
 }
 
 /// Resolve every conflicting op with `policy`, returning the ops to execute.
@@ -143,7 +150,10 @@ pub fn resolve(plan: &Plan, policy: Policy) -> Vec<Op> {
             }
             match policy {
                 Policy::Skip | Policy::Merge => None,
-                Policy::Replace => Some(Op { conflict: false, ..op.clone() }),
+                Policy::Replace => Some(Op {
+                    conflict: false,
+                    ..op.clone()
+                }),
                 Policy::KeepBoth => Some(Op {
                     dst: unique_sibling(&op.dst),
                     conflict: false,
@@ -193,7 +203,13 @@ fn merge_item(src: &Path, dst: &Path, is_dir: bool, m: &mut Merge) {
     let src_len = || std::fs::symlink_metadata(src).map_or(0, |md| md.len());
     let Ok(there) = std::fs::symlink_metadata(dst) else {
         let approx_bytes = if is_dir { 0 } else { src_len() };
-        m.ops.push(Op { src: src.to_path_buf(), dst: dst.to_path_buf(), approx_bytes, is_dir, conflict: false });
+        m.ops.push(Op {
+            src: src.to_path_buf(),
+            dst: dst.to_path_buf(),
+            approx_bytes,
+            is_dir,
+            conflict: false,
+        });
         return;
     };
     if is_dir && there.is_dir() {
@@ -241,9 +257,15 @@ pub fn already_there(src: &Path, dst: &Path) -> bool {
     }
     for e in walkdir::WalkDir::new(src).min_depth(1) {
         let Ok(e) = e else { return false };
-        let Ok(rel) = e.path().strip_prefix(src) else { return false };
+        let Ok(rel) = e.path().strip_prefix(src) else {
+            return false;
+        };
         let there = dst.join(rel);
-        let ok = if e.file_type().is_dir() { there.is_dir() } else { same_file(e.path(), &there) };
+        let ok = if e.file_type().is_dir() {
+            there.is_dir()
+        } else {
+            same_file(e.path(), &there)
+        };
         if !ok {
             return false;
         }

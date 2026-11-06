@@ -2,7 +2,13 @@
 
 use super::*;
 
-pub(super) fn overview(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, out: &mut Vec<EdIntent>) {
+pub(super) fn overview(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    pv: &PlayView,
+    rect: Rect,
+    out: &mut Vec<EdIntent>,
+) {
     let frames = ed.frames();
     if frames == 0 {
         return;
@@ -33,33 +39,58 @@ pub(super) fn overview(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, rect: Rect, 
                 hi = hi.max(h.abs()).max(lo.abs());
             }
             let xx = rect.left() + px as f32 + 0.5;
-            painter.line_segment([Pos2::new(xx, mid - hi * half), Pos2::new(xx, mid + hi * half + 0.5)], Stroke::new(1.0, col));
+            painter.line_segment(
+                [
+                    Pos2::new(xx, mid - hi * half),
+                    Pos2::new(xx, mid + hi * half + 0.5),
+                ],
+                Stroke::new(1.0, col),
+            );
         }
     }
 
     // Visible window.
     let vw = Rect::from_x_y_ranges(
-        x(ed.view.start)..=x(ed.view.start + ed.view.fpp * ed.wave_rect.map_or(0.0, |r| r.width() as f64)),
+        x(ed.view.start)
+            ..=x(ed.view.start + ed.view.fpp * ed.wave_rect.map_or(0.0, |r| r.width() as f64)),
         rect.y_range(),
     );
-    painter.rect_stroke(vw, 2.0, Stroke::new(1.0, vis.strong_text_color()), egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        vw,
+        2.0,
+        Stroke::new(1.0, vis.strong_text_color()),
+        egui::StrokeKind::Inside,
+    );
     if ed.is_kit {
         for f in ed.marks() {
             let xx = x(f as f64);
-            painter.line_segment([Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())], Stroke::new(1.0, MARK_COLOR.gamma_multiply(0.7)));
+            painter.line_segment(
+                [Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())],
+                Stroke::new(1.0, MARK_COLOR.gamma_multiply(0.7)),
+            );
         }
     }
     for (f, c) in [(ed.sel.0, IN_COLOR), (ed.sel.1, OUT_COLOR)] {
         let xx = x(f as f64);
-        painter.line_segment([Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())], Stroke::new(1.0, c));
+        painter.line_segment(
+            [Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())],
+            Stroke::new(1.0, c),
+        );
     }
     if pv.playing {
         let xx = x(pv.pos as f64);
-        painter.line_segment([Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())], Stroke::new(1.0, PLAY_COLOR));
+        painter.line_segment(
+            [Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())],
+            Stroke::new(1.0, PLAY_COLOR),
+        );
     }
 
     // Click or drag to centre the main view there.
-    let resp = ui.interact(rect, ui.scope_id().with("overview"), Sense::click_and_drag());
+    let resp = ui.interact(
+        rect,
+        ui.scope_id().with("overview"),
+        Sense::click_and_drag(),
+    );
     if resp.clicked() || resp.dragged() {
         out.push(EdIntent::TookFocus);
         if let Some(p) = resp.interact_pointer_pos() {

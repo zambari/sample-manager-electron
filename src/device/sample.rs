@@ -71,7 +71,8 @@ pub fn write_wav(raw: &[u8], target: &Path) -> Result<(), String> {
     // Drop a trailing partial frame rather than writing half of one.
     let usable = data.len() / frame * frame;
     for pair in data[..usable].chunks_exact(2) {
-        w.write_sample(i16::from_be_bytes([pair[0], pair[1]])).map_err(|e| e.to_string())?;
+        w.write_sample(i16::from_be_bytes([pair[0], pair[1]]))
+            .map_err(|e| e.to_string())?;
     }
     w.finalize().map_err(|e| e.to_string())
 }

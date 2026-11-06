@@ -30,3 +30,6 @@ tarpaulin-report.html
 .DS_Store
 Thumbs.db
 .claude/
+
+# Research notes (local only for now)
+project_discovery.md

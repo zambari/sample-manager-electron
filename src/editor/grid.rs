@@ -38,7 +38,9 @@ impl Editor {
     /// The slices the markers mark out (whole file), trailing silence trimmed,
     /// so a grid slot gives back just its sound.
     fn slices(&self) -> Vec<Slice> {
-        let Some(full) = &self.full else { return Vec::new() };
+        let Some(full) = &self.full else {
+            return Vec::new();
+        };
         let ch = &full.sample.channels;
         let mut bounds = vec![0];
         bounds.extend(&self.markers);
@@ -47,7 +49,10 @@ impl Editor {
             .windows(2)
             .map(|w| {
                 let (a, b) = (w[0], w[1]);
-                let end = (a..b).rev().find(|&f| ch.iter().any(|c| c[f] != 0.0)).map_or(a, |f| f + 1);
+                let end = (a..b)
+                    .rev()
+                    .find(|&f| ch.iter().any(|c| c[f] != 0.0))
+                    .map_or(a, |f| f + 1);
                 ch.iter().map(|c| c[a..end].to_vec()).collect()
             })
             .collect()
@@ -64,7 +69,12 @@ impl Editor {
             slices.remove(i);
         }
         slices.resize(n, vec![Vec::new(); nch]);
-        let len = slices.iter().map(|s| s.first().map_or(0, Vec::len)).max().unwrap_or(0).max(1);
+        let len = slices
+            .iter()
+            .map(|s| s.first().map_or(0, Vec::len))
+            .max()
+            .unwrap_or(0)
+            .max(1);
         let chans: Vec<Vec<f32>> = (0..nch)
             .map(|c| {
                 let mut v = Vec::with_capacity(len * n);
@@ -103,15 +113,36 @@ impl Editor {
         let sounding = s.iter().filter(|s| !is_empty(s)).count();
         let auto = n == AUTO_GRID;
         let too_many = |n: usize| format!("The kit has {sounding} slices — too many for {n} slots");
-        let n = if auto { auto_size(sounding).ok_or_else(|| too_many(16))? } else { n };
+        let n = if auto {
+            auto_size(sounding).ok_or_else(|| too_many(16))?
+        } else {
+            n
+        };
         self.lay_out(s, n).ok_or_else(|| too_many(n))?;
         self.auto_grid = auto;
         Ok(())
     }
 
+    /// How many slices hold any sound.
+    pub fn sounding_slices(&self) -> usize {
+        let Some(full) = &self.full else { return 0 };
+        let ch = &full.sample.channels;
+        let mut bounds = vec![0];
+        bounds.extend(&self.markers);
+        bounds.push(full.sample.frames());
+        bounds
+            .windows(2)
+            .filter(|w| (w[0]..w[1]).any(|f| ch.iter().any(|c| c[f] != 0.0)))
+            .count()
+    }
+
     /// The grid as picked: [`AUTO_GRID`], a slot count, or free.
     pub fn grid_mode(&self) -> Option<usize> {
-        if self.auto_grid { Some(AUTO_GRID) } else { self.grid }
+        if self.auto_grid {
+            Some(AUTO_GRID)
+        } else {
+            self.grid
+        }
     }
 
     /// How far down the kit you are: the slot after the last one that
@@ -123,11 +154,16 @@ impl Editor {
         if total == 0 {
             return 0;
         }
-        let Some(n) = self.grid else { return self.markers.len() + 1 };
+        let Some(n) = self.grid else {
+            return self.markers.len() + 1;
+        };
         let len = total / n;
         (0..n)
             .rev()
-            .find(|&i| ch.iter().any(|c| c[i * len..(i + 1) * len].iter().any(|&x| x != 0.0)))
+            .find(|&i| {
+                ch.iter()
+                    .any(|c| c[i * len..(i + 1) * len].iter().any(|&x| x != 0.0))
+            })
             .map_or(0, |i| i + 1)
     }
 
@@ -139,7 +175,9 @@ impl Editor {
         let Some(full) = &self.full else { return };
         let ch = &full.sample.channels;
         let total = full.sample.frames();
-        let Some(last) = (0..total).rev().find(|&f| ch.iter().any(|c| c[f] != 0.0)) else { return };
+        let Some(last) = (0..total).rev().find(|&f| ch.iter().any(|c| c[f] != 0.0)) else {
+            return;
+        };
         let end = last + 1;
         if end >= total {
             return;
@@ -157,14 +195,22 @@ impl Editor {
     /// Add `clip` in the first slot after the last one that sounds, then
     /// select that slot.
     pub(super) fn append_on_grid(&mut self, clip: &AudioClip, n: usize) -> Result<(), String> {
-        let Some(full) = &self.full else { return Err("No kit loaded".to_owned()) };
+        let Some(full) = &self.full else {
+            return Err("No kit loaded".to_owned());
+        };
         let ins = clip.adapt(full.sample.rate, full.sample.channels.len());
         let mut s = self.slices();
         let at = s.iter().rposition(|x| !is_empty(x)).map_or(0, |i| i + 1);
         let n = match (at >= n, self.auto_grid) {
             (false, _) => n,
-            (true, true) => auto_size(at + 1).ok_or(format!("All {n} slots are full — remove a slice to add more"))?,
-            (true, false) => return Err(format!("All {n} slots are full — remove a slice or pick a bigger grid")),
+            (true, true) => auto_size(at + 1).ok_or(format!(
+                "All {n} slots are full — remove a slice to add more"
+            ))?,
+            (true, false) => {
+                return Err(format!(
+                    "All {n} slots are full — remove a slice or pick a bigger grid"
+                ));
+            }
         };
         s.resize(n.max(s.len()), Vec::new());
         s[at] = ins;
@@ -187,7 +233,9 @@ impl Editor {
         if self.lay_out(s, n).is_none() {
             self.grid = None;
             self.auto_grid = false;
-            self.notice = Some(format!("The kit has more than {n} slices now — grid turned off (pick a bigger one to put it back)"));
+            self.notice = Some(format!(
+                "The kit has more than {n} slices now — grid turned off (pick a bigger one to put it back)"
+            ));
             return;
         }
         let total = self.frames();
@@ -206,6 +254,10 @@ impl Editor {
             return None;
         }
         let len = total / n;
-        self.markers.iter().enumerate().all(|(i, &m)| m == (i + 1) * len).then_some(n)
+        self.markers
+            .iter()
+            .enumerate()
+            .all(|(i, &m)| m == (i + 1) * len)
+            .then_some(n)
     }
 }

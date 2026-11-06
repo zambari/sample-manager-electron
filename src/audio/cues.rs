@@ -47,7 +47,11 @@ pub fn append(path: &Path, frames: &[usize]) -> Result<(), String> {
         return Ok(());
     }
     let err = |e: std::io::Error| format!("writing cue points: {e}");
-    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path).map_err(err)?;
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(err)?;
     let mut len = f.seek(SeekFrom::End(0)).map_err(err)?;
     if len & 1 == 1 {
         f.write_all(&[0]).map_err(err)?;

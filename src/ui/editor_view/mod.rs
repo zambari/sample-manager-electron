@@ -27,7 +27,6 @@ use scope::scope;
 use toolbar::{header, positions, slot_bar, toolbar};
 use waveform::{draw_lanes, draw_ruler, marker, slice_marks, waveform};
 
-
 pub struct PlayView {
     /// True when the engine is playing *this* sample.
     pub playing: bool,
@@ -54,6 +53,8 @@ pub enum EdIntent {
     SwitchKit(usize),
     /// Start another kit from the sample's selection.
     NewKit,
+    /// Switch the column to the Elk Sample Order view.
+    ElkMode,
 }
 
 /// One open kit, for the kit switcher.
@@ -104,7 +105,14 @@ const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
 const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
 const MARK_COLOR: Color32 = Color32::from_rgb(200, 140, 245);
 
-pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_export: bool, slots: &Slots) -> Vec<EdIntent> {
+pub fn show(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    pv: PlayView,
+    focused: bool,
+    can_export: bool,
+    slots: &Slots,
+) -> Vec<EdIntent> {
     let mut out = Vec::new();
 
     header(ui, ed, focused, &mut out);
@@ -113,7 +121,10 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
 
     if ed.current.is_none() {
         let msg = if let Some(p) = &ed.loading {
-            format!("Loading {} …", p.file_name().unwrap_or_default().to_string_lossy())
+            format!(
+                "Loading {} …",
+                p.file_name().unwrap_or_default().to_string_lossy()
+            )
         } else if let Some(e) = &ed.error {
             e.clone()
         } else {
@@ -156,7 +167,14 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
     // Measure the wrapped help text so the waveform leaves room for it.
     let help_font = egui::TextStyle::Small.resolve(ui.style());
     let help_h = if pn.help {
-        let g = ui.fonts_mut(|f| f.layout(crate::keymap::EDITOR_HELP.to_owned(), help_font.clone(), egui::Color32::WHITE, avail.x));
+        let g = ui.fonts_mut(|f| {
+            f.layout(
+                crate::keymap::EDITOR_HELP.to_owned(),
+                help_font.clone(),
+                egui::Color32::WHITE,
+                avail.x,
+            )
+        });
         g.size().y + sec
     } else {
         0.0
@@ -209,7 +227,11 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
 /// Live around the play cursor while playing, else over the region.
 fn phase_meter(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
     let live = pv.playing;
-    let ph = if live { ed.phase_at(pv.pos) } else { ed.region_phase() };
+    let ph = if live {
+        ed.phase_at(pv.pos)
+    } else {
+        ed.region_phase()
+    };
     ui.horizontal(|ui| {
         ui.label(RichText::new("Phase").weak()).on_hover_text(
             "L/R correlation. +1: both sides the same (mono-safe). 0: unrelated / very wide. \

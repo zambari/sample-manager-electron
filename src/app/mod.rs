@@ -9,27 +9,28 @@
 //!    never dropped on the floor.
 
 use crate::audio::engine::{DeviceInfo, Engine, PlayParams};
+use crate::audio::stats::Fold;
 use crate::device::{self, Device};
 use crate::editor::{Editor, Outcome};
 use crate::fs_model::{self, SortKey};
 use crate::jobs::{Ev, Jobs};
 use crate::keymap::{self, Action, EdAction, Keymap, Nudge};
-use crate::ui::editor_view::{self, EdIntent, PlayView};
 use crate::ops::{self, Clipboard, Kind, Plan, Policy};
 use crate::pane::{Pane, Role};
 use crate::preview::Preview;
 use crate::sizes::SizeCache;
-use crate::audio::stats::Fold;
 use crate::state;
 use crate::tab::DirTab;
 use crate::ui::dialogs::{self, Decision, LeaveChoice, SaveScope};
-use crate::ui::theme;
+use crate::ui::editor_view::{self, EdIntent, PlayView};
 use crate::ui::file_table::{self, DragPayload, Intent, TableCtx};
+use crate::ui::theme;
 use std::path::{Path, PathBuf};
 
 mod actions;
 mod bars;
 mod editing;
+mod elk;
 use editing::ExportNaming;
 mod kit;
 mod nav;
@@ -50,10 +51,16 @@ enum PlanKind {
     Transfer,
     /// A commit: ops whose source is in `fold` are mono-folded exports, the
     /// rest are plain copies.
-    Commit { fold: std::collections::HashSet<PathBuf>, dest_dir: PathBuf },
+    Commit {
+        fold: std::collections::HashSet<PathBuf>,
+        dest_dir: PathBuf,
+    },
     /// Anything touching the device. Op destinations are only used to ask
     /// about conflicts; the device worker settles the final names.
-    Device { dir: device::Dir, mono: Option<Fold> },
+    Device {
+        dir: device::Dir,
+        mono: Option<Fold>,
+    },
     /// The editor's export, rendered locally and then uploaded (one op).
     DeviceExport { mono: Option<Fold> },
 }
@@ -66,6 +73,8 @@ enum Leave {
     Audition(PathBuf, bool),
     /// `load_into_editor`, e.g. a fresh download from the device.
     LoadEditor(PathBuf),
+    /// The kit's [x]: close it once saved or discarded.
+    CloseKit,
     Quit,
 }
 
@@ -215,6 +224,9 @@ pub struct App {
     leave_pending: Option<Leave>,
     /// Chose to save first: carry on with this once the export lands.
     leave_after_save: Option<Leave>,
+    /// The kit was saved or discarded after its [x]: close it next frame
+    /// (not mid-absorb, when the slots may be swapped).
+    close_kit_now: bool,
     /// Save in place is waiting on "trim to selection or whole file?".
     save_scope_pending: bool,
     /// Files the editor is writing (`None`) or just wrote (when), for the
@@ -226,17 +238,25 @@ pub struct App {
     allow_close: bool,
     /// Close once the running job (an upload of the saved edit) finishes.
     close_when_idle: bool,
+    /// The centre column shows the Elk Sample Order view instead of the editor.
+    elk_mode: bool,
+    elk: crate::ui::elk_view::ElkState,
 }
 
 impl App {
     pub fn new(ctx: egui::Context, storage: Option<&dyn eframe::Storage>) -> Self {
         theme::apply(&ctx);
+        theme::install_fonts(&ctx);
         let home = dirs_home();
         let saved = state::load(storage);
         let mut next_tab_id = 0;
         let mut mk = |p: PathBuf, device: bool| {
             next_tab_id += 1;
-            if device { DirTab::new_device(next_tab_id, p) } else { DirTab::new(next_tab_id, p) }
+            if device {
+                DirTab::new_device(next_tab_id, p)
+            } else {
+                DirTab::new(next_tab_id, p)
+            }
         };
         let mut restore = |role: Role, ps: Option<&state::PaneState>| -> Pane {
             let mut tabs: Vec<DirTab> = ps
@@ -261,22 +281,37 @@ impl App {
                 tabs.push(mk(home.clone(), false));
             }
             let active = ps.map_or(0, |ps| ps.active).min(tabs.len() - 1);
-            Pane { role, tabs, active, last_local: None }
+            Pane {
+                role,
+                tabs,
+                active,
+                last_local: None,
+            }
         };
         let source = restore(Role::Source, saved.as_ref().map(|s| &s.source));
         let dest = restore(Role::Dest, saved.as_ref().map(|s| &s.dest));
 
         let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
         let engine = Engine::open(output_device.as_deref());
-        let mut editor = Editor::new(ctx.clone(), saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default());
-        let session = saved.as_ref().and_then(|s| s.session.clone()).filter(|s| s.path.is_file());
+        let mut editor = Editor::new(
+            ctx.clone(),
+            saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default(),
+        );
+        let session = saved
+            .as_ref()
+            .and_then(|s| s.session.clone())
+            .filter(|s| s.path.is_file());
         if let Some(s) = &session {
             editor.restore_session(s);
         }
         let mut other = Editor::new(ctx.clone(), editor.prefs.clone());
         // The hidden slot starts out as the kit; `close` keeps the flag.
         other.is_kit = true;
-        if let Some(s) = saved.as_ref().and_then(|s| s.kit_session.clone()).filter(|s| s.path.is_file()) {
+        if let Some(s) = saved
+            .as_ref()
+            .and_then(|s| s.kit_session.clone())
+            .filter(|s| s.path.is_file())
+        {
             other.restore_session(&s);
         }
         let parked = saved
@@ -310,15 +345,26 @@ impl App {
             showing_kit: false,
             parked,
             kit_pending: None,
-            kit_grid: saved.as_ref().map_or(Some(crate::editor::AUTO_GRID), |s| s.kit_grid),
+            kit_grid: saved
+                .as_ref()
+                .map_or(Some(crate::editor::AUTO_GRID), |s| s.kit_grid),
             kit_naming: None,
             editor_focused: false,
             devices: Engine::devices(),
             output_device,
-            favourites: saved.as_ref().map(|s| s.favourites.clone()).unwrap_or_default(),
-            opened: saved.as_ref().map(|s| s.opened.iter().cloned().collect()).unwrap_or_default(),
+            favourites: saved
+                .as_ref()
+                .map(|s| s.favourites.clone())
+                .unwrap_or_default(),
+            opened: saved
+                .as_ref()
+                .map(|s| s.opened.iter().cloned().collect())
+                .unwrap_or_default(),
             opened_dirty: false,
-            committed: saved.as_ref().map(|s| s.committed.iter().cloned().collect()).unwrap_or_default(),
+            committed: saved
+                .as_ref()
+                .map(|s| s.committed.iter().cloned().collect())
+                .unwrap_or_default(),
             committed_dirty: false,
             voice_path: None,
             voice_sample: None,
@@ -334,11 +380,14 @@ impl App {
             device_load: None,
             leave_pending: None,
             leave_after_save: None,
+            close_kit_now: false,
             save_scope_pending: false,
             export_naming: None,
             saving: Default::default(),
             allow_close: false,
             close_when_idle: false,
+            elk_mode: false,
+            elk: Default::default(),
             jobs,
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
@@ -465,8 +514,8 @@ impl eframe::App for App {
         // eframe only autosaves on a frame. After a change, make sure one
         // happens once the interval has passed, even if the app goes idle.
         let snap = self.snapshot(false);
-        if self.last_state.as_ref() != Some(&snap) || std::mem::take(&mut self.opened_dirty)
-            | std::mem::take(&mut self.committed_dirty)
+        if self.last_state.as_ref() != Some(&snap)
+            || std::mem::take(&mut self.opened_dirty) | std::mem::take(&mut self.committed_dirty)
         {
             self.last_state = Some(snap);
             ctx.request_repaint_after(state::SAVE_INTERVAL + std::time::Duration::from_millis(100));
@@ -492,6 +541,9 @@ impl eframe::App for App {
         }
         self.window_focused = focused;
         self.absorb_editors();
+        if std::mem::take(&mut self.close_kit_now) && self.has_kit() {
+            self.close_kit();
+        }
 
         // Edits apply live to the running voice: drag an out point while the
         // loop plays and you hear the seam move.
@@ -504,10 +556,15 @@ impl eframe::App for App {
                 self.start_play();
             }
             let ed = &self.editor;
-            self.engine.update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain(), ed.fold());
+            self.engine
+                .update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain(), ed.fold());
             ctx.request_repaint();
         }
-        self.preview.set(if self.engine.is_playing() { self.voice_path.clone() } else { None });
+        self.preview.set(if self.engine.is_playing() {
+            self.voice_path.clone()
+        } else {
+            None
+        });
 
         if let Some(e) = self.engine.stream_error() {
             if self.last_stream_error.as_ref() != Some(&e) {
@@ -528,7 +585,11 @@ impl eframe::App for App {
         const MIN_EDITOR_W: f32 = 360.0;
         let w = ui.available_width();
         let default_w = w * 0.27;
-        let prev_r = if self.side_widths[1] > 0.0 { self.side_widths[1] } else { default_w };
+        let prev_r = if self.side_widths[1] > 0.0 {
+            self.side_widths[1]
+        } else {
+            default_w
+        };
         let max_for = |other: f32| (w - other - MIN_EDITOR_W).max(MIN_SIDE_W);
 
         let left = egui::Panel::left("source_col")
@@ -544,15 +605,32 @@ impl eframe::App for App {
             .show(ui, |ui| self.show_pane(ui, Role::Dest));
         self.side_widths[1] = right.response.rect.width();
         draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
-        draw_divider(ui, right.response.rect.left(), right.response.rect.y_range());
+        draw_divider(
+            ui,
+            right.response.rect.left(),
+            right.response.rect.y_range(),
+        );
 
-        egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.elk_mode {
+                self.show_elk(ui)
+            } else {
+                self.show_editor(ui)
+            }
+        });
 
         // Modal last, so it paints over both panes.
         if let Some(p) = &self.pending {
             // A device move is a rename, which can't merge folders.
-            let can_merge = matches!(p.what, PlanKind::Transfer | PlanKind::Commit { .. } | PlanKind::Device { dir: device::Dir::Upload | device::Dir::Download | device::Dir::Copy, .. })
-                && p.plan.ops.iter().any(|o| o.conflict && o.is_dir);
+            let can_merge = matches!(
+                p.what,
+                PlanKind::Transfer
+                    | PlanKind::Commit { .. }
+                    | PlanKind::Device {
+                        dir: device::Dir::Upload | device::Dir::Download | device::Dir::Copy,
+                        ..
+                    }
+            ) && p.plan.ops.iter().any(|o| o.conflict && o.is_dir);
             if let Some(decision) = dialogs::conflicts(ui.ctx(), &p.plan, can_merge) {
                 let pending = self.pending.take().expect("checked above");
                 match decision {
@@ -616,7 +694,8 @@ impl eframe::App for App {
         // Closing the window with unsaved audio edits: ask first.
         let close = ui.ctx().input(|i| i.viewport().close_requested());
         if close && self.any_dirty() && !self.allow_close {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.leave_pending.is_none() && self.leave_after_save.is_none() {
                 // Ask about whichever slot has the unsaved edits.
                 self.front_dirty();
@@ -625,14 +704,31 @@ impl eframe::App for App {
         }
 
         if let Some(leave) = self.leave_pending.clone() {
-            let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+            let name = self
+                .editor
+                .path()
+                .and_then(|p| p.file_name())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             let tab = self.pane(Role::Dest).active_tab();
             let dest = (!tab.loading).then(|| {
-                let d = tab.cwd.file_name().map_or_else(|| tab.cwd.display().to_string(), |n| n.to_string_lossy().into_owned());
-                if tab.device { format!("{d} on the device") } else { d }
+                let d = tab.cwd.file_name().map_or_else(
+                    || tab.cwd.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                if tab.device {
+                    format!("{d} on the device")
+                } else {
+                    d
+                }
             });
-            let quitting = matches!(leave, Leave::Quit);
-            if let Some(c) = dialogs::leave_editor(ui.ctx(), &name, quitting, dest.as_deref()) {
+            let why = match leave {
+                Leave::Quit => dialogs::LeaveWhy::Quit,
+                Leave::CloseKit => dialogs::LeaveWhy::CloseKit,
+                _ => dialogs::LeaveWhy::Open,
+            };
+            if let Some(c) = dialogs::leave_editor(ui.ctx(), &name, why, dest.as_deref()) {
                 self.leave_pending = None;
                 self.answer_leave(leave, c);
             }
@@ -651,7 +747,13 @@ impl eframe::App for App {
         }
 
         if self.save_scope_pending {
-            let name = self.editor.path().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy().into_owned();
+            let name = self
+                .editor
+                .path()
+                .and_then(|p| p.file_name())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             let secs = |n: usize| self.editor.sample().map_or(0.0, |s| s.seconds(n));
             let sel = secs(self.editor.sel.1 - self.editor.sel.0);
             let whole = self.editor.file_seconds();
@@ -754,7 +856,10 @@ fn draw_divider(ui: &egui::Ui, x: f32, ys: egui::Rangef) {
         egui::Id::unique("column_dividers"),
     ));
     let visuals = &ui.style().visuals;
-    let line = egui::Stroke::new(1.0, visuals.widgets.inactive.bg_stroke.color.gamma_multiply(1.6));
+    let line = egui::Stroke::new(
+        1.0,
+        visuals.widgets.inactive.bg_stroke.color.gamma_multiply(1.6),
+    );
     painter.vline(x, ys, line);
 
     // Grip: three dots centred on the divider.
