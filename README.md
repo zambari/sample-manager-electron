@@ -86,10 +86,23 @@ single file (handy for chains of drum hits).
 
 **Grid kits.** The Digitakt 1 can only slice a file into equal parts, so a
 kit can be laid out on 4, 8 or 16 equal slots: each slice starts its own
-slot, padded with silence to the longest one. *Auto* grows the grid as you
-add slices and shrinks it when you cut them. Exported grid kits get the
-slot count in their name (`[8] drums.wav`), and a file named like that
-opens as a grid kit.
+slot, padded with silence to the longest one, so every slice plays from
+its real start on the device.
+
+- Pick the layout in the new-kit dialog or with the switch next to the
+  Kit tab: *Free*, *Auto*, 4, 8 or 16. *Auto* starts at 4 and grows to 8,
+  then 16, as you add slices, and shrinks again when you cut them.
+- **K** fills the next free slot. Cuts, pastes and inserted silence snap
+  everything back onto the grid; if the slices no longer fit, the kit
+  goes back to free layout instead of losing anything.
+- Switching to *Free* keeps the slices where they are and drops the empty
+  slots and padding left at the end.
+- Exported grid kits get the slot count in their name (`[8] drums.wav`).
+  A file named like that, or one whose markers split it evenly, opens as
+  a grid kit.
+- Samples you've taken a slice from get the same check mark in the
+  browser as files committed to the destination, so you can see what's
+  already in the kit.
 
 ### Elk Sample Order
 
@@ -100,6 +113,21 @@ any other (in any bank) to swap them, or select several and move them with
 the device's memory, updating patterns, kits and sounds to match. Only the
 parts that changed are sent. Saved projects on the +Drive are never
 written; save the project on the device to keep the result.
+
+Two panes show two banks side by side; drag onto a bank tab or into the
+other pane to move samples between banks. Hold **⌃** or **⌥** while
+dropping to insert and shift the following slots instead of swapping.
+The `×N` column shows how many times the project uses each sample (kit
+tracks, sample locks and sounds).
+
+![Elk Sample Order: two bank panes of a Digitakt II project](docs/elk_sample_order.png)
+
+> **Use at your own risk.** Push to memory rewrites the project that is
+> currently loaded on the device. The saved copy on the +Drive is left
+> alone, but the reverse-engineered project format may still have gaps.
+> **Save your project on the Digitakt before pushing**, so you can reload
+> it if anything comes out wrong, and only save over it once you've
+> checked the result.
 
 ### Drag and drop
 
@@ -165,7 +193,12 @@ Finder / Explorer), `serde`, `trash` and
 `walkdir`. Almost all of the dependency tree is MIT and/or Apache-2.0
 licensed. Exceptions: `symphonia` is MPL-2.0 (file-level copyleft; we use
 it unmodified), and egui's bundled default fonts are under the SIL Open Font
-License and the Ubuntu Font Licence. Run `cargo metadata` or
+License and the Ubuntu Font Licence.
+
+The device-screen pixel font is **[Silkscreen](https://kottke.org/plus/type/silkscreen/)
+by Jason Kottke** (2001), used under the SIL Open Font License 1.1 (see
+[`assets/slkscr-OFL.txt`](assets/slkscr-OFL.txt)). It suits the Elektron
+screens perfectly. Thank you, Jason. Run `cargo metadata` or
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) for the full
 list. No third-party file-browser library is used; the file browser is
 written from scratch on top of `walkdir` and `trash`.
