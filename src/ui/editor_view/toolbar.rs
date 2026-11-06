@@ -48,17 +48,8 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
         }
         // No kit yet: nothing to show until K starts one.
         if let Some(k) = &s.kit_name {
-            let mut label = format!("Kit: {}", crate::app::short_name(k, 28));
-            if s.kit_dirty {
-                label.push_str(" ●");
-            }
-            if ui
-                .selectable_label(s.showing_kit, label)
-                .on_hover_text("B — the slice kit. K adds the sample's selection to its end. ⌘S here saves the whole kit.")
-                .clicked()
-            {
-                out.push(EdIntent::ShowKit(true));
-            }
+            kit_tab(ui, k, s, out);
+            kit_switcher(ui, ed, s, out);
             grid_picker(ui, s.kit_grid, out);
             if !s.showing_kit
                 && ui
@@ -87,6 +78,94 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             }
         }
     });
+}
+
+/// The Kit tab. Clicking it while the kit is showing (or double-clicking it)
+/// turns it into a name field: ↩ or clicking away renames, Esc cancels.
+fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
+    let buf_id = egui::Id::unique("kit_rename_buf");
+    let field_id = egui::Id::unique("kit_rename_field");
+    let mut buf: Option<String> = ui.data(|d| d.get_temp(buf_id));
+    if !s.showing_kit {
+        buf = None;
+    }
+    if let Some(text) = &mut buf {
+        ui.label("Kit:");
+        let resp = ui.add(egui::TextEdit::singleline(text).id(field_id).desired_width(180.0));
+        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        if resp.lost_focus() || esc {
+            // Keep ↩ / Esc from also reaching the editor's keymap (export).
+            ui.ctx().input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
+            if !esc {
+                out.push(EdIntent::RenameKit(text.clone()));
+            }
+            buf = None;
+        }
+    } else {
+        let mut label = format!("Kit: {}", crate::app::short_name(k, 28));
+        if s.kit_dirty {
+            label.push_str(" ●");
+        }
+        let resp = ui.selectable_label(s.showing_kit, label).on_hover_text(
+            "B — the slice kit. K adds the sample's selection to its end. ⌘S here saves the whole kit.\n\
+             Click again (or double-click) to rename it — a saved kit's file is renamed too.",
+        );
+        if resp.double_clicked() || (resp.clicked() && s.showing_kit) {
+            let stem = k.strip_suffix(".wav").or_else(|| k.strip_suffix(".WAV")).unwrap_or(k);
+            buf = Some(stem.to_owned());
+        }
+        if resp.clicked() && !s.showing_kit {
+            out.push(EdIntent::ShowKit(true));
+        }
+    }
+    ui.data_mut(|d| match buf {
+        Some(b) => {
+            d.insert_temp(buf_id, b);
+        }
+        None => {
+            d.remove::<String>(buf_id);
+        }
+    });
+}
+
+/// ▾ menu next to the Kit tab: the open kits, to pick which one K adds to,
+/// and "New kit" to start another.
+fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
+    let label = if s.kits.len() > 1 { format!("▾ {}", s.kits.len()) } else { "▾".to_owned() };
+    ui.menu_button(label, |ui| {
+        for k in &s.kits {
+            let mut text = k.name.clone();
+            if k.dirty {
+                text.push_str(" ●");
+            }
+            let resp = ui.add(egui::Button::selectable(k.parked.is_none(), text));
+            if resp.clicked() {
+                if let Some(i) = k.parked {
+                    out.push(EdIntent::SwitchKit(i));
+                }
+                ui.close();
+            }
+        }
+        ui.separator();
+        let can_new = !s.showing_kit && ed.current.is_some();
+        if ui
+            .add_enabled(can_new, egui::Button::new("New kit from selection…"))
+            .on_hover_text("Start another kit with this selection; the open ones stay in this list")
+            .on_disabled_hover_text("Go to the sample (B) and select something first")
+            .clicked()
+        {
+            out.push(EdIntent::NewKit);
+            ui.close();
+        }
+    })
+    .response
+    .on_hover_text("Open kits — pick the one K adds to. Right-click a file → Use as kit to open another.");
 }
 
 /// Free / 4 / 8 / 16 switch for the kit's layout.
@@ -132,7 +211,9 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
     });
 }
 
-pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, showing_kit: bool, out: &mut Vec<EdIntent>) {
+pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
+    let showing_kit = slots.showing_kit;
+    let save_kit = showing_kit && slots.kit_saves_here;
     let playing = pv.playing;
     let has = ed.current.is_some();
     let pn = ed.prefs.panels.clone();
@@ -165,11 +246,14 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
         {
             ed.snap_selection();
         }
-        ui.separator();
-        ui.toggle_value(&mut ed.prefs.auto_load, "Auto-load")
-            .on_hover_text("Load the sample under the file cursor");
-        ui.toggle_value(&mut ed.prefs.auto_play, "Auto-play")
-            .on_hover_text("Play each sample as the cursor lands on it");
+        // Nothing auto-loads into the kit, so these only matter for the sample.
+        if !showing_kit {
+            ui.separator();
+            ui.toggle_value(&mut ed.prefs.auto_load, "Auto-load")
+                .on_hover_text("Load the sample under the file cursor");
+            ui.toggle_value(&mut ed.prefs.auto_play, "Auto-play")
+                .on_hover_text("Play each sample as the cursor lands on it");
+        }
     });
     }
     if pn.gain {
@@ -308,7 +392,9 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
                 ed.set_mono(mono);
             }
             let label = if ed.exporting {
-                "Exporting…"
+                if save_kit { "Saving…" } else { "Exporting…" }
+            } else if save_kit {
+                if ed.exports_mono() { "Save kit (mono)" } else { "Save kit" }
             } else if showing_kit {
                 if ed.exports_mono() { "Export kit (mono)" } else { "Export kit" }
             } else if ed.exports_mono() {
@@ -320,13 +406,15 @@ pub(super) fn toolbar(ui: &mut Ui, ed: &mut Editor, pv: &PlayView, can_export: b
             } else {
                 "Export → Destination"
             };
-            let tip = if showing_kit {
+            let tip = if save_kit {
+                "↩ / ⌘S — write the whole kit back over its file (it's already in the destination folder)"
+            } else if showing_kit {
                 "↩ — write the whole kit (in / out ignored), with its slice markers, into the active destination tab, then name it"
             } else {
                 "↩ — write the trimmed, gained region as a new WAV into the active destination tab"
             };
             if ui
-                .add_enabled(can_export && !ed.exporting, egui::Button::new(label))
+                .add_enabled(!ed.exporting && if save_kit { ed.is_dirty() } else { can_export }, egui::Button::new(label))
                 .on_hover_text(tip)
                 .clicked()
             {

@@ -71,6 +71,9 @@ pub struct AppState {
     /// The slice kit's editor slot, same as `session`.
     #[serde(default)]
     pub kit_session: Option<crate::editor::Session>,
+    /// Other open kits, parked behind the one K adds to.
+    #[serde(default)]
+    pub parked_kits: Vec<crate::editor::Session>,
     /// Grid slots last picked for a new kit (`None` = free).
     #[serde(default)]
     pub kit_grid: Option<usize>,

@@ -5,6 +5,12 @@
 
 use super::*;
 use crate::editor::AudioClip;
+use crate::ui::editor_view::KitEntry;
+
+fn slot_name(ed: &Editor) -> Option<String> {
+    let p = ed.path().or(ed.loading.as_deref())?;
+    Some(p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+}
 
 /// A slice waiting on the "name the kit" question.
 pub(super) struct KitNaming {
@@ -36,9 +42,118 @@ impl App {
     }
 
     pub(super) fn kit_name(&self) -> Option<String> {
+        slot_name(self.kit())
+    }
+
+    /// Every open kit, the active one included, sorted by name so the
+    /// list doesn't jump around as you switch.
+    pub(super) fn kit_list(&self) -> Vec<KitEntry> {
+        let mut v: Vec<KitEntry> = std::iter::once((self.kit(), None))
+            .chain(self.parked.iter().enumerate().map(|(i, k)| (k, Some(i))))
+            .filter_map(|(k, parked)| Some(KitEntry { name: slot_name(k)?, dirty: k.is_dirty(), parked }))
+            .collect();
+        v.sort_by_key(|e| e.name.to_lowercase());
+        v
+    }
+
+    /// The kit is on disk in the active destination folder, so exporting it
+    /// there means saving over it.
+    pub(super) fn kit_saves_here(&self) -> bool {
+        let tab = self.pane(Role::Dest).active_tab();
+        let Some(p) = self.kit().path() else { return false };
+        !tab.device && p.is_file() && p.parent() == Some(tab.cwd.as_path())
+    }
+
+    /// Why the kit can't be swapped out right now, if it can't.
+    fn kit_busy(&self) -> Option<&'static str> {
         let k = self.kit();
-        let p = k.path().or(k.loading.as_deref())?;
-        Some(p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+        if k.loading.is_some() {
+            Some("The kit is still loading — try again in a moment")
+        } else if k.exporting {
+            Some("The kit is still saving — try again in a moment")
+        } else {
+            None
+        }
+    }
+
+    /// Swap parked kit `i` into the kit slot. The clipboard and prefs stay
+    /// with the slot.
+    fn swap_with_parked(&mut self, i: usize) {
+        let slot = if self.showing_kit { &mut self.editor } else { &mut self.other };
+        let p = &mut self.parked[i];
+        std::mem::swap(slot, p);
+        std::mem::swap(&mut slot.clip, &mut p.clip);
+        std::mem::swap(&mut slot.prefs, &mut p.prefs);
+    }
+
+    /// Fill the empty kit slot with the first parked kit.
+    pub(super) fn unpark_first(&mut self) {
+        self.swap_with_parked(0);
+        self.parked.remove(0);
+    }
+
+    /// Move the active kit (if any) to the parked list, leaving the slot empty.
+    fn park_kit(&mut self) {
+        if self.has_kit() {
+            let k = self.kit_mut().take();
+            self.parked.push(k);
+        }
+        self.kit_pending = None;
+    }
+
+    /// Make parked kit `i` the one K adds to.
+    pub(super) fn switch_kit(&mut self, i: usize) {
+        if i >= self.parked.len() {
+            return;
+        }
+        if let Some(e) = self.kit_busy() {
+            self.status = e.to_owned();
+            return;
+        }
+        if self.showing_kit && self.engine.is_playing() {
+            self.engine.stop();
+        }
+        self.kit_pending = None;
+        self.swap_with_parked(i);
+        self.kit_grid = self.kit().grid.or(self.kit_grid);
+        self.status = format!("K now adds to {}", self.kit_name().unwrap_or_default());
+    }
+
+    /// The file is already open as a kit: make it the active one.
+    fn switch_to_open(&mut self, p: &Path) -> bool {
+        if self.kit().path() == Some(p) {
+            return true;
+        }
+        match self.parked.iter().position(|k| k.path() == Some(p)) {
+            Some(i) => {
+                self.switch_kit(i);
+                self.kit().path() == Some(p)
+            }
+            None => false,
+        }
+    }
+
+    /// Any slot or parked kit with unsaved edits.
+    pub(super) fn any_dirty(&self) -> bool {
+        self.editor.is_dirty() || self.other.is_dirty() || self.parked.iter().any(Editor::is_dirty)
+    }
+
+    /// Put a slot with unsaved edits on screen, for the quit question.
+    /// False when there's none left.
+    pub(super) fn front_dirty(&mut self) -> bool {
+        if self.editor.is_dirty() {
+            return true;
+        }
+        if self.other.is_dirty() {
+            self.swap_slots();
+            return true;
+        }
+        let Some(i) = self.parked.iter().position(Editor::is_dirty) else { return false };
+        if !self.showing_kit {
+            self.swap_slots();
+        }
+        self.swap_with_parked(i);
+        true
     }
 
     /// Put the kit (`true`) or the browsed sample on screen.
@@ -95,6 +210,28 @@ impl App {
             );
             return;
         }
+        self.ask_kit_name(clip);
+    }
+
+    /// "New kit": start another kit from the browsed sample's selection.
+    /// The current kit stays open in the list.
+    pub(super) fn new_kit(&mut self) {
+        if self.showing_kit {
+            self.status = "Press B to go back to the sample, then start a new kit from its selection".to_owned();
+            return;
+        }
+        let Some(clip) = self.editor.slice() else {
+            self.status = "Load a sample first — a new kit starts from its selection".to_owned();
+            return;
+        };
+        if let Some(e) = self.kit_busy() {
+            self.status = e.to_owned();
+            return;
+        }
+        self.ask_kit_name(clip);
+    }
+
+    fn ask_kit_name(&mut self, clip: AudioClip) {
         let bits = self.editor.sample().and_then(|s| s.bits);
         let src = self.editor.path().map(Path::to_path_buf).unwrap_or_default();
         let folder = src.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
@@ -123,8 +260,20 @@ impl App {
         }
         let path = n.dir.join(format!("{name}.wav"));
         let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        // Already open: switch to it and add the slice there.
+        if self.switch_to_open(&path) {
+            self.status = match self.kit_mut().append(&n.clip) {
+                Ok(()) => format!("Added the slice to {file} (not saved yet) — B shows it, ⌘S there saves it"),
+                Err(e) => format!("{file}: {e}"),
+            };
+            return;
+        }
+        if let Some(e) = self.kit_busy() {
+            self.status = e.to_owned();
+            return;
+        }
         self.kit_grid = n.grid;
-        self.kit_mut().close();
+        self.park_kit();
         if path.is_file() {
             self.kit_pending = Some((n.clip, n.grid));
             self.kit_mut().request(&path);
@@ -133,29 +282,77 @@ impl App {
             self.kit_pending = None;
             self.kit_mut().start_new(path, &n.clip, n.bits, n.grid);
             let grid = n.grid.map_or(String::new(), |g| format!(" on a {g}-slot grid"));
-            self.status = format!("Started {file}{grid} (not saved yet) — K adds more, B shows it, ⌘S there saves it");
+            self.status = format!("Started {file}{grid} (not saved yet) — K adds more, B shows it, click its tab there to rename, ⌘S saves it");
         }
     }
 
-    /// "Use as kit": the file on screen becomes the kit, to add slices to.
-    pub(super) fn use_as_kit(&mut self) {
-        if self.showing_kit {
+    /// Rename the kit. A kit already on disk has its file renamed too; one
+    /// that was never saved just gets the new name for when it is.
+    pub(super) fn rename_kit(&mut self, name: &str) {
+        let Some(old) = self.kit().path().map(Path::to_path_buf) else { return };
+        let mut name = name.trim().replace(['/', '\\', ':'], "-");
+        if name.to_lowercase().ends_with(".wav") {
+            name.truncate(name.len() - 4);
+        }
+        if name.is_empty() {
             return;
         }
-        let Some(p) = self.editor.path().map(Path::to_path_buf) else { return };
-        if self.editor.is_dirty() {
-            self.status = "Save this file first, then make it the kit".to_owned();
+        let file = format!("{name}.wav");
+        let new = old.with_file_name(&file);
+        if new == old {
             return;
         }
-        if self.other.is_dirty() {
-            self.status = "The current kit has unsaved slices — save or close it first".to_owned();
+        // Case-only renames point at the same file on case-insensitive disks.
+        let same_file = old.to_string_lossy().to_lowercase() == new.to_string_lossy().to_lowercase();
+        if new.exists() && !same_file {
+            self.status = format!("{file} already exists there — pick another name");
             return;
         }
-        self.kit_pending = None;
-        self.other.close();
-        self.other.request(&p);
-        let name = p.file_name().unwrap_or_default().to_string_lossy();
-        self.status = format!("{name} is the slice kit — K adds the selection of whatever sample you're on");
+        let on_disk = old.is_file();
+        if on_disk {
+            if let Err(e) = std::fs::rename(&old, &new) {
+                self.status = format!("Couldn't rename the kit: {e}");
+                return;
+            }
+        }
+        if self.voice_path.as_deref() == Some(old.as_path()) && self.engine.is_playing() {
+            self.engine.stop();
+        }
+        self.kit_mut().set_path(new.clone());
+        if on_disk {
+            if let Some(dir) = new.parent() {
+                self.sizes.invalidate_subtree(dir);
+                self.reload_showing(dir, false);
+            }
+            self.status = format!("Renamed the kit to {file}");
+        } else {
+            self.status = format!("The kit is now {file} (not saved yet)");
+        }
+    }
+
+    /// "Use as kit": open `p` as a kit and make it the one K adds to. The
+    /// kit open before stays in the kit list.
+    pub(super) fn use_as_kit(&mut self, p: &Path) {
+        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if self.switch_to_open(p) {
+            self.status = format!("{name} is the active kit — K adds the selection of whatever sample you're on");
+            return;
+        }
+        if !self.showing_kit && self.editor.path() == Some(p) && self.editor.is_dirty() {
+            self.status = "Save this file first, then make it a kit".to_owned();
+            return;
+        }
+        if let Some(e) = self.kit_busy() {
+            self.status = e.to_owned();
+            return;
+        }
+        if self.showing_kit && self.engine.is_playing() {
+            self.engine.stop();
+        }
+        self.park_kit();
+        self.kit_mut().request(p);
+        let others = if self.parked.is_empty() { String::new() } else { " (the other kits stay in the ▾ list)".to_owned() };
+        self.status = format!("{name} is the active kit — K adds the selection of whatever sample you're on{others}");
     }
 
     /// Lay the kit out on `n` equal slots, or free it.
@@ -171,7 +368,7 @@ impl App {
                 self.kit_grid = n;
                 self.status = match n {
                     Some(n) => format!("Kit laid out on {n} equal slots, padded to the longest slice — K fills the next free slot"),
-                    None => "Grid off — K adds slices to the end of the kit again (the audio stays as it is)".to_owned(),
+                    None => "Grid off — empty slots at the end trimmed; K adds slices to the end of the kit again".to_owned(),
                 };
             }
             Err(e) => self.status = e,
@@ -183,10 +380,16 @@ impl App {
             self.status = "The kit has unsaved slices — save it (⌘S) first".to_owned();
             return;
         }
+        let name = self.kit_name().unwrap_or_default();
         self.show_kit(false);
         self.kit_pending = None;
         self.other.close();
-        self.status = "Closed the slice kit".to_owned();
+        if self.parked.is_empty() {
+            self.status = format!("Closed {name}");
+        } else {
+            self.unpark_first();
+            self.status = format!("Closed {name} — K now adds to {}", self.kit_name().unwrap_or_default());
+        }
     }
 
     /// Absorb worker results for both slots. The hidden one is swapped in
@@ -196,7 +399,16 @@ impl App {
         std::mem::swap(&mut self.editor, &mut self.other);
         self.absorb_editor(!self.showing_kit);
         std::mem::swap(&mut self.editor, &mut self.other);
-        for ed in [&mut self.editor, &mut self.other] {
+        // Parked kits only ever load (a restored session); the pending slice
+        // belongs to the active kit, so keep it out of their way.
+        let pending = self.kit_pending.take();
+        for i in 0..self.parked.len() {
+            std::mem::swap(&mut self.editor, &mut self.parked[i]);
+            self.absorb_editor(true);
+            std::mem::swap(&mut self.editor, &mut self.parked[i]);
+        }
+        self.kit_pending = pending;
+        for ed in std::iter::once(&mut self.editor).chain(std::iter::once(&mut self.other)).chain(self.parked.iter_mut()) {
             if let Some(n) = ed.notice.take() {
                 self.status = n;
             }

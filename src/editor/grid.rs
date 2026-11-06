@@ -73,7 +73,9 @@ impl Editor {
     /// (the audio stays as it is).
     pub fn set_grid(&mut self, n: Option<usize>) -> Result<(), String> {
         let Some(n) = n else {
-            self.grid = None;
+            if self.grid.take().is_some() {
+                self.trim_silent_tail();
+            }
             return Ok(());
         };
         if !self.is_kit || self.full.is_none() {
@@ -82,6 +84,29 @@ impl Editor {
         let s = self.slices();
         let sounding = s.iter().filter(|s| !is_empty(s)).count();
         self.lay_out(s, n).map(|_| ()).ok_or_else(|| format!("The kit has {sounding} slices — too many for {n} slots"))
+    }
+
+    /// Cut the silence after the last sound: the empty slots and the
+    /// padding left at the end when a grid is turned off. Only exact zeros
+    /// count, so a quiet tail stays. A kit that's all silence is left alone.
+    fn trim_silent_tail(&mut self) {
+        self.uncrop();
+        let Some(full) = &self.full else { return };
+        let ch = &full.sample.channels;
+        let total = full.sample.frames();
+        let Some(last) = (0..total).rev().find(|&f| ch.iter().any(|c| c[f] != 0.0)) else { return };
+        let end = last + 1;
+        if end >= total {
+            return;
+        }
+        self.splice(end, total, &[]);
+        let total = self.frames();
+        self.sel = (self.sel.0.min(total), self.sel.1.min(total));
+        if self.sel.0 >= self.sel.1 {
+            self.sel = (0, total);
+        }
+        self.playhead = self.playhead.min(total);
+        self.view.fit_pending = true;
     }
 
     /// Add `clip` in the first slot after the last one that sounds, then

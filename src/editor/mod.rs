@@ -358,6 +358,32 @@ impl Editor {
         self.load(path);
     }
 
+    /// Point the open audio at a new file name (after a rename), keeping the
+    /// audio, edits and undo history as they are.
+    pub fn set_path(&mut self, path: PathBuf) {
+        let Some(cur) = &self.current else { return };
+        let old = cur.sample.path.clone();
+        let renamed = |l: &Loaded| {
+            let s = &l.sample;
+            let sample = Sample {
+                path: path.clone(),
+                rate: s.rate,
+                channels: s.channels.clone(),
+                bits: s.bits,
+                format: s.format.clone(),
+                file_len: s.file_len,
+            };
+            Loaded { sample: Arc::new(sample), peaks: l.peaks.clone() }
+        };
+        let shared = self.full.as_ref().is_some_and(|f| Arc::ptr_eq(&f.sample, &cur.sample));
+        let new_cur = renamed(cur);
+        self.full = if shared { Some(new_cur.clone()) } else { self.full.as_ref().map(renamed) };
+        self.current = Some(new_cur);
+        if let Some(m) = self.memos.remove(&old) {
+            self.memos.insert(path, m);
+        }
+    }
+
     /// Re-read the open file from disk, e.g. after an export replaced it.
     pub fn reload(&mut self) {
         if let Some(p) = self.path().map(Path::to_path_buf) {

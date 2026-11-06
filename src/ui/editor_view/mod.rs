@@ -46,6 +46,20 @@ pub enum EdIntent {
     CloseKit,
     /// Lay the kit out on this many equal slots, or free it.
     SetGrid(Option<usize>),
+    /// Give the kit this name (no extension).
+    RenameKit(String),
+    /// Make parked kit `n` the one K adds to.
+    SwitchKit(usize),
+    /// Start another kit from the sample's selection.
+    NewKit,
+}
+
+/// One open kit, for the kit switcher.
+pub struct KitEntry {
+    pub name: String,
+    pub dirty: bool,
+    /// Index among the parked kits; `None` for the active one.
+    pub parked: Option<usize>,
 }
 
 /// What the header needs to know about the two editor slots.
@@ -54,6 +68,11 @@ pub struct Slots {
     pub kit_name: Option<String>,
     pub kit_dirty: bool,
     pub kit_grid: Option<usize>,
+    /// The kit's file is already in the destination folder: exporting it
+    /// would just overwrite it, so the button saves it in place instead.
+    pub kit_saves_here: bool,
+    /// Every open kit, sorted by name.
+    pub kits: Vec<KitEntry>,
     /// File in the sample slot, shown or not.
     pub sample_name: Option<String>,
 }
@@ -81,7 +100,7 @@ pub fn show(ui: &mut Ui, ed: &mut Editor, pv: PlayView, focused: bool, can_expor
 
     header(ui, ed, focused, &mut out);
     slot_bar(ui, ed, slots, &mut out);
-    toolbar(ui, ed, &pv, can_export, slots.showing_kit, &mut out);
+    toolbar(ui, ed, &pv, can_export, slots, &mut out);
 
     if ed.current.is_none() {
         let msg = if let Some(p) = &ed.loading {

@@ -164,6 +164,8 @@ pub struct App {
     /// The hidden editor slot (see [`kit`]).
     other: Editor,
     showing_kit: bool,
+    /// Other open kits, waiting to be switched to (see [`kit`]).
+    parked: Vec<Editor>,
     /// Slice to add once the kit file finishes loading.
     kit_pending: Option<(crate::editor::AudioClip, Option<usize>)>,
     /// Grid picked last time, offered for the next new kit.
@@ -271,6 +273,19 @@ impl App {
         if let Some(s) = saved.as_ref().and_then(|s| s.kit_session.clone()).filter(|s| s.path.is_file()) {
             other.restore_session(&s);
         }
+        let parked = saved
+            .as_ref()
+            .map(|s| s.parked_kits.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.path.is_file() && other.loading.as_deref() != Some(s.path.as_path()))
+            .map(|s| {
+                let mut k = Editor::new(ctx.clone(), editor.prefs.clone());
+                k.is_kit = true;
+                k.restore_session(&s);
+                k
+            })
+            .collect();
         let mut errors = Vec::new();
         if let Some(e) = &engine.open_error {
             errors.push(format!("audio output: {e}"));
@@ -287,6 +302,7 @@ impl App {
             editor,
             other,
             showing_kit: false,
+            parked,
             kit_pending: None,
             kit_grid: saved.as_ref().and_then(|s| s.kit_grid),
             kit_naming: None,
@@ -341,6 +357,10 @@ impl App {
             errors_logged: 0,
             last_state: None,
         };
+        // The active kit's file went missing: bring in a parked one.
+        if !app.has_kit() && !app.parked.is_empty() {
+            app.unpark_first();
+        }
         app.reload_all();
         app
     }
@@ -388,6 +408,7 @@ impl App {
             },
             session: self.browser().session(),
             kit_session: self.kit().session(),
+            parked_kits: self.parked.iter().filter_map(Editor::session).collect(),
             kit_grid: self.kit_grid,
         }
     }
@@ -585,13 +606,11 @@ impl eframe::App for App {
 
         // Closing the window with unsaved audio edits: ask first.
         let close = ui.ctx().input(|i| i.viewport().close_requested());
-        if close && (self.editor.is_dirty() || self.other.is_dirty()) && !self.allow_close {
+        if close && self.any_dirty() && !self.allow_close {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.leave_pending.is_none() && self.leave_after_save.is_none() {
                 // Ask about whichever slot has the unsaved edits.
-                if !self.editor.is_dirty() {
-                    self.swap_slots();
-                }
+                self.front_dirty();
                 self.leave_pending = Some(Leave::Quit);
             }
         }

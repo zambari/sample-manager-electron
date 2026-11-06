@@ -134,6 +134,10 @@ impl App {
         if self.editor.current.is_none() {
             return;
         }
+        if self.showing_kit && self.kit_saves_here() {
+            self.save_in_place();
+            return;
+        }
         let tab = self.pane(Role::Dest).active_tab();
         let (dest, to_dev) = (tab.cwd.clone(), tab.device);
         let mono = self.editor.fold();
@@ -180,11 +184,8 @@ impl App {
         match leave {
             Leave::Audition(p, play) => self.audition(&p, play),
             Leave::LoadEditor(p) => self.load_into_editor(&p),
-            Leave::Quit if self.other.is_dirty() => {
-                // The hidden slot has unsaved edits too: ask about those next.
-                self.swap_slots();
-                self.leave_pending = Some(Leave::Quit);
-            }
+            // Another slot or kit has unsaved edits too: ask about those next.
+            Leave::Quit if self.front_dirty() => self.leave_pending = Some(Leave::Quit),
             Leave::Quit => {
                 // Closed from `ui` once no job (an upload of the saved edit)
                 // is running.
@@ -455,6 +456,8 @@ impl App {
             kit_name: self.kit_name(),
             kit_dirty: self.kit().is_dirty(),
             kit_grid: self.kit().grid,
+            kits: self.kit_list(),
+            kit_saves_here: self.kit_saves_here(),
             sample_name: self.browser().path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()),
         };
         let intents = editor_view::show(ui, &mut self.editor, pv, self.editor_focused, can_export, &slots);
@@ -470,9 +473,16 @@ impl App {
                 EdIntent::SaveInPlace => self.save_in_place(),
                 EdIntent::ShowKit(on) => self.show_kit(on),
                 EdIntent::AddSlice => self.add_slice(),
-                EdIntent::UseAsKit => self.use_as_kit(),
+                EdIntent::UseAsKit => {
+                    if let Some(p) = self.browser().path().map(Path::to_path_buf) {
+                        self.use_as_kit(&p);
+                    }
+                }
+                EdIntent::SwitchKit(i) => self.switch_kit(i),
+                EdIntent::NewKit => self.new_kit(),
                 EdIntent::CloseKit => self.close_kit(),
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
+                EdIntent::RenameKit(name) => self.rename_kit(&name),
             }
         }
     }

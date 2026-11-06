@@ -69,6 +69,8 @@ pub enum Intent {
     NewFolderNamed { dir: PathBuf, name: String },
     /// Make a new folder in `dir`, move these into it, and start renaming it.
     NewFolderWith { dir: PathBuf, paths: Vec<PathBuf> },
+    /// Open this file as a slice kit and make it the one K adds to.
+    UseAsKit(PathBuf),
     /// Fetch this device file and open it in the editor (after a warning).
     LoadFromDevice(PathBuf),
     /// Make a "<name> Mono" copy of each of these folders, folding stereo
@@ -560,6 +562,15 @@ fn row(
         }
         if single && entry.is_dir && ui.button("Open").clicked() {
             intents.push(Intent::Open(entry.path.clone()));
+            ui.close();
+        }
+        if single
+            && local
+            && !entry.is_dir
+            && crate::fs_model::is_audio_path(&entry.path)
+            && ui.button("Use as kit").on_hover_text("Open as a slice kit — K then adds selections to it").clicked()
+        {
+            intents.push(Intent::UseAsKit(entry.path.clone()));
             ui.close();
         }
         if single && !local && !entry.is_dir && ui.button("Load to editor…").clicked() {

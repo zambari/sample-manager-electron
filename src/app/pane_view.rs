@@ -167,6 +167,7 @@ impl App {
                         self.preview_toggle(&p);
                     }
                 }
+                Intent::UseAsKit(p) => self.use_as_kit(&p),
                 Intent::BeginRename(p) => {
                     let name = p
                         .file_name()

@@ -96,6 +96,15 @@ impl Editor {
         self.clean_rev = 0; // nothing written yet
     }
 
+    /// Hand over this slot's file and edits, leaving it empty. The slot
+    /// keeps its prefs, clipboard and kit flag.
+    pub fn take(&mut self) -> Editor {
+        let mut fresh = Editor::new(self.ctx.clone(), self.prefs.clone());
+        fresh.clip = self.clip.take();
+        fresh.is_kit = self.is_kit;
+        std::mem::replace(self, fresh)
+    }
+
     /// Empty the editor, keeping prefs and the clipboard.
     pub fn close(&mut self) {
         let clip = self.clip.take();
