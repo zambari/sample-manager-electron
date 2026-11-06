@@ -491,7 +491,7 @@ impl App {
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
-                    if let (true, Some((c, grid))) = (is_kit, self.kit_pending.take()) {
+                    if let (true, Some((clip, grid))) = (is_kit, self.kit_pending.take()) {
                         let name = self
                             .editor
                             .path()
@@ -500,18 +500,29 @@ impl App {
                             .to_string_lossy()
                             .into_owned();
                         // A grid was asked for and the file isn't on it yet.
+                        // A file made the kit as it is keeps any slicing it has.
+                        let keep = clip.is_none() && self.editor.has_markers();
                         let regrid = match grid {
-                            Some(_) if self.editor.grid_mode() != grid => {
+                            Some(_) if !keep && self.editor.grid_mode() != grid => {
                                 self.editor.set_grid(grid)
                             }
                             _ => Ok(()),
                         };
-                        self.status = match regrid.and_then(|()| self.editor.append(&c)) {
-                            Ok(()) => format!(
-                                "Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it"
-                            ),
-                            Err(e) => format!("{name}: {e}"),
-                        };
+                        match clip {
+                            Some(c) => {
+                                self.status = match regrid.and_then(|()| self.editor.append(&c)) {
+                                    Ok(()) => format!(
+                                        "Added the slice to {name} (not saved yet) — B shows it, ⌘S there saves it"
+                                    ),
+                                    Err(e) => format!("{name}: {e}"),
+                                };
+                            }
+                            None => {
+                                if let Err(e) = regrid {
+                                    self.status = format!("{name}: {e}");
+                                }
+                            }
+                        }
                     }
                     if std::mem::take(&mut self.editor.play_when_loaded) {
                         self.start_play();
@@ -624,29 +635,26 @@ impl App {
                 EdIntent::UseAsKit => {
                     if let Some(p) = self.browser().path().map(Path::to_path_buf) {
                         self.use_as_kit(&p);
+                        // The sample is the kit's first slice: check it like
+                        // samples added with K.
+                        let k = self.kit();
+                        if k.path() == Some(p.as_path()) || k.loading.as_deref() == Some(p.as_path()) {
+                            self.mark_committed([p]);
+                        }
                     }
                 }
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
                 EdIntent::ElkMode => self.enter_elk(),
-                EdIntent::FadeEnds(only) => {
-                    let n = self.editor.fade_ends(only);
-                    self.status = match only {
-                        Some(i) => format!("Faded out the end of slice {} — ⌘Z undoes", i + 1),
-                        None => format!(
-                            "Faded out the end of {n} slice{} — ⌘Z undoes",
-                            if n == 1 { "" } else { "s" }
-                        ),
-                    };
-                }
                 EdIntent::TrimTails => {
                     let rate = self.editor.sample().map_or(1, |s| s.rate.max(1)) as f64;
                     self.status = match self.editor.trim_tails() {
-                        Some((was, now)) => format!(
-                            "Trimmed tails: {:.2} s → {:.2} s, freed {:.2} s — ⌘Z undoes",
+                        Some((was, now, fades)) => format!(
+                            "Trimmed: {:.2} s → {:.2} s, freed {:.2} s, {fades} fade{} — ⌘Z undoes",
                             was as f64 / rate,
                             now as f64 / rate,
-                            was.saturating_sub(now) as f64 / rate
+                            was.saturating_sub(now) as f64 / rate,
+                            if fades == 1 { "" } else { "s" }
                         ),
                         None => "Nothing to trim".to_owned(),
                     };

@@ -15,7 +15,7 @@ use crate::audio::stats::{self, Fold, Stats};
 use crate::editor::{Drag, Editor};
 use crate::ui::theme::{SECTION_H, section_header, vis_toggle};
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, vec2};
-mod fades;
+mod strip;
 mod levels;
 mod overview;
 mod scope;
@@ -23,7 +23,6 @@ mod toolbar;
 mod trim;
 mod waveform;
 
-use fades::fades_section;
 use levels::stats_table;
 use overview::overview;
 use scope::scope;
@@ -59,9 +58,7 @@ pub enum EdIntent {
     NewKit,
     /// Switch the column to the Elk Sample Order view.
     ElkMode,
-    /// Fade out the kit slices that end abruptly (all, or just this one).
-    FadeEnds(Option<usize>),
-    /// Cut every kit slice's tail below the threshold.
+    /// Fade and cut every kit slice's tail below the threshold.
     TrimTails,
 }
 
@@ -127,21 +124,16 @@ pub fn show(
     slot_bar(ui, ed, slots, &mut out);
     toolbar(ui, ed, &pv, can_export, slots, &mut out);
 
-    // Kit slice ends and the fades that would fix the cut-off ones: only
-    // while the Fades panel is open, so nothing is flagged or draggable
-    // on the wave otherwise. Found after the toolbar so its edits count.
-    let kit = ed.is_kit && ed.current.is_some();
-    let fading = ed.prefs.panels.fades && kit;
-    let trimming = ed.prefs.panels.trim && kit;
-    let tails = if fading || trimming { ed.tails() } else { Vec::new() };
-    if fading {
-        fades_section(ui, ed, &tails, &mut out);
-    }
+    // Tail trim, kits only: its section, and its fades and cuts on the
+    // wave. Hidden, nothing is shown or draggable there. Found after the
+    // toolbar so its edits count.
+    let trimming = ed.prefs.panels.trim_tails && ed.is_kit && ed.current.is_some();
     if trimming {
-        trim_section(ui, ed, &tails, &mut out);
+        let ends = ed.slice_ends();
+        trim_section(ui, ed, &ends, &mut out);
     }
-    let ends = if fading { ed.abrupt_ends(&tails) } else { Vec::new() };
     let trim = if trimming { ed.trim_plan(ed.prefs.tail_db) } else { None };
+    let fades = trim.as_ref().map_or_else(Vec::new, |p| ed.shown_fades(&p.fades()));
 
     if ed.current.is_none() {
         let msg = if let Some(p) = &ed.loading {
@@ -209,7 +201,7 @@ pub fn show(
         section_header(ui, "Wave");
         let wave_h = (avail.y - reserved - 12.0).max(80.0);
         let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
-        waveform(ui, ed, &pv, rect, focused, &ends, trim.as_ref(), &mut out);
+        waveform(ui, ed, &pv, rect, focused, &fades, trim.as_ref(), &mut out);
     }
 
     if pn.nums {

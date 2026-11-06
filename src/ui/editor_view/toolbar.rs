@@ -38,7 +38,7 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
             ui.spinner();
         }
     });
-    panel_toggles(ui, &mut ed.prefs.panels);
+    panel_toggles(ui, &mut ed.prefs.panels, ed.is_kit);
 }
 
 /// Sample / Kit switch, plus the kit's own buttons.
@@ -323,11 +323,11 @@ fn grid_picker(ui: &mut Ui, cur: Option<usize>, out: &mut Vec<EdIntent>) {
 }
 
 /// Right-aligned chips that show / hide each editor panel. Saved with the prefs.
-pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
+pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: bool) {
     section_header(ui, "Show");
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        let items: [(&mut bool, &str, &str); 11] = [
+        let items: Vec<(&mut bool, &str, &str)> = vec![
             (
                 &mut p.transport,
                 "Transport",
@@ -353,18 +353,17 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels) {
             ),
             (&mut p.stats, "Stats", "Stats table and phase meter"),
             (
-                &mut p.fades,
-                "Fades",
-                "Kit only: find slices that stop while still sounding, and fade them out. Hidden, nothing is flagged or shaped on the wave",
-            ),
-            (
-                &mut p.trim,
+                &mut p.trim_tails,
                 "Trim",
-                "Kit only: cut every slice's tail below a threshold to free sample memory",
+                "Fade and cut every kit slice's tail below a threshold to free sample memory. Hidden, no fades show on the wave",
             ),
             (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
         for (v, label, hover) in items {
+            // Trim only applies to a kit.
+            if label == "Trim" && !kit {
+                continue;
+            }
             ui.add(vis_toggle(v, label))
                 .on_hover_text(format!("Show / hide: {hover}"));
         }

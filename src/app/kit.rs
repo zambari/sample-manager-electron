@@ -353,7 +353,7 @@ impl App {
             self.mark_committed([n.src.clone()]);
         }
         if path.is_file() {
-            self.kit_pending = Some((n.clip, n.grid));
+            self.kit_pending = Some((Some(n.clip), n.grid));
             self.kit_mut().request(&path);
             self.status = format!("{file} already exists — adding the slice to it…");
         } else {
@@ -444,6 +444,8 @@ impl App {
         }
         self.park_kit();
         self.kit_mut().request(p);
+        // Lay it out on the grid picked for new kits once it loads.
+        self.kit_pending = Some((None, self.kit_grid));
         let others = if self.parked.is_empty() {
             String::new()
         } else {

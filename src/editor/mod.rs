@@ -20,7 +20,7 @@ mod history;
 mod trim;
 
 pub use fade::{FadeEnd, fade_gain};
-pub use trim::TrimPlan;
+pub use trim::{SliceEnd, TrimPlan};
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
 mod selection;
 
@@ -78,10 +78,8 @@ pub struct Panels {
     pub stats: bool,
     /// Keyboard shortcut cheat sheet at the bottom.
     pub help: bool,
-    /// Kit only: cut-off slice ends, their threshold and fade knobs.
-    pub fades: bool,
-    /// Kit only: cut every slice's tail below the threshold.
-    pub trim: bool,
+    /// Kit only: tail trim, its threshold and fade knobs.
+    pub trim_tails: bool,
 }
 
 impl Default for Panels {
@@ -96,8 +94,7 @@ impl Default for Panels {
             minimap: true,
             stats: true,
             help: true,
-            fades: false,
-            trim: false,
+            trim_tails: true,
         }
     }
 }
@@ -116,7 +113,7 @@ impl Default for Prefs {
             fold: Fold::Mix,
             panels: Panels::default(),
             tail_db: -50.0,
-            trim_fade_ms: 10.0,
+            trim_fade_ms: 20.0,
         }
     }
 }
@@ -268,8 +265,9 @@ pub enum Drag {
     /// Scope strip: move the playhead by dragging the wave. Holds the
     /// playhead and pointer x at the start of the drag.
     Scrub(usize, f32),
-    /// Shape a slice's fade-out: the slice and where its sound ends.
-    Fade(usize, usize),
+    /// Shape a slice's fade-out: the slice, the fade's fixed end (its
+    /// start for a tail fade, else its end) and whether it's a tail fade.
+    Fade(usize, usize, bool),
 }
 
 /// Visible window: first frame at the left edge and frames per pixel.

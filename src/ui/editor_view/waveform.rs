@@ -62,7 +62,7 @@ pub(super) fn waveform(
     let x_out = m.x(ed.sel.1 as f64);
     let marks = if ed.is_kit { ed.marks() } else { Vec::new() };
 
-    // Fade handles: a knob at the middle of each abrupt end's fade curve.
+    // Fade handles: a knob at the middle of each trim fade's curve.
     let fade_top = rect.top() + RULER_H + 4.0;
     let fade_h = rect.bottom() - fade_top;
     let handle_pos = |e: &crate::editor::FadeEnd| {
@@ -77,7 +77,7 @@ pub(super) fn waveform(
             .copied()
     };
     let mut hot_fade = match ed.drag {
-        Some(Drag::Fade(i, _)) => Some(i),
+        Some(Drag::Fade(i, ..)) => Some(i),
         _ => None,
     };
 
@@ -164,7 +164,7 @@ pub(super) fn waveform(
             if resp.dragged_by(egui::PointerButton::Middle) || alt {
                 Drag::Pan
             } else if let Some(e) = handle_at(o) {
-                Drag::Fade(e.slice, e.end)
+                Drag::Fade(e.slice, if e.tail { e.start } else { e.end }, e.tail)
             } else if near(x_in, o)
                 && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs())
             {
@@ -189,13 +189,17 @@ pub(super) fn waveform(
                 Drag::Move(orig, grab) => ed.move_region(orig, m.frame(px) as i64 - grab as i64),
                 Drag::Pan => ed.view.start -= resp.drag_delta().x as f64 * ed.view.fpp,
                 Drag::Scrub(..) => {}
-                Drag::Fade(slice, end) => {
+                Drag::Fade(slice, fixed, tail) => {
                     // Sideways: the knob is the fade's middle, so the fade
-                    // runs twice that far back from the end. Up / down: the
-                    // gain at the middle, which sets the curve.
-                    let mid = m.frame(px).min(end.saturating_sub(1));
+                    // runs twice that far from its fixed end. Up / down:
+                    // the gain at the middle, which sets the curve.
+                    let len = if tail {
+                        2 * (m.frame(px).max(fixed + 1) - fixed)
+                    } else {
+                        2 * (fixed - m.frame(px).min(fixed.saturating_sub(1)))
+                    };
                     let g = (1.0 - (p.y - fade_top) / fade_h).clamp(0.5f32.powf(8.0), 0.5);
-                    ed.shape_fade(slice, 2 * (end - mid), g.ln() / 0.5f32.ln());
+                    ed.shape_fade(slice, len, g.ln() / 0.5f32.ln());
                 }
             }
             // Dragging a marker past the edge scrolls the view along.
@@ -231,7 +235,7 @@ pub(super) fn waveform(
         let fade = p.and_then(handle_at);
         let target = p.and_then(|p| endpoint_at(p).or_else(|| mark_at(p)));
         if let Some(e) = fade {
-            out.push(EdIntent::FadeEnds(Some(e.slice)));
+            ed.reset_fade(e.slice);
         } else {
         match target {
             Some(f) => {
@@ -537,8 +541,7 @@ pub(super) fn draw_lanes(
     }
 }
 
-/// Abrupt slice ends: the fade-out that "Fade ends" would apply, drawn as
-/// its gain curve over the end of each such slice.
+/// Trim fades: each drawn as its gain curve over the slice.
 fn fade_cues(
     painter: &egui::Painter,
     m: &Map,
@@ -589,7 +592,7 @@ fn fade_cues(
             if is_hot {
                 let ms = (e.end - e.start) as f64 * 1000.0 / rate.max(1) as f64;
                 let text = format!(
-                    "fade {ms:.0} ms · curve {:.1}\n↔ length  ↕ curve\ndouble-click: apply this one",
+                    "fade {ms:.0} ms · curve {:.1}\n↔ length  ↕ curve\ndouble-click: reset",
                     e.k
                 );
                 let galley = painter.layout(text, FontId::monospace(10.0), col, 400.0);
@@ -613,7 +616,7 @@ fn fade_cues(
 
 /// Tail trim: shade what each slice would lose, with a line at the cut.
 fn trim_cues(painter: &egui::Painter, m: &Map, lanes: Rect, plan: &crate::editor::TrimPlan, off: usize) {
-    let col = super::fades::SAVE_COLOR;
+    let col = super::strip::SAVE_COLOR;
     for s in &plan.slices {
         let cut = s.a + s.keep;
         if cut >= s.b || s.b <= off {
@@ -625,14 +628,6 @@ fn trim_cues(painter: &egui::Painter, m: &Map, lanes: Rect, plan: &crate::editor
         }
         let r = Rect::from_x_y_ranges(xa.max(lanes.left())..=xb.min(lanes.right()), lanes.y_range());
         painter.rect_filled(r, 0.0, col.gamma_multiply(0.10));
-        if let Some(f) = s.fade_at {
-            // The short fade before the cut.
-            let xf = m.x(f.saturating_sub(off) as f64);
-            painter.line_segment(
-                [Pos2::new(xf, lanes.top()), Pos2::new(xa, lanes.bottom())],
-                Stroke::new(1.0, col.gamma_multiply(0.7)),
-            );
-        }
         if lanes.x_range().contains(xa) {
             painter.line_segment([Pos2::new(xa, lanes.top()), Pos2::new(xa, lanes.bottom())], Stroke::new(1.5, col));
         }

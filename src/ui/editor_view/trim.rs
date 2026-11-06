@@ -1,14 +1,15 @@
 //! Trim section (kits only): cut every slice's tail where it drops below
-//! the threshold, with a live readout of the sample memory that frees.
+//! the threshold, after a fade, with a live readout of the sample memory
+//! that frees. The fades show on the wave, where each can be shaped.
 
-use super::fades::{DB_RANGE, SAVE_COLOR, threshold_strip};
+use super::strip::{DB_RANGE, SAVE_COLOR, threshold_strip};
 use super::*;
-use crate::editor::FadeEnd;
+use crate::editor::SliceEnd;
 
 const BAR_W: f32 = 300.0;
 const BAR_H: f32 = 4.0;
 
-pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, tails: &[FadeEnd], out: &mut Vec<EdIntent>) {
+pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out: &mut Vec<EdIntent>) {
     section_header(ui, "Trim");
     let Some(rate) = ed.sample().map(|s| s.rate.max(1) as f64) else { return };
     let nch = ed.sample().map_or(1, |s| s.channels.len().max(1));
@@ -42,12 +43,13 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, tails: &[FadeEnd], out:
 
     ui.horizontal_wrapped(|ui| {
         ui.label("Cut below").on_hover_text(
-            "Each slice keeps its sound up to the last moment it's louder than this, then a short fade, and the rest goes. \
-             The slices close up (a grid kit gets shorter slots), so the kit takes less sample memory.\n\
-             The strip glows green where a threshold frees more. Same threshold as Fades.\n\
-             A slice that's quieter than this all the way through is left as it is.",
+            "Each slice keeps its sound up to the last moment it's louder than this. There a fade starts (orange on the wave), \
+             and everything after the fade goes. The slices close up (a grid kit gets shorter slots), so the kit takes less sample memory.\n\
+             A slice still louder than this where it stops (cut off) gets a fade over its end instead, and keeps its length.\n\
+             A slice that's quieter than this all the way through is left as it is.\n\n\
+             The strip glows green where a threshold frees more. Ticks: each slice's level where it stops — orange ones are cut off at this threshold.",
         );
-        threshold_strip(ui, &mut ed.prefs.tail_db, tails, Some(&heat), Some(range));
+        threshold_strip(ui, &mut ed.prefs.tail_db, ends, Some(&heat), Some(range));
         ui.add(
             egui::DragValue::new(&mut ed.prefs.tail_db)
                 .range(DB_RANGE.0..=DB_RANGE.1)
@@ -58,28 +60,37 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, tails: &[FadeEnd], out:
         ui.label("fade");
         ui.add(
             egui::DragValue::new(&mut ed.prefs.trim_fade_ms)
-                .range(0.0..=200.0)
+                .range(1.0..=500.0)
                 .speed(0.25)
                 .max_decimals(0)
                 .suffix(" ms"),
         )
-        .on_hover_text("Fade-out after each cut, over sound that's already below the threshold");
+        .on_hover_text(
+            "Default fade after the threshold point. Drag a fade's knob on the wave to shape one: \
+             sideways for length, up / down for the curve; double-click resets it.",
+        );
     });
 
     let Some(plan) = ed.trim_plan(ed.prefs.tail_db) else { return };
     let saved = plan.saved();
+    let nf = plan.fades().len();
     let secs = |f: usize| f as f64 / rate;
     // As the sampler stores it: 16-bit.
     let bytes = |f: usize| f * nch * 2;
     ui.horizontal_wrapped(|ui| {
         let label = if saved > 0 {
-            RichText::new(format!("✂ Trim tails  −{:.2} s", secs(saved))).color(SAVE_COLOR)
+            RichText::new(format!("✂ Trim  −{:.2} s", secs(saved))).color(SAVE_COLOR)
+        } else if nf > 0 {
+            RichText::new(format!("✂ Trim  (fades only: {nf})")).color(ui.visuals().warn_fg_color)
         } else {
             RichText::new("Nothing to trim")
         };
         if ui
-            .add_enabled(saved > 0, egui::Button::new(label))
-            .on_hover_text("Cut every slice's tail as shaded on the wave. ⌘Z undoes.")
+            .add_enabled(saved > 0 || nf > 0, egui::Button::new(label))
+            .on_hover_text(format!(
+                "Apply the {nf} fade{} shown on the wave and cut what's shaded green. ⌘Z undoes.",
+                if nf == 1 { "" } else { "s" }
+            ))
             .clicked()
         {
             out.push(EdIntent::TrimTails);
@@ -90,7 +101,11 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, tails: &[FadeEnd], out:
         let p = ui.painter_at(rect);
         let kept = plan.new_total as f32 / plan.total.max(1) as f32;
         let split = bar.left() + bar.width() * kept.min(1.0);
-        p.rect_filled(Rect::from_x_y_ranges(bar.left()..=split, bar.y_range()), 0.0, ui.visuals().strong_text_color().gamma_multiply(0.6));
+        p.rect_filled(
+            Rect::from_x_y_ranges(bar.left()..=split, bar.y_range()),
+            0.0,
+            ui.visuals().strong_text_color().gamma_multiply(0.6),
+        );
         p.rect_filled(Rect::from_x_y_ranges(split..=bar.right(), bar.y_range()), 0.0, SAVE_COLOR);
         let pct = 100.0 * saved as f64 / plan.total.max(1) as f64;
         ui.label(

@@ -241,6 +241,11 @@ impl Editor {
             .count()
     }
 
+    /// Whether the file is cut into slices at all.
+    pub fn has_markers(&self) -> bool {
+        !self.markers.is_empty()
+    }
+
     /// The grid as picked: [`AUTO_GRID`], a slot count, or free.
     pub fn grid_mode(&self) -> Option<usize> {
         if self.auto_grid {

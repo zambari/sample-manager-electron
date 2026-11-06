@@ -179,7 +179,9 @@ pub struct App {
     /// closes it again while it has no edits, so kits don't pile up.
     browsed_kit: Option<kit::BrowsedKit>,
     /// Slice to add once the kit file finishes loading.
-    kit_pending: Option<(crate::editor::AudioClip, Option<usize>)>,
+    /// For the kit file on its way in: the slice to add (none when a file
+    /// was just made the kit) and the grid to put it on.
+    kit_pending: Option<(Option<crate::editor::AudioClip>, Option<usize>)>,
     /// Grid picked last time, offered for the next new kit.
     kit_grid: Option<usize>,
     /// Waiting on the "name the slice kit" question.

@@ -1,9 +1,8 @@
-//! Fades section (kits only): the threshold for cut-off slice ends, a strip
-//! showing where each slice's end level sits against it, and the button
-//! that applies the fades.
+//! The trim threshold strip: one tick per kit slice at the level its sound
+//! stops at, the threshold over them, and how much a trim there frees.
 
 use super::*;
-use crate::editor::FadeEnd;
+use crate::editor::SliceEnd;
 
 const STRIP_W: f32 = 300.0;
 /// The level strip itself; the widget around it is taller to grab easily.
@@ -16,53 +15,10 @@ pub(super) const DB_RANGE: (f32, f32) = (-96.0, 0.0);
 /// The strip never shows less than this many dB.
 const MIN_SPAN: f32 = 24.0;
 
-pub(super) fn fades_section(
-    ui: &mut Ui,
-    ed: &mut Editor,
-    tails: &[FadeEnd],
-    out: &mut Vec<EdIntent>,
-) {
-    section_header(ui, "Fades");
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Cut off above").on_hover_text(
-            "A slice whose very end is louder than this stops while still sounding (it clicks) and gets an orange fade on the wave.\n\
-             The strip has one tick per slice at its end level: orange ticks get a fade, grey ones are left alone, faint ones already die away.\n\
-             Put the line in the gap left of the loud cluster. Drag or scroll on the strip.",
-        );
-        threshold_strip(ui, &mut ed.prefs.tail_db, tails, None, None);
-        ui.add(
-            egui::DragValue::new(&mut ed.prefs.tail_db)
-                .range(DB_RANGE.0..=DB_RANGE.1)
-                .speed(0.25)
-                .max_decimals(1)
-                .suffix(" dB"),
-        );
-        let db = ed.prefs.tail_db;
-        let n = tails.iter().filter(|t| t.abrupt(db)).count();
-        ui.separator();
-        let label = match n {
-            0 => RichText::new("Nothing to fade"),
-            1 => RichText::new("Apply 1 fade").color(ui.visuals().warn_fg_color),
-            n => RichText::new(format!("Apply {n} fades")).color(ui.visuals().warn_fg_color),
-        };
-        if ui
-            .add_enabled(n > 0, egui::Button::new(label))
-            .on_hover_text(
-                "Fade out every orange curve on the wave, as shaped. By default the last 100 ms (a fifth of the slice when it's under 0.5 s).\n\
-                 Drag a curve's knob first to shape it: sideways for length, up / down for the curve. Double-click a knob to apply just that one. ⌘Z undoes.",
-            )
-            .clicked()
-        {
-            out.push(EdIntent::FadeEnds(None));
-        }
-        ui.label(RichText::new(format!("of {} slices", tails.len())).weak());
-    });
-}
-
 /// dB range the strip spans: around the slice end levels that a threshold
 /// can actually flag (ones that already decay never are), so the useful
 /// part fills the width.
-fn strip_range(tails: &[FadeEnd], cur: f32) -> (f32, f32) {
+fn strip_range(tails: &[SliceEnd], cur: f32) -> (f32, f32) {
     let cut: Vec<f32> = tails.iter().filter(|t| !t.decays).map(|t| t.end_db).collect();
     let pool = if cut.is_empty() {
         tails.iter().map(|t| t.end_db).collect()
@@ -82,13 +38,13 @@ fn strip_range(tails: &[FadeEnd], cur: f32) -> (f32, f32) {
     (lo.max(DB_RANGE.0), hi)
 }
 
-/// The threshold over a strip of slice end levels. With `heat` (dB →
-/// share of the kit a trim there frees), the strip also glows green where
-/// a threshold would free more.
+/// The threshold over a strip of slice end levels. `heat` (dB → share of
+/// the kit a trim there frees) makes it glow green where a threshold frees
+/// more.
 pub(super) fn threshold_strip(
     ui: &mut Ui,
     db: &mut f32,
-    tails: &[FadeEnd],
+    tails: &[SliceEnd],
     heat: Option<&dyn Fn(f32) -> f32>,
     range: Option<(f32, f32)>,
 ) {
@@ -163,7 +119,7 @@ pub(super) fn threshold_strip(
         let x = x_of(t.end_db.clamp(lo, hi));
         let (col, a) = if t.decays {
             (vis.weak_text_color(), 0.35)
-        } else if t.abrupt(*db) {
+        } else if t.cut_off(*db) {
             (warn, 0.85)
         } else {
             (vis.strong_text_color(), 0.6)
@@ -201,12 +157,12 @@ pub(super) fn threshold_strip(
         for t in &near {
             let what = if t.decays {
                 "dies away on its own"
-            } else if t.abrupt(*db) {
-                "cut off — gets a fade"
+            } else if t.cut_off(*db) {
+                "still loud where it stops — fade over its end"
             } else {
-                "below the line — left alone"
+                "decays below the line — fade and cut there"
             };
-            text += &format!("\nslice {}: ends at {:.1} dB, {what}", t.slice + 1, t.end_db);
+            text += &format!("\nslice {}: stops at {:.1} dB, {what}", t.slice + 1, t.end_db);
         }
         resp.on_hover_text_at_pointer(text);
     }
