@@ -623,18 +623,42 @@ impl App {
         }
     }
 
-    /// Open `file`'s folder in a `device` (or local) tab of `role` and put
-    /// the cursor on it: the active tab when it's the right kind, else
-    /// another one, else a new one.
+    /// Put the cursor on `file` (a `device` or local path) without taking
+    /// any tab away from where the user left it: a tab already in that
+    /// folder (`role`'s pane first) just moves its cursor; otherwise `role`
+    /// gets a tab for it, reusing the one an earlier jump opened if it
+    /// hasn't been navigated by hand since.
     pub(super) fn show_file(&mut self, role: Role, device: bool, file: &Path) {
         let Some(dir) = file.parent().map(Path::to_path_buf) else { return };
-        let pane = self.pane(role);
-        let idx = if pane.active_tab().device == device {
-            Some(pane.active)
-        } else {
-            pane.tabs.iter().position(|t| t.device == device)
-        };
-        match idx {
+        let here = [role, role.other()].into_iter().find_map(|r| {
+            let i = self
+                .pane(r)
+                .tabs
+                .iter()
+                .position(|t| t.device == device && t.cwd == dir)?;
+            Some((r, i))
+        });
+        if let Some((r, i)) = here {
+            self.pane_mut(r).active = i;
+            let tab = self.pane_mut(r).active_tab_mut();
+            match tab.entries.iter().position(|e| e.path == file) {
+                Some(j) => tab.set_cursor(j),
+                None => {
+                    // Not listed yet (just arrived?): list again, then select.
+                    tab.selected.clear();
+                    tab.selected.insert(file.to_path_buf());
+                    tab.cursor = None;
+                    self.reload(r, i);
+                }
+            }
+            return;
+        }
+        let reuse = self
+            .pane(role)
+            .tabs
+            .iter()
+            .position(|t| t.revealed && t.device == device);
+        match reuse {
             Some(i) => self.pane_mut(role).active = i,
             None => {
                 let id = self.new_tab_id();
@@ -648,6 +672,7 @@ impl App {
         }
         let tab = self.pane_mut(role).active_tab_mut();
         tab.navigate_to(dir);
+        tab.revealed = true;
         tab.selected.insert(file.to_path_buf());
         let i = self.pane(role).active;
         self.reload(role, i);

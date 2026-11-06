@@ -63,6 +63,9 @@ pub struct DirTab {
     pub slow_click_rename: Option<(PathBuf, f64)>,
     /// Set when the cursor moves by keyboard, so the table scrolls to follow.
     pub scroll_to_cursor: bool,
+    /// Opened by "Show on device" / "Show local copy" and not navigated by
+    /// hand since: the next such jump reuses it instead of adding a tab.
+    pub revealed: bool,
 }
 
 impl DirTab {
@@ -94,6 +97,7 @@ impl DirTab {
             multi_rename: None,
             slow_click_rename: None,
             scroll_to_cursor: false,
+            revealed: false,
         }
     }
 
@@ -459,6 +463,7 @@ impl DirTab {
         let came_from = self.cwd.clone();
         let going_up = came_from.parent() == Some(path.as_path());
         self.cwd = path;
+        self.revealed = false;
         self.listing.clear();
         self.entries.clear();
         self.depths.clear();
