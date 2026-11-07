@@ -182,6 +182,9 @@ pub struct App {
     /// For the kit file on its way in: the slice to add (none when a file
     /// was just made the kit) and the grid to put it on.
     kit_pending: Option<(Option<crate::editor::AudioClip>, Option<usize>)>,
+    /// A plain sample on its way in as a kit's start, and the new (unsaved)
+    /// file the kit takes once it loads: `(sample, kit)`.
+    kit_seed: Option<(PathBuf, PathBuf)>,
     /// Grid picked last time, offered for the next new kit.
     kit_grid: Option<usize>,
     /// Waiting on the "name the slice kit" question.
@@ -363,6 +366,7 @@ impl App {
             parked,
             browsed_kit: None,
             kit_pending: None,
+            kit_seed: None,
             kit_grid: saved
                 .as_ref()
                 .map_or(Some(crate::editor::AUTO_GRID), |s| s.kit_grid),

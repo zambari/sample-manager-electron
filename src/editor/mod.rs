@@ -13,12 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+mod analysis;
 mod clip;
 mod fade;
 mod grid;
 mod history;
 mod trim;
 
+pub use analysis::{BANDS as WATERFALL_BANDS, LoudnessView};
 pub use fade::{FadeEnd, fade_gain};
 pub use trim::{SliceEnd, TrimPlan};
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
@@ -350,6 +352,7 @@ pub struct Editor {
     stats: Stats,
     phase: Phase,
     file_stats: Stats,
+    analysis: analysis::Analysis,
 }
 
 impl Editor {
@@ -400,6 +403,7 @@ impl Editor {
             stats: Stats::default(),
             phase: Phase::default(),
             file_stats: Stats::default(),
+            analysis: Default::default(),
         }
     }
 

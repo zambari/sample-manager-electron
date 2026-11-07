@@ -608,6 +608,14 @@ impl App {
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
+                    if is_kit && self.editor.path().is_some() {
+                        if let Some((_, new)) = self
+                            .kit_seed
+                            .take_if(|(seed, _)| self.editor.path() == Some(seed.as_path()))
+                        {
+                            self.editor.detach(new);
+                        }
+                    }
                     if let (true, Some((clip, grid))) = (is_kit, self.kit_pending.take()) {
                         let name = self
                             .editor

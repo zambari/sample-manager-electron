@@ -138,6 +138,13 @@ impl Editor {
         self.clean_rev = 0; // nothing written yet
     }
 
+    /// Take the loaded audio as the start of a new, unsaved file at `path`;
+    /// the file it came from is left alone.
+    pub fn detach(&mut self, path: PathBuf) {
+        self.set_path(path);
+        self.clean_rev = 0; // nothing written yet
+    }
+
     /// Hand over this slot's file and edits, leaving it empty. The slot
     /// keeps its prefs, clipboard and kit flag.
     pub fn take(&mut self) -> Editor {

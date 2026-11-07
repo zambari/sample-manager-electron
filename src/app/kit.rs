@@ -17,6 +17,13 @@ fn slot_name(ed: &Editor) -> Option<String> {
     )
 }
 
+/// A file that already is a kit: named "[N] name", or carrying slice cues.
+/// Anything else is a plain sample and is never saved over as a kit.
+pub(super) fn is_collection(p: &Path) -> bool {
+    let stem = p.file_stem().unwrap_or_default().to_string_lossy();
+    crate::editor::slot_prefix(&stem).is_some() || !crate::audio::cues::read(p).is_empty()
+}
+
 /// A kit opened by browsing onto a sliced file (see [`App::open_browsed_kit`]).
 pub(super) struct BrowsedKit {
     pub path: PathBuf,
@@ -127,6 +134,7 @@ impl App {
             self.parked.push(k);
         }
         self.kit_pending = None;
+        self.kit_seed = None;
     }
 
     /// Make parked kit `i` the one K adds to.
@@ -142,6 +150,7 @@ impl App {
             self.engine.stop();
         }
         self.kit_pending = None;
+        self.kit_seed = None;
         self.swap_with_parked(i);
         self.kit_grid = self.kit().grid_mode().or(self.kit_grid);
         self.status = format!("K now adds to {}", self.kit_name().unwrap_or_default());
@@ -314,7 +323,11 @@ impl App {
         if name.is_empty() {
             name = "slice kit".to_owned();
         }
-        let path = n.dir.join(format!("{name}.wav"));
+        let mut path = n.dir.join(format!("{name}.wav"));
+        // A plain sample of that name stays untouched: the kit gets its own.
+        if path.is_file() && !is_collection(&path) {
+            path = crate::fs_model::unique_sibling(&path);
+        }
         let file = path
             .file_name()
             .unwrap_or_default()
@@ -348,6 +361,7 @@ impl App {
             self.status = format!("{file} already exists — adding the slice to it…");
         } else {
             self.kit_pending = None;
+        self.kit_seed = None;
             self.kit_mut().start_new(path, &n.clip, n.bits, n.grid);
             let grid = match n.grid {
                 None => String::new(),
@@ -436,6 +450,13 @@ impl App {
         self.kit_mut().request(p);
         // Lay it out on the grid picked for new kits once it loads.
         self.kit_pending = Some((None, self.kit_grid));
+        // A plain sample only seeds the kit: it gets a name of its own, so
+        // saving never writes over the sample in the library.
+        if !is_collection(p) {
+            let stem = p.file_stem().unwrap_or_default().to_string_lossy();
+            let new = self.kit_dir(p).join(format!("{stem} kit.wav"));
+            self.kit_seed = Some((p.to_path_buf(), crate::fs_model::unique_sibling(&new)));
+        }
         let others = if self.parked.is_empty() {
             String::new()
         } else {
@@ -512,6 +533,7 @@ impl App {
             }
             self.kit_mut().close();
             self.kit_pending = None;
+        self.kit_seed = None;
         } else {
             // Switched away from it through the kit list: drop it from there.
             let i = self.parked.iter().position(|k| k.path() == Some(b.path.as_path()))?;
@@ -576,6 +598,7 @@ impl App {
         let name = self.kit_name().unwrap_or_default();
         self.show_kit(false);
         self.kit_pending = None;
+        self.kit_seed = None;
         self.other.close();
         if self.parked.is_empty() {
             self.status = format!("Closed {name}");
@@ -598,12 +621,14 @@ impl App {
         // Parked kits only ever load (a restored session); the pending slice
         // belongs to the active kit, so keep it out of their way.
         let pending = self.kit_pending.take();
+        let seed = self.kit_seed.take();
         for i in 0..self.parked.len() {
             std::mem::swap(&mut self.editor, &mut self.parked[i]);
             self.absorb_editor(true);
             std::mem::swap(&mut self.editor, &mut self.parked[i]);
         }
         self.kit_pending = pending;
+        self.kit_seed = seed;
         for ed in std::iter::once(&mut self.editor)
             .chain(std::iter::once(&mut self.other))
             .chain(self.parked.iter_mut())
