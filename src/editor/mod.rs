@@ -20,7 +20,7 @@ mod grid;
 mod history;
 mod trim;
 
-pub use analysis::{BANDS as WATERFALL_BANDS, LoudnessView};
+pub use analysis::{BANDS as WATERFALL_BANDS, LoudnessView, ROWS as WATERFALL_ROWS};
 pub use fade::{FadeEnd, fade_gain};
 pub use trim::{SliceEnd, TrimPlan};
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};

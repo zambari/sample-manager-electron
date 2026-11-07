@@ -18,7 +18,8 @@ pub struct Loudness {
     pub momentary_max: Option<f32>,
     /// Loudest 3 s window, LUFS. `None` when shorter than 3 s.
     pub short_term_max: Option<f32>,
-    /// Loudness range (10th–95th percentile of short-term), LU.
+    /// Loudness range (10th–95th percentile of short-term), LU. `None`
+    /// without at least two 3 s windows.
     pub lra: Option<f32>,
     /// Inter-sample peak estimate, linear.
     pub true_peak: f32,
@@ -100,7 +101,7 @@ pub fn measure(channels: &[&[f32]], rate: u32, cancelled: &dyn Fn() -> bool) -> 
         .fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p))))
         .filter(|&p| lufs(p) > -70.0)
         .map(|p| lufs(p) as f32);
-    let lra = loudness_range(&st, lufs);
+    let lra = loudness_range(&st, &lufs);
 
     Some(Loudness {
         integrated,
@@ -114,7 +115,7 @@ pub fn measure(channels: &[&[f32]], rate: u32, cancelled: &dyn Fn() -> bool) -> 
 
 /// EBU Tech 3342: short-term powers gated at −70 LUFS and 20 LU below their
 /// mean, then the spread between the 10th and 95th percentiles.
-fn loudness_range(st: &[f64], lufs: impl Fn(f64) -> f64) -> Option<f32> {
+fn loudness_range(st: &[f64], lufs: &impl Fn(f64) -> f64) -> Option<f32> {
     let above: Vec<f64> = st.iter().copied().filter(|&p| lufs(p) > -70.0).collect();
     if above.len() < 2 {
         return None;

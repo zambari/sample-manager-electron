@@ -157,11 +157,14 @@ impl Editor {
         let fold = key.fold.unwrap_or(Fold::Mix);
         let hop = (s.rate as usize / LIVE_ROWS_PER_SEC).max(1);
         let live = &mut self.analysis.live;
-        let jumped = pos + hop < live.next || pos > live.next + hop * ROWS;
-        if live.key != Some(key) || jumped {
+        if live.key != Some(key) || live.rows.is_empty() {
+            // New audio: fill the history from what comes just before `pos`.
             live.key = Some(key);
             live.rows.clear();
             live.next = pos.saturating_sub(hop * (ROWS - 1));
+        } else if pos + hop < live.next || pos > live.next + hop * ROWS {
+            // Loop wrap or seek: keep the history scrolling, carry on from here.
+            live.next = pos;
         }
         if live.fft.as_ref().is_none_or(|f| f.rate() != s.rate) {
             live.fft = Some(Analyzer::new(LIVE_FFT, s.rate, BANDS));

@@ -111,10 +111,6 @@ impl Analyzer {
         self.rate
     }
 
-    pub fn bands(&self) -> usize {
-        self.bands.len()
-    }
-
     /// Spectrum of the `n` samples starting at `start` (may run off either
     /// end: missing samples are zero), as dB per band. A full-scale sine
     /// reads about 0 dB before the tilt.

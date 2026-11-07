@@ -16,14 +16,14 @@ use crate::editor::{Drag, Editor};
 use crate::ui::theme::{SECTION_H, section_header, vis_toggle};
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, vec2};
 mod strip;
-mod levels;
+mod stats_view;
 mod overview;
 mod scope;
 mod toolbar;
 mod trim;
 mod waveform;
 
-use levels::stats_table;
+use stats_view::{STATS_H, stats_panel};
 use overview::overview;
 use scope::scope;
 use trim::trim_section;
@@ -180,7 +180,7 @@ pub fn show(
         reserved += 20.0;
     }
     if pn.stats {
-        reserved += 150.0 + sec;
+        reserved += STATS_H + sec;
     }
     // Measure the wrapped help text so the waveform leaves room for it.
     let help_font = egui::TextStyle::Small.resolve(ui.style());
@@ -228,14 +228,7 @@ pub fn show(
     }
 
     if pn.stats {
-        section_header(ui, "Stats");
-    }
-    if phase {
-        phase_meter(ui, ed, &pv);
-    }
-
-    if pn.stats {
-        stats_table(ui, ed);
+        stats_panel(ui, ed, &pv);
     }
 
     if pn.help {
@@ -243,52 +236,6 @@ pub fn show(
         ui.label(RichText::new(crate::keymap::EDITOR_HELP).weak().small());
     }
     out
-}
-
-/// L/R correlation bar: −1 (cancels in mono) … 0 (unrelated) … +1 (mono).
-/// Live around the play cursor while playing, else over the region.
-fn phase_meter(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
-    let live = pv.playing;
-    let ph = if live {
-        ed.phase_at(pv.pos)
-    } else {
-        ed.region_phase()
-    };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Phase").weak()).on_hover_text(
-            "L/R correlation. +1: both sides the same (mono-safe). 0: unrelated / very wide. \
-             Below 0: out of phase — those parts cancel when folded to mono.",
-        );
-        let (rect, _) = ui.allocate_exact_size(vec2(180.0, 12.0), Sense::hover());
-        let vis = ui.visuals().clone();
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, 2.0, vis.extreme_bg_color);
-        let mid = rect.center().x;
-        let left = Rect::from_x_y_ranges(rect.left()..=mid, rect.y_range());
-        p.rect_filled(left, 2.0, CLIP_COLOR.gamma_multiply(0.18));
-        for t in [-0.5f32, 0.0, 0.5] {
-            let x = mid + t * rect.width() / 2.0;
-            let h = if t == 0.0 { 0.0 } else { 3.0 };
-            p.line_segment([Pos2::new(x, rect.top() + h), Pos2::new(x, rect.bottom() - h)], Stroke::new(1.0, vis.weak_text_color().gamma_multiply(0.6)));
-        }
-        // Ease the needle so the live reading is readable rather than jittery.
-        let target = ph.corr.unwrap_or(0.0);
-        let c = ui.ctx().animate_value_with_time(ui.scope_id().with("phase_needle"), target, if live { 0.12 } else { 0.0 });
-        if ph.corr.is_some() {
-            let x = mid + c * rect.width() / 2.0;
-            let col = if c < 0.0 { CLIP_COLOR } else if c < 0.3 { vis.warn_fg_color } else { IN_COLOR };
-            p.rect_filled(Rect::from_x_y_ranges(mid.min(x)..=mid.max(x), rect.shrink(3.0).y_range()), 1.0, col.gamma_multiply(0.5));
-            p.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(2.0, col));
-        }
-        p.rect_stroke(rect, 2.0, Stroke::new(1.0, vis.widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
-        let corr = ph.corr.map_or("  —  ".to_owned(), |c| format!("{c:+.2}"));
-        ui.monospace(corr);
-        ui.separator();
-        let loss = RichText::new(format!("mono sum {}", stats::fmt_db(ph.mono_loss_db))).monospace();
-        ui.label(if ph.mono_loss_db < -4.0 { loss.color(vis.warn_fg_color) } else { loss.weak() })
-            .on_hover_text("Level of the mono fold relative to the stereo signal. ~0 dB: nothing lost. ~−3 dB: wide/unrelated sides. Much lower: cancellation.");
-        ui.label(RichText::new(if live { "live" } else { "region" }).weak().small());
-    });
 }
 
 // ---- view math --------------------------------------------------------------

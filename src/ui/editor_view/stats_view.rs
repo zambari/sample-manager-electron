@@ -181,17 +181,25 @@ fn loudness_table(ui: &mut Ui, ed: &mut Editor) {
             ui.label(cell(format!("{approx}{}", lufs(l.integrated))));
             ui.end_row();
 
-            ui.label("Short-term").on_hover_text("Loudest 3 s window. Needs a region of at least 3 s.");
-            ui.label(cell(lufs(l.short_term_max)));
-            ui.end_row();
+            // Needs a region of 3 s or more; left out otherwise.
+            if let Some(st) = l.short_term_max {
+                ui.label("Short-term").on_hover_text("Loudest 3 s window.");
+                ui.label(cell(lufs(Some(st))));
+                ui.end_row();
+            }
 
             ui.label("Momentary").on_hover_text("Loudest 400 ms window.");
             ui.label(cell(lufs(l.momentary_max)));
             ui.end_row();
 
-            ui.label("Range").on_hover_text("Loudness range (LRA): spread of the short-term loudness, 10th to 95th percentile.");
-            ui.label(cell(l.lra.map_or("—".to_owned(), |v| format!("{v:.1} LU"))));
-            ui.end_row();
+            // Needs several 3 s windows; left out otherwise.
+            if let Some(lra) = l.lra {
+                ui.label("Range").on_hover_text(
+                    "Loudness range (LRA): spread of the short-term loudness, 10th to 95th percentile.",
+                );
+                ui.label(cell(format!("{lra:.1} LU")));
+                ui.end_row();
+            }
 
             let tp = stats::to_db(l.true_peak) + g;
             ui.label("True peak").on_hover_text(
@@ -306,7 +314,8 @@ fn waterfall(
         // 0 at the front row, 1 at the back.
         let back = (rows.len() - 1 - r) as f32 / (total - 1) as f32;
         let origin = Pos2::new(plot.left() + depth_x * back, plot.bottom() - depth_y * back);
-        let fade = 1.0 - 0.6 * back;
+        // Older rows sink into the dark background quickly.
+        let fade = (1.0 - back).powf(2.5);
         let mut mesh = egui::Mesh::default();
         let mut line = Vec::with_capacity(row.len());
         for (j, &db) in row.iter().enumerate() {
@@ -324,7 +333,7 @@ fn waterfall(
             line.push(top);
         }
         p.add(mesh);
-        let edge = lerp_color(bg, theme_wave(), 0.25 + 0.55 * fade);
+        let edge = lerp_color(bg, theme_wave(), 0.06 + 0.7 * fade);
         p.add(egui::Shape::line(line, Stroke::new(1.0, edge)));
     }
 
