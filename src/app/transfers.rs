@@ -106,6 +106,19 @@ impl App {
         }
     }
 
+    /// Select `path` in every tab showing its folder once it's listed there
+    /// (call before the reload that will list it).
+    pub(super) fn reveal_when_listed(&mut self, path: &Path, device: bool) {
+        let Some(dir) = path.parent() else { return };
+        for role in [Role::Source, Role::Dest] {
+            for tab in self.pane_mut(role).tabs.iter_mut() {
+                if tab.device == device && (tab.cwd == dir || tab.is_expanded(dir)) {
+                    tab.reveal = Some(path.to_path_buf());
+                }
+            }
+        }
+    }
+
     pub(super) fn mark_committed(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         for p in paths {
             self.committed_dirty |= self.committed.insert(p);
@@ -669,19 +682,31 @@ impl App {
                     path,
                     result,
                 } => {
+                    let focused = self.focused;
+                    let mut adopt = None;
                     for role in [Role::Source, Role::Dest] {
-                        for tab in self
-                            .pane_mut(role)
-                            .tabs
-                            .iter_mut()
-                            .filter(|t| t.device == device)
-                        {
-                            if tab.cwd == path {
-                                tab.accept_listing(generation, result.clone());
+                        let pane = self.pane_mut(role);
+                        let active = pane.active.min(pane.tabs.len().saturating_sub(1));
+                        for (i, tab) in pane.tabs.iter_mut().enumerate() {
+                            if tab.device != device {
+                                continue;
+                            }
+                            let revealed = if tab.cwd == path {
+                                tab.accept_listing(generation, result.clone())
                             } else if tab.expanded.contains(&path) {
-                                tab.accept_child_listing(&path, generation, result.clone());
+                                tab.accept_child_listing(&path, generation, result.clone())
+                            } else {
+                                None
+                            };
+                            if role == focused && i == active {
+                                adopt = adopt.or(revealed);
                             }
                         }
+                    }
+                    // A revealed file under the focused cursor is already the
+                    // one you were working on: don't auto-load it over that.
+                    if let Some(p) = adopt {
+                        self.last_cursor = Some(p);
                     }
                 }
                 Ev::Duplicates { groups, errors } => {
@@ -796,6 +821,11 @@ impl App {
                             break;
                         }
                         self.reload_showing(&dir, false);
+                    }
+                    if let Some((_, p)) = self.reveal_after.take_if(|(id, _)| *id == job) {
+                        if !cancelled {
+                            self.reveal_when_listed(&p, true);
+                        }
                     }
                     for dir in device_touched {
                         self.reload_showing(&dir, true);

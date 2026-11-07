@@ -63,6 +63,9 @@ pub struct DirTab {
     pub slow_click_rename: Option<(PathBuf, f64)>,
     /// Set when the cursor moves by keyboard, so the table scrolls to follow.
     pub scroll_to_cursor: bool,
+    /// A file just written here (save / export): put the cursor on it once
+    /// a listing of its folder shows it.
+    pub reveal: Option<PathBuf>,
     /// Opened by "Show on device" / "Show local copy" and not navigated by
     /// hand since: the next such jump reuses it instead of adding a tab.
     pub revealed: bool,
@@ -97,6 +100,7 @@ impl DirTab {
             multi_rename: None,
             slow_click_rename: None,
             scroll_to_cursor: false,
+            reveal: None,
             revealed: false,
         }
     }
@@ -145,9 +149,14 @@ impl DirTab {
         }
     }
 
-    pub fn accept_listing(&mut self, generation: u64, result: Result<Vec<Entry>, String>) {
+    /// Returns the path the cursor was moved to by a pending `reveal`.
+    pub fn accept_listing(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<Entry>, String>,
+    ) -> Option<PathBuf> {
         if generation != self.generation {
-            return; // stale
+            return None; // stale
         }
         self.loading = false;
         match result {
@@ -168,6 +177,8 @@ impl DirTab {
                 let shown: HashSet<&PathBuf> = self.entries.iter().map(|e| &e.path).collect();
                 self.selected.retain(|p| shown.contains(p));
                 self.cursor_to_selection();
+                let cwd = self.cwd.clone();
+                self.settle_reveal(&cwd)
             }
             Err(e) => {
                 self.listing.clear();
@@ -175,8 +186,19 @@ impl DirTab {
                 self.depths.clear();
                 self.error = Some(e);
                 self.cursor = None;
+                None
             }
         }
+    }
+
+    /// A listing of `listed` arrived: if the file waiting to be revealed
+    /// lives there, select it and scroll to it. Dropped either way (it may be
+    /// hidden by the filter), so it can't jump the cursor later.
+    fn settle_reveal(&mut self, listed: &Path) -> Option<PathBuf> {
+        let p = self.reveal.take_if(|p| p.parent() == Some(listed))?;
+        let i = self.entries.iter().position(|e| e.path == p)?;
+        self.set_cursor(i);
+        Some(p)
     }
 
     pub fn accept_child_listing(
@@ -184,9 +206,9 @@ impl DirTab {
         dir: &Path,
         generation: u64,
         result: Result<Vec<Entry>, String>,
-    ) {
+    ) -> Option<PathBuf> {
         if self.child_gen.get(dir) != Some(&generation) || !self.expanded.contains(dir) {
-            return; // stale, or collapsed meanwhile
+            return None; // stale, or collapsed meanwhile
         }
         match result {
             Ok(entries) => {
@@ -199,6 +221,7 @@ impl DirTab {
             }
         }
         self.rebuild();
+        self.settle_reveal(dir)
     }
 
     pub fn is_expanded(&self, dir: &Path) -> bool {

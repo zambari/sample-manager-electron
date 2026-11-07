@@ -136,6 +136,8 @@ pub struct App {
     /// A local job that made "Keep both" copies: once it finishes, select
     /// them and (for just one) open the inline rename on it.
     rename_after: Option<(u64, Vec<PathBuf>)>,
+    /// An export's upload job, and the device file to select once it lands.
+    reveal_after: Option<(u64, PathBuf)>,
     /// A local job's summary to show instead of a plain "Done".
     finish_note: Option<(u64, String)>,
     /// Device transfers queued or running: their direction and `(source,
@@ -447,6 +449,7 @@ impl App {
             undo: Vec::new(),
             undo_jobs: Default::default(),
             rename_after: None,
+            reveal_after: None,
             finish_note: None,
             device_queued: Default::default(),
             path_edit: None,

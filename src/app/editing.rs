@@ -678,6 +678,7 @@ impl App {
                         self.reload_showing(&d, false);
                     }
                     let leave = self.leave_after_save.take();
+                    let on_device = device::upload_target(&s.staged, &s.dest_dir);
                     let task = device::Task::Transfer {
                         dir: device::Dir::Upload,
                         items: vec![(s.staged, s.dest_dir)],
@@ -686,7 +687,8 @@ impl App {
                         total_bytes: std::fs::metadata(&p).map_or(0, |m| m.len()),
                     };
                     self.status = "Sending to the device…".to_owned();
-                    self.run_device(task, "", 1, 0);
+                    let job = self.run_device(task, "", 1, 0);
+                    self.reveal_after = Some((job, on_device));
                     if let Some(l) = leave {
                         self.finish_leave(l);
                     }
@@ -707,6 +709,7 @@ impl App {
                         }
                         self.editor.reload_saved();
                     }
+                    self.reveal_when_listed(&p, false);
                     if let Some(dir) = p.parent() {
                         self.sizes.invalidate_subtree(dir);
                         self.reload_showing(dir, false);
