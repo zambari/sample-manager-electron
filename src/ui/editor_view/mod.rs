@@ -113,6 +113,8 @@ pub const IN_COLOR: Color32 = Color32::from_rgb(90, 200, 120);
 pub const OUT_COLOR: Color32 = Color32::from_rgb(235, 115, 90);
 const PLAY_COLOR: Color32 = Color32::from_rgb(245, 200, 70);
 const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
+/// Audio the soft limiter is bending (gain pushed into the top dB).
+const LIMIT_COLOR: Color32 = Color32::from_rgb(236, 165, 55);
 const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
 const MARK_COLOR: Color32 = Color32::from_rgb(200, 140, 245);
 

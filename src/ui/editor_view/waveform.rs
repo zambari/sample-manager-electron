@@ -436,6 +436,15 @@ pub(super) fn draw_lanes(
     let n_ch = cur.sample.channels.len().max(1);
     let lane_h = lanes.height() / n_ch as f32;
     let gain = ed.gain();
+    let lim = crate::audio::limit::Limiter::new(gain);
+    // A kit's gain is baked into the samples, so judge those by what the
+    // limiter wrote rather than running them through it again.
+    let baked = (ed.is_kit && ed.sel_gain_db() > 0.0)
+        .then(|| crate::audio::limit::Limiter::new(crate::audio::stats::from_db(ed.sel_gain_db())));
+    let level = |s: f32| match &baked {
+        Some(b) => b.level_out(s * gain),
+        None => lim.level(s * gain),
+    };
     let wave_in = crate::ui::theme::WAVE;
     // In a kit the other slices are content too, so keep them close to the
     // selected one instead of greying them out like a trimmed-away region.
@@ -460,18 +469,24 @@ pub(super) fn draw_lanes(
             vec2(lanes.width(), lane_h),
         );
         // A channel the mono fold throws away recedes into the background.
-        let (wave_in, wave_out, clip_col) = if kept(c) {
-            (wave_in, wave_out, CLIP_COLOR)
+        let (wave_in, wave_out, clip_col, limit_col) = if kept(c) {
+            (wave_in, wave_out, CLIP_COLOR, LIMIT_COLOR)
         } else {
             (
                 wave_in.gamma_multiply(0.22),
                 wave_out.gamma_multiply(0.35),
                 CLIP_COLOR.gamma_multiply(0.3),
+                LIMIT_COLOR.gamma_multiply(0.3),
             )
+        };
+        let level_col = |l: crate::audio::limit::Level| match l {
+            crate::audio::limit::Level::Clipped => clip_col,
+            crate::audio::limit::Level::Limited => limit_col,
+            crate::audio::limit::Level::Clean => wave_in,
         };
         let mid = lane.center().y;
         let half = lane_h * 0.46;
-        let y = |s: f32| (mid - s * gain * half).clamp(lane.top(), lane.bottom());
+        let y = |s: f32| (mid - lim.apply(s) * half).clamp(lane.top(), lane.bottom());
         painter.line_segment(
             [Pos2::new(lane.left(), mid), Pos2::new(lane.right(), mid)],
             Stroke::new(1.0, vis.faint_bg_color),
@@ -509,11 +524,8 @@ pub(super) fn draw_lanes(
                 }
                 let (lo, hi) = peaks.range(data, f0, f1);
                 let inside = f1 > ed.sel.0 && f0 < ed.sel.1;
-                let clip = hi * gain >= 1.0 || lo * gain <= -1.0;
-                let col = if clip && inside {
-                    clip_col
-                } else if inside {
-                    wave_in
+                let col = if inside {
+                    level_col(level(hi).max(level(lo)))
                 } else {
                     wave_out
                 };
@@ -539,10 +551,8 @@ pub(super) fn draw_lanes(
             let fill_col = |f: usize, s: f32| {
                 let base = if !inside(f) {
                     wave_out
-                } else if s.abs() * gain >= 1.0 {
-                    clip_col
                 } else {
-                    wave_in
+                    level_col(level(s))
                 };
                 base.gamma_multiply(0.55)
             };

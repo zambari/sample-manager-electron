@@ -8,8 +8,10 @@ pub struct Stats {
     pub rms: f32,
     /// Mean sample value; non-zero means a DC offset.
     pub dc: f32,
-    /// Samples that would hit or exceed full scale at the current gain.
+    /// Samples that would go through the ceiling (hard-clip) at the current gain.
     pub clipped: usize,
+    /// Samples the soft limiter bends at the current gain, short of clipping.
+    pub limited: usize,
     pub frames: usize,
 }
 
@@ -19,12 +21,8 @@ pub fn compute(channels: &[Vec<f32>], start: usize, end: usize, gain: f32) -> St
     let mut sum_sq = 0f64;
     let mut n = 0usize;
     let mut clipped = 0usize;
-    // A sample clips after gain when |s * gain| >= 1.
-    let clip_at = if gain > 0.0 {
-        1.0 / gain
-    } else {
-        f32::INFINITY
-    };
+    let mut limited = 0usize;
+    let lim = super::limit::Limiter::new(gain);
     for ch in channels {
         let end = end.min(ch.len());
         if start >= end {
@@ -35,8 +33,10 @@ pub fn compute(channels: &[Vec<f32>], start: usize, end: usize, gain: f32) -> St
             peak = peak.max(a);
             sum += s as f64;
             sum_sq += (s as f64) * (s as f64);
-            if a >= clip_at {
-                clipped += 1;
+            match lim.level(a * gain) {
+                super::limit::Level::Clipped => clipped += 1,
+                super::limit::Level::Limited => limited += 1,
+                super::limit::Level::Clean => {}
             }
         }
         n += end - start;
@@ -49,6 +49,7 @@ pub fn compute(channels: &[Vec<f32>], start: usize, end: usize, gain: f32) -> St
         rms: (sum_sq / n as f64).sqrt() as f32,
         dc: (sum / n as f64) as f32,
         clipped,
+        limited,
         frames: end.saturating_sub(start),
     }
 }

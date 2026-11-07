@@ -89,12 +89,14 @@ fn levels_table(ui: &mut Ui, ed: &mut Editor) {
             ui.end_row();
 
             ui.label("Peak");
-            let peak_after = r.peak * gain;
+            // The limiter's curve keeps order, so the peak out is the peak in, shaped.
+            let lim = crate::audio::limit::Limiter::new(gain);
+            let peak_after = lim.shape(r.peak * gain);
             let txt = RichText::new(dbv(peak_after)).monospace();
-            ui.label(if peak_after >= 1.0 {
-                txt.color(CLIP_COLOR)
-            } else {
-                txt
+            ui.label(match lim.level(r.peak * gain) {
+                crate::audio::limit::Level::Clipped => txt.color(CLIP_COLOR),
+                crate::audio::limit::Level::Limited => txt.color(LIMIT_COLOR),
+                crate::audio::limit::Level::Clean => txt,
             });
             ui.monospace(dbv(f.peak));
             ui.end_row();
@@ -114,7 +116,22 @@ fn levels_table(ui: &mut Ui, ed: &mut Editor) {
             ui.monospace(format!("{:+.3}%", f.dc * 100.0));
             ui.end_row();
 
-            ui.label("Clipped");
+            ui.label("Limited").on_hover_text(format!(
+                "Samples the soft limiter bends: with gain above 0 dB, peaks over {:.0} dBFS are \
+                 rounded off toward full scale instead of clipping, up to {:.0} dB over.",
+                crate::audio::limit::KNEE_DB,
+                crate::audio::limit::RANGE_DB,
+            ));
+            let txt = RichText::new(format!("{} samples", r.limited)).monospace();
+            ui.label(if r.limited > 0 {
+                txt.color(LIMIT_COLOR)
+            } else {
+                txt
+            });
+            ui.label("");
+            ui.end_row();
+
+            ui.label("Clipped").on_hover_text("Samples pushed through the ceiling: hard-clipped.");
             let txt = RichText::new(format!("{} samples", r.clipped)).monospace();
             ui.label(if r.clipped > 0 {
                 txt.color(CLIP_COLOR)

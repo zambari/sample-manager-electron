@@ -306,7 +306,10 @@ fn render<T: SizedSample + FromSample<f32>>(
     let src_ch = sample.channels.len();
     let frames = sample.frames();
     let end = v.end.min(frames).max(1);
-    let gain = v.gain * f32::from_bits(sh.volume.load(Ordering::Relaxed));
+    // The editor's gain goes through the limiter; master volume comes after,
+    // so turning the monitor down doesn't change what gets limited.
+    let lim = super::limit::Limiter::new(v.gain);
+    let volume = f32::from_bits(sh.volume.load(Ordering::Relaxed));
     let mono = v.mono.filter(|_| src_ch > 1);
     let stereo = src_ch > 1 && mono.is_none() && out_ch > 1;
     sh.stereo.store(stereo, Ordering::Relaxed);
@@ -344,7 +347,7 @@ fn render<T: SizedSample + FromSample<f32>>(
         if let Some(fold) = mono {
             let a = fold.at(&sample.channels, i);
             let b = fold.at(&sample.channels, j);
-            let x = ((a + (b - a) * t) * gain).clamp(-1.0, 1.0);
+            let x = (lim.apply(a + (b - a) * t) * volume).clamp(-1.0, 1.0);
             peak[0] = peak[0].max(x.abs());
             peak[1] = peak[0];
             frame.fill(T::from_sample(x));
@@ -366,7 +369,7 @@ fn render<T: SizedSample + FromSample<f32>>(
                 let ch = &sample.channels[c];
                 ch[i] + (ch[j] - ch[i]) * t
             };
-            let x = (s * gain).clamp(-1.0, 1.0);
+            let x = (lim.apply(s) * volume).clamp(-1.0, 1.0);
             if k < 2 {
                 lr[k] = x;
             }

@@ -12,11 +12,11 @@ impl Editor {
     pub fn copy(&mut self) -> bool {
         let Some(s) = self.sample() else { return false };
         let (a, b) = self.sel;
-        let g = self.gain();
+        let g = crate::audio::limit::Limiter::new(self.gain());
         let channels = s
             .channels
             .iter()
-            .map(|c| c[a..b].iter().map(|x| x * g).collect())
+            .map(|c| c[a..b].iter().map(|x| g.apply(*x)).collect())
             .collect();
         let name = self.source_name(a);
         self.clip = Some(AudioClip {
@@ -59,18 +59,18 @@ impl Editor {
         if b <= a {
             return None;
         }
-        let g = self.gain();
+        let g = crate::audio::limit::Limiter::new(self.gain());
         let channels = match self.fold() {
             Some(f) => vec![
                 stats::fold_region(&s.channels, a, b, f)
                     .into_iter()
-                    .map(|x| x * g)
+                    .map(|x| g.apply(x))
                     .collect(),
             ],
             None => s
                 .channels
                 .iter()
-                .map(|c| c[a..b].iter().map(|x| x * g).collect())
+                .map(|c| c[a..b].iter().map(|x| g.apply(*x)).collect())
                 .collect(),
         };
         Some(AudioClip {

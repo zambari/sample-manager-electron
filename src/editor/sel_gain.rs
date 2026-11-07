@@ -47,13 +47,13 @@ impl Editor {
         if b <= a {
             return;
         }
-        let g = stats::from_db(db);
+        let g = crate::audio::limit::Limiter::new(stats::from_db(db));
         let channels = fs
             .channels
             .iter()
             .map(|c| {
                 let mut v = c.clone();
-                v[a..b].iter_mut().for_each(|x| *x *= g);
+                v[a..b].iter_mut().for_each(|x| *x = g.apply(*x));
                 v
             })
             .collect();
@@ -81,7 +81,7 @@ impl Editor {
         let fs = &base.sample;
         let peak = stats::compute(&fs.channels, a, b.min(fs.frames()), 1.0).peak;
         if peak > 0.0 {
-            let db = (self.prefs.normalize_db - stats::to_db(peak)).clamp(-60.0, 60.0);
+            let db = crate::audio::limit::gain_db_for_peak(peak, self.prefs.normalize_db);
             self.set_sel_gain(db);
         }
     }

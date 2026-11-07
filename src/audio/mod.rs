@@ -5,6 +5,7 @@ pub mod cues;
 pub mod decode;
 pub mod engine;
 pub mod export;
+pub mod limit;
 pub mod loudness;
 pub mod peaks;
 pub mod spectrum;

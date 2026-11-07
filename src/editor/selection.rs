@@ -155,7 +155,7 @@ impl Editor {
     pub fn normalize(&mut self) {
         let peak = self.region_stats().peak;
         if peak > 0.0 {
-            self.gain_db = (self.prefs.normalize_db - stats::to_db(peak)).clamp(-60.0, 60.0);
+            self.gain_db = crate::audio::limit::gain_db_for_peak(peak, self.prefs.normalize_db);
         }
     }
 

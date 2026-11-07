@@ -60,12 +60,13 @@ pub fn write_wav(sample: &Sample, r: &Render, target: &Path) -> Result<PathBuf, 
         };
         res.map_err(|e| e.to_string())
     };
+    let lim = super::limit::Limiter::new(r.gain);
     for f in r.start..end {
         if let Some(fold) = mono {
-            put(fold.at(&sample.channels, f) * r.gain)?;
+            put(lim.apply(fold.at(&sample.channels, f)))?;
         } else {
             for ch in &sample.channels {
-                put(ch[f] * r.gain)?;
+                put(lim.apply(ch[f]))?;
             }
         }
     }

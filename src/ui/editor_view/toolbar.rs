@@ -492,24 +492,17 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
         // Save: over the open file. A kit only has one once it's been exported.
         let (can, tip) = if showing_kit {
             if !slots.kit_on_disk {
-                (false, "Not saved yet — Export kit names it and writes it into the destination. After that, Save writes over that file. (⌘S on an unsaved kit runs Export.)".to_owned())
+                (false, "Not saved yet — Export kit names it and writes it into the destination. After that, Save in place writes over that file. (⌘S on an unsaved kit runs Export.)".to_owned())
             } else {
                 (ed.can_save(), "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)".to_owned())
             }
         } else {
             (ed.can_save(), "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file".to_owned())
         };
-        let label = if ed.exporting { "Saving…".to_owned() } else { format!("💾 Save{mono}") };
+        let label = if ed.exporting { "Saving…".to_owned() } else { format!("💾 Save in place{mono}") };
         let enabled = has && can && !ed.exporting;
-        // Solid accent fill once there's something to write back.
-        let button = if enabled {
-            egui::Button::new(egui::RichText::new(label).color(crate::ui::theme::ON_ACCENT))
-                .fill(crate::ui::theme::ACCENT)
-        } else {
-            egui::Button::new(label)
-        };
         if ui
-            .add_enabled(enabled, button)
+            .add_enabled(enabled, egui::Button::new(label))
             .on_hover_text(&tip)
             .on_disabled_hover_text(&tip)
             .clicked()
@@ -528,8 +521,12 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
                 "↩ — write the trimmed, gained region as a new WAV into the active destination tab",
             )
         };
+        // Export is the main action in both sample and kit mode: always solid
+        // accent. Save in place overwrites the original, so it stays plain.
+        let button = egui::Button::new(egui::RichText::new(label).color(crate::ui::theme::ON_ACCENT))
+            .fill(crate::ui::theme::ACCENT);
         if ui
-            .add_enabled(has && can_export && !ed.exporting, egui::Button::new(label))
+            .add_enabled(has && can_export && !ed.exporting, button)
             .on_hover_text(tip)
             .clicked()
         {
