@@ -442,15 +442,36 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
         );
     }
 
-    if renaming {
-        rename_editor(ui, rect, tab, &entry.path, intents);
-        return;
-    }
-
     // Row contents, laid out inside the rect we already allocated. In tree
     // mode each level indents, and folders get a disclosure arrow.
     const INDENT: f32 = 16.0;
     const ARROW_W: f32 = 14.0;
+
+    if renaming {
+        // Start the field where the name text starts (past indent, arrow and
+        // icon), so entering rename doesn't shift the name sideways.
+        let mut left = rect.left() + 6.0 + depth as f32 * INDENT;
+        if tab.tree {
+            left += ARROW_W + 2.0;
+        }
+        left += if tab.device {
+            13.0 + 7.0
+        } else {
+            let icon_w = ui
+                .painter()
+                .layout_no_wrap("📁".to_owned(), body_font(ui, 0.0), egui::Color32::PLACEHOLDER)
+                .size()
+                .x;
+            icon_w + ui.spacing().item_spacing.x
+        };
+        // The field's own inner padding, so its text lines up with the name.
+        left -= 4.0;
+        let mut field_rect = rect;
+        field_rect.min.x = (left - 6.0).clamp(rect.left(), rect.right() - 40.0);
+        rename_editor(ui, field_rect, tab, &entry.path, intents);
+        return;
+    }
+
     let mut inner = rect.shrink2(egui::vec2(6.0, 0.0));
     inner.min.x += depth as f32 * INDENT;
     let mut arrow_rect = None;

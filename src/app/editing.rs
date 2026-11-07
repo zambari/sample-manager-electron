@@ -190,8 +190,8 @@ impl App {
         {
             self.editor.set_path(dst.clone());
         }
-        // Export is "save as": a name that's taken asks for another one
-        // instead of offering to overwrite.
+        // Export is "save as": a name that's taken asks for another one,
+        // with overwriting the existing file as the alternative.
         if dst.exists() {
             let free = crate::fs_model::unique_sibling(&dst);
             let stem = |p: &Path| {

@@ -448,6 +448,13 @@ pub fn name_export(
     let clean = name.trim();
     let valid = !clean.is_empty() && !clean.contains('/');
     let exists = valid && dir.join(format!("{clean}.wav")).exists();
+    let taken_stem = std::path::Path::new(taken)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let is_taken = clean == taken_stem;
+    let mut taken_stem = Some(taken_stem);
     Modal::new(Id::unique("name_export_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
         ui.heading("Export as");
@@ -494,6 +501,16 @@ pub fn name_export(
                     .on_hover_text("↩")
                     .clicked()
                 {
+                    answer = Some(true);
+                }
+                // Skip renaming: write over the file that was already there.
+                if !is_taken
+                    && ui
+                        .button(format!("Overwrite \"{taken}\""))
+                        .on_hover_text("Replace the existing file instead of renaming")
+                        .clicked()
+                {
+                    *name = taken_stem.take().unwrap_or_default();
                     answer = Some(true);
                 }
             });
