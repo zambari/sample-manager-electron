@@ -1,8 +1,10 @@
 //! Undo / redo: snapshots of the edit state, with key-repeat runs folded into one step.
+//! A mouse gesture (a fader or drag let go) is always its own step.
 
 use super::*;
 
-/// One undo step: the trim, playhead, gain and crop. Prefs (loop, snap...)
+/// One undo step: the trim, playhead, gain, crop and the kit's tail-trim
+/// settings (fades, slot length, threshold). Other prefs (loop, snap...)
 /// are deliberately left out.
 #[derive(Clone)]
 pub(super) struct EditState {
@@ -17,6 +19,19 @@ pub(super) struct EditState {
     rev: u64,
     markers: Vec<usize>,
     names: Vec<String>,
+    trim: TrimState,
+}
+
+/// The kit tail-trim settings: per-slice fade shapes, the slot length and
+/// the shared fade / threshold prefs.
+#[derive(Clone, PartialEq)]
+pub(super) struct TrimState {
+    fades: Vec<(usize, fade::FadeShape)>,
+    slot_cut: Option<usize>,
+    tail_db: f32,
+    fade_ms: f32,
+    fade_k: f32,
+    by_level: bool,
 }
 
 pub(super) const CH_IN: u8 = 1;
@@ -26,6 +41,7 @@ pub(super) const CH_GAIN: u8 = 8;
 pub(super) const CH_CROP: u8 = 16;
 pub(super) const CH_AUDIO: u8 = 32;
 pub(super) const CH_MARKS: u8 = 64;
+pub(super) const CH_TRIM: u8 = 128;
 
 impl EditState {
     /// Which fields differ, as a CH_* mask.
@@ -52,6 +68,9 @@ impl EditState {
         if self.markers != o.markers || self.names != o.names {
             m |= CH_MARKS;
         }
+        if self.trim != o.trim {
+            m |= CH_TRIM;
+        }
         m
     }
 }
@@ -66,6 +85,12 @@ pub(super) struct History {
     /// (holding `]`, nudging with arrows) into one undo step.
     pub(super) last_mask: u8,
     pub(super) last_time: f64,
+    /// A mouse gesture was in progress since the last step: the step it
+    /// ends with never merges into the one before.
+    pub(super) gesture: bool,
+    /// Bumped by every recorded step, undo and redo, so callers can tell
+    /// whether anything happened since they last looked.
+    pub(super) stamp: u64,
 }
 
 pub(super) const UNDO_LIMIT: usize = 300;
@@ -73,6 +98,37 @@ pub(super) const UNDO_LIMIT: usize = 300;
 pub(super) const COALESCE_SECS: f64 = 0.6;
 
 impl Editor {
+    fn trim_state(&self) -> TrimState {
+        let mut fades: Vec<_> = self.fades.iter().map(|(&i, &f)| (i, f)).collect();
+        fades.sort_by_key(|f| f.0);
+        TrimState {
+            fades,
+            slot_cut: self.slot_cut,
+            tail_db: self.prefs.tail_db,
+            fade_ms: self.prefs.trim_fade_ms,
+            fade_k: self.prefs.trim_fade_k,
+            by_level: self.prefs.grid_trim_by_level,
+        }
+    }
+
+    fn restore_trim(&mut self, t: TrimState) {
+        self.fades = t.fades.into_iter().collect();
+        self.slot_cut = t.slot_cut;
+        self.prefs.tail_db = t.tail_db;
+        self.prefs.trim_fade_ms = t.fade_ms;
+        self.prefs.trim_fade_k = t.fade_k;
+        self.prefs.grid_trim_by_level = t.by_level;
+    }
+
+    /// The prefs were just handed over from another slot: take the new
+    /// trim settings as the baseline, so the swap isn't an undo step.
+    pub fn rebase_prefs(&mut self) {
+        let t = self.trim_state();
+        if let Some(c) = self.history.committed.as_mut() {
+            c.trim = t;
+        }
+    }
+
     pub(super) fn state(&self) -> EditState {
         EditState {
             sel: self.sel,
@@ -84,6 +140,7 @@ impl Editor {
             rev: self.rev,
             markers: self.markers.clone(),
             names: self.names.clone(),
+            trim: self.trim_state(),
         }
     }
 
@@ -104,6 +161,7 @@ impl Editor {
         self.gain_db = st.gain_db;
         self.markers = st.markers;
         self.names = st.names;
+        self.restore_trim(st.trim);
         self.stats_key = None;
         self.grid = self.infer_grid();
         self.auto_grid &= self.grid.is_some();
@@ -113,11 +171,16 @@ impl Editor {
     /// per frame; pass `busy` while a drag / slider / typed edit is still in
     /// progress so the whole gesture lands as one step when it ends.
     pub fn track_history(&mut self, busy: bool, now: f64) {
-        if busy || self.current.is_none() {
+        if busy {
+            self.history.gesture = true;
+            return;
+        }
+        if self.current.is_none() {
             return;
         }
         let now_state = self.state();
         let h = &mut self.history;
+        let gesture = std::mem::take(&mut h.gesture);
         let Some(prev) = h.committed.take() else {
             h.committed = Some(now_state);
             return;
@@ -127,7 +190,8 @@ impl Editor {
             h.committed = Some(prev);
             return;
         }
-        let coalesce = mask == h.last_mask
+        let coalesce = !gesture
+            && mask == h.last_mask
             && mask & (CH_CROP | CH_AUDIO | CH_MARKS) == 0
             && now - h.last_time < COALESCE_SECS;
         if !coalesce {
@@ -137,9 +201,23 @@ impl Editor {
             }
         }
         h.redo.clear();
+        h.stamp += 1;
         h.committed = Some(now_state);
         h.last_mask = mask;
         h.last_time = now;
+    }
+
+    /// Record whatever changed as a step of its own, now, unmerged with
+    /// the one before or after.
+    pub fn checkpoint(&mut self) {
+        self.history.gesture = true;
+        self.track_history(false, f64::INFINITY);
+        self.history.last_mask = 0;
+    }
+
+    /// Changes whenever a step is recorded, undone or redone.
+    pub fn history_stamp(&self) -> u64 {
+        self.history.stamp
     }
 
     pub fn can_undo(&self) -> bool {
@@ -159,6 +237,7 @@ impl Editor {
         self.restore(prev);
         self.history.committed = Some(self.state());
         self.history.last_mask = 0;
+        self.history.stamp += 1;
     }
 
     pub fn redo(&mut self) {
@@ -170,5 +249,6 @@ impl Editor {
         self.restore(next);
         self.history.committed = Some(self.state());
         self.history.last_mask = 0;
+        self.history.stamp += 1;
     }
 }

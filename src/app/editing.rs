@@ -238,6 +238,7 @@ impl App {
             dst.display()
         );
         self.saving.insert(dst.clone(), None);
+        self.export_rename = Some(dst.clone());
         self.editor.export(dst, mono);
     }
 
@@ -376,8 +377,16 @@ impl App {
             }
             EdAction::Crop => ed.crop_to_selection(),
             EdAction::Uncrop => ed.uncrop(),
-            EdAction::Undo => ed.undo(),
-            EdAction::Redo => ed.redo(),
+            EdAction::Undo => {
+                if !self.undo_kit_add(true) {
+                    self.editor.undo();
+                }
+            }
+            EdAction::Redo => {
+                if !self.redo_kit_add() {
+                    self.editor.redo();
+                }
+            }
             EdAction::Stop => self.engine.stop(),
             EdAction::SetIn => ed.set_in(here),
             EdAction::SetOut => ed.set_out(here),
@@ -431,6 +440,7 @@ impl App {
                 }
             }
             EdAction::SelectAll => ed.select_all(),
+            EdAction::Normalize if ed.is_kit => ed.normalize_sel(),
             EdAction::Normalize => ed.normalize(),
             EdAction::InsertSilence => {
                 ed.insert_silence(0.1);
@@ -623,6 +633,12 @@ impl App {
         for o in self.editor.drain() {
             match o {
                 Outcome::Loaded => {
+                    // A different file starts at zero pitch; a reload of the
+                    // same one (after an export, say) keeps it.
+                    if self.editor.path() != self.pitch_path.as_deref() {
+                        self.pitch_path = self.editor.path().map(Path::to_path_buf);
+                        self.pitch = 0.0;
+                    }
                     if is_kit && self.editor.path().is_some() {
                         if let Some((_, new)) = self
                             .kit_seed
@@ -700,8 +716,10 @@ impl App {
                         "Exported {}",
                         p.file_name().unwrap_or_default().to_string_lossy()
                     );
-                    // A kit exported somewhere new: name it right away.
-                    let rename = is_kit && self.editor.path() != Some(p.as_path());
+                    // An export gets its name typed right away (the default
+                    // is only a start). Not while closing or quitting.
+                    let rename = self.export_rename.take_if(|e| *e == p).is_some()
+                        && self.leave_after_save.is_none();
                     // Replaced the file that's open: show what's on disk now.
                     if self.editor.path() == Some(p.as_path()) {
                         if self.voice_path.as_deref() == Some(p.as_path()) {
@@ -731,6 +749,7 @@ impl App {
                     // A failed render never reaches the upload, and the
                     // edits it was saving are still unsaved: stay put.
                     self.staged_upload = None;
+                    self.export_rename = None;
                     self.leave_after_save = None;
                     self.saving.retain(|_, done| done.is_some());
                     self.errors.push(e);

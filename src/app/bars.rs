@@ -39,17 +39,6 @@ impl App {
                     }
                 }
             });
-        if self.engine.device_rate > 0 {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{:.1} kHz · {} ch",
-                    self.engine.device_rate as f64 / 1000.0,
-                    self.engine.device_channels
-                ))
-                .weak()
-                .small(),
-            );
-        }
         ui.separator();
         self.volume_and_meter(ui);
         if let Some(dev) = choice {
@@ -67,16 +56,31 @@ impl App {
     /// plays, the strip shows a wide, flat slice of a phase scope.
     fn volume_and_meter(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().slider_width = 80.0;
-        let slider = egui::Slider::new(&mut self.volume, 0.0..=1.25)
-            .fixed_decimals(2)
+        const VOL_MAX: f32 = 1.25;
+        let slider = egui::Slider::new(&mut self.volume, 0.0..=VOL_MAX)
+            .show_value(false)
             .trailing_fill(true);
-        let r = ui
-            .add(slider)
-            .on_hover_text("Output volume (not saved). Double-click to reset to 1.0");
+        let r = ui.add(slider);
+        // Tick marks at unity gain, above and below the rail. Mirrors egui's
+        // handle inset (radius = height / 2.5) so the tick lines up.
+        {
+            let rect = r.rect;
+            let inset = rect.height() / 2.5;
+            let x = rect.left() + inset + (rect.width() - 2.0 * inset) / VOL_MAX;
+            let stroke = egui::Stroke::new(1.0, ui.visuals().weak_text_color());
+            let p = ui.painter();
+            p.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.top() + 3.0)], stroke);
+            p.line_segment([egui::pos2(x, rect.bottom() - 3.0), egui::pos2(x, rect.bottom())], stroke);
+        }
+        let r = r.on_hover_text(format!(
+            "Output volume {:.2} (not saved). Tick marks 1.0; double-click to reset to it",
+            self.volume
+        ));
         if r.double_clicked() {
             self.volume = 1.0;
         }
         self.engine.set_volume(self.volume);
+        self.pitch_fader(ui);
 
         // Filled in once the meter is placed and the strip's width is known,
         // but painted beneath the meter.
@@ -169,6 +173,108 @@ impl App {
             }
             ui.painter().set(strip_bg, egui::Shape::Vec(shapes));
         }
+    }
+
+    /// DJ-style pitch fader: right is faster. Speeds pitch and tempo
+    /// together over ±50 %. Double-click (or the readout) recentres it.
+    fn pitch_fader(&mut self, ui: &mut egui::Ui) {
+        let range = PITCH_RANGE;
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(110.0, 16.0), egui::Sense::click_and_drag());
+        let x_of = |p: f32| rect.left() + rect.width() * (p / range * 0.5 + 0.5).clamp(0.0, 1.0);
+        if resp.dragged() || (resp.clicked() && !resp.double_clicked()) {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let fine = ui.input(|i| i.modifiers.shift);
+                let p = if fine && resp.dragged() {
+                    // Shift-drag: tenth of the speed for fine nudges.
+                    self.pitch + resp.drag_delta().x / rect.width() * 2.0 * range * 0.1
+                } else {
+                    ((pos.x - rect.left()) / rect.width() * 2.0 - 1.0) * range
+                };
+                // A small dead zone snaps to centre, like a fader detent.
+                self.pitch = if p.abs() < range * 0.015 { 0.0 } else { p.clamp(-range, range) };
+            }
+        }
+        if resp.double_clicked() {
+            self.pitch = 0.0;
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
+            if scroll != 0.0 {
+                // 0.1% per notch-ish.
+                self.pitch = (self.pitch + scroll.signum() * 0.001).clamp(-range, range);
+                if self.pitch.abs() < 0.0005 {
+                    self.pitch = 0.0;
+                }
+            }
+        }
+        self.pitch = self.pitch.clamp(-range, range);
+
+        let p = ui.painter();
+        let v = ui.visuals();
+        let cy = rect.center().y;
+        // Track slot.
+        p.rect_filled(
+            egui::Rect::from_x_y_ranges(rect.left()..=rect.right(), cy - 1.5..=cy + 1.5),
+            1.0,
+            v.extreme_bg_color,
+        );
+        // Ticks: centre detent tall, quarters short.
+        for k in -4..=4 {
+            let x = x_of(range * k as f32 / 4.0);
+            let h = if k == 0 { 7.0 } else if k % 2 == 0 { 4.0 } else { 2.5 };
+            p.line_segment(
+                [egui::pos2(x, cy - h), egui::pos2(x, cy + h)],
+                egui::Stroke::new(1.0, v.weak_text_color().gamma_multiply(if k == 0 { 1.0 } else { 0.6 })),
+            );
+        }
+        // Fill from centre to the cap when off-centre.
+        let cx = x_of(self.pitch);
+        if self.pitch != 0.0 {
+            let mid = x_of(0.0);
+            p.rect_filled(
+                egui::Rect::from_x_y_ranges(mid.min(cx)..=mid.max(cx), cy - 1.5..=cy + 1.5),
+                0.0,
+                theme::ACCENT,
+            );
+        }
+        // Fader cap with a centre line.
+        let cap = egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(8.0, rect.height()));
+        let cap_fill = if resp.hovered() || resp.dragged() {
+            egui::Color32::from_gray(200)
+        } else {
+            egui::Color32::from_gray(160)
+        };
+        p.rect_filled(cap, 1.5, cap_fill);
+        p.line_segment(
+            [egui::pos2(cx, cap.top() + 2.0), egui::pos2(cx, cap.bottom() - 2.0)],
+            egui::Stroke::new(
+                1.0,
+                if self.pitch == 0.0 { egui::Color32::from_rgb(96, 168, 104) } else { theme::ACCENT },
+            ),
+        );
+        resp.on_hover_text(
+            "Pitch (speed). Drag or scroll; Shift-drag for fine.\nDouble-click to reset. Resets on each new sample.",
+        );
+
+        // Readout: click to reset.
+        let txt = if self.pitch == 0.0 {
+            " 0.0%".to_owned()
+        } else {
+            format!("{:+.1}%", self.pitch * 100.0)
+        };
+        let mut rt = egui::RichText::new(txt).monospace().small();
+        if self.pitch != 0.0 {
+            rt = rt.color(theme::ACCENT_BRIGHT);
+        }
+        if ui
+            .add(egui::Label::new(rt).sense(egui::Sense::click()))
+            .on_hover_text("Click to reset pitch")
+            .clicked()
+        {
+            self.pitch = 0.0;
+        }
+        self.engine.set_speed(1.0 + self.pitch);
     }
 
     /// Goniometer (mid up, side across) scaled so side spans the strip's
@@ -446,3 +552,6 @@ impl App {
         });
     }
 }
+
+/// Pitch fader range, as a fraction each side (±50 %).
+const PITCH_RANGE: f32 = 0.5;

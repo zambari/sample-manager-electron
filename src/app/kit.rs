@@ -7,6 +7,19 @@ use super::*;
 use crate::editor::AudioClip;
 use crate::ui::editor_view::KitEntry;
 
+/// The last slice K added to the kit, for undoing it from outside the kit.
+pub(super) struct KitAdd {
+    kit: Option<PathBuf>,
+    /// Kit and browsed-sample history stamps right after it: if either
+    /// moved, something newer is what ⌘Z should undo.
+    kit_stamp: u64,
+    browser_stamp: u64,
+    /// The source sample, if this add is what marked it as used.
+    newly_committed: Option<PathBuf>,
+    /// Undone already; ⇧⌘Z can redo it.
+    undone: bool,
+}
+
 fn slot_name(ed: &Editor) -> Option<String> {
     let p = ed.path().or(ed.loading.as_deref())?;
     Some(
@@ -134,6 +147,8 @@ impl App {
         std::mem::swap(slot, p);
         std::mem::swap(&mut slot.clip, &mut p.clip);
         std::mem::swap(&mut slot.prefs, &mut p.prefs);
+        slot.rebase_prefs();
+        p.rebase_prefs();
     }
 
     /// Fill the empty kit slot with the first parked kit.
@@ -226,10 +241,71 @@ impl App {
     }
 
     pub(super) fn swap_slots(&mut self) {
+        self.editor.prefs.stash_mono(self.showing_kit);
+        self.editor.prefs.load_mono(!self.showing_kit);
         std::mem::swap(&mut self.editor, &mut self.other);
         std::mem::swap(&mut self.editor.clip, &mut self.other.clip);
         std::mem::swap(&mut self.editor.prefs, &mut self.other.prefs);
+        self.editor.rebase_prefs();
+        self.other.rebase_prefs();
         self.showing_kit = !self.showing_kit;
+    }
+
+    /// ⌘Z while the browsed sample (or a file list) is in front: take the
+    /// last K back out of the kit, if nothing has happened since. From the
+    /// sample editor, its own edits since the K come first.
+    pub(super) fn undo_kit_add(&mut self, from_editor: bool) -> bool {
+        let Some(m) = self.kit_add.as_ref() else {
+            return false;
+        };
+        let live = !self.showing_kit
+            && !m.undone
+            && self.other.path() == m.kit.as_deref()
+            && self.other.history_stamp() == m.kit_stamp
+            && (!from_editor || self.editor.history_stamp() == m.browser_stamp)
+            && self.other.can_undo();
+        if !live {
+            return false;
+        }
+        self.other.undo();
+        let m = self.kit_add.as_mut().expect("checked above");
+        m.undone = true;
+        m.kit_stamp = self.other.history_stamp();
+        m.browser_stamp = self.editor.history_stamp();
+        if let Some(src) = m.newly_committed.clone() {
+            self.committed_dirty |= self.committed.remove(&src);
+        }
+        self.status = format!(
+            "Undid add to {} — ⇧⌘Z puts it back",
+            self.kit_name().unwrap_or_default()
+        );
+        true
+    }
+
+    /// ⇧⌘Z right after `undo_kit_add`: put the slice back.
+    pub(super) fn redo_kit_add(&mut self) -> bool {
+        let Some(m) = self.kit_add.as_ref() else {
+            return false;
+        };
+        let live = !self.showing_kit
+            && m.undone
+            && self.other.path() == m.kit.as_deref()
+            && self.other.history_stamp() == m.kit_stamp
+            && self.editor.history_stamp() == m.browser_stamp
+            && self.other.can_redo();
+        if !live {
+            return false;
+        }
+        self.other.redo();
+        let m = self.kit_add.as_mut().expect("checked above");
+        m.undone = false;
+        m.kit_stamp = self.other.history_stamp();
+        m.browser_stamp = self.editor.history_stamp();
+        if let Some(src) = m.newly_committed.clone() {
+            self.mark_committed([src]);
+        }
+        self.status = format!("Added back to {}", self.kit_name().unwrap_or_default());
+        true
     }
 
     /// K: add the browsed sample's selection to the end of the kit, or ask
@@ -252,13 +328,25 @@ impl App {
         }
         if self.other.current.is_some() {
             let secs = clip.frames() as f64 / clip.rate.max(1) as f64;
+            // The add is one undo step of its own in the kit.
+            self.other.checkpoint();
             if let Err(e) = self.other.append(&clip) {
                 self.status = e;
                 return;
             }
-            if let Some(src) = self.editor.path().map(Path::to_path_buf) {
+            self.other.checkpoint();
+            let src = self.editor.path().map(Path::to_path_buf);
+            let newly_committed = src.clone().filter(|s| !self.committed.contains(s));
+            if let Some(src) = src {
                 self.mark_committed([src]);
             }
+            self.kit_add = Some(KitAdd {
+                kit: self.other.path().map(Path::to_path_buf),
+                kit_stamp: self.other.history_stamp(),
+                browser_stamp: self.editor.history_stamp(),
+                newly_committed,
+                undone: false,
+            });
             let where_ = match self.other.grid {
                 Some(n) => format!(
                     "slot {}/{n} of",

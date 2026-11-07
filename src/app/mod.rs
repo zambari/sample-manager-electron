@@ -138,6 +138,9 @@ pub struct App {
     rename_after: Option<(u64, Vec<PathBuf>)>,
     /// An export's upload job, and the device file to select once it lands.
     reveal_after: Option<(u64, PathBuf)>,
+    /// The file an export (not a save in place) is writing: once written,
+    /// it opens in the inline rename.
+    export_rename: Option<PathBuf>,
     /// A local job's summary to show instead of a plain "Done".
     finish_note: Option<(u64, String)>,
     /// Device transfers queued or running: their direction and `(source,
@@ -189,6 +192,8 @@ pub struct App {
     kit_seed: Option<(PathBuf, PathBuf)>,
     /// Grid picked last time, offered for the next new kit.
     kit_grid: Option<usize>,
+    /// The last K, so ⌘Z away from the kit can take it back out.
+    kit_add: Option<kit::KitAdd>,
     /// Waiting on the "name the slice kit" question.
     kit_naming: Option<kit::KitNaming>,
     /// The editor column has the keyboard. `focused` then remembers which
@@ -222,6 +227,11 @@ pub struct App {
     side_widths: [f32; 2],
     /// Master output volume. Session only, never saved.
     volume: f32,
+    /// Pitch fader, as a fraction (+0.05 = 5% faster). Resets when a
+    /// different file loads.
+    pitch: f32,
+    /// File the pitch was last reset for, so reloading the same file keeps it.
+    pitch_path: Option<PathBuf>,
     /// Level meter: shown level and peak-hold mark per side (linear).
     meter: [f32; 2],
     meter_hold: [f32; 2],
@@ -326,10 +336,10 @@ impl App {
 
         let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
         let engine = Engine::open(output_device.as_deref());
-        let mut editor = Editor::new(
-            ctx.clone(),
-            saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default(),
-        );
+        let mut prefs = saved.as_ref().map(|s| s.editor.clone()).unwrap_or_default();
+        // Starts on the browsed sample.
+        prefs.load_mono(false);
+        let mut editor = Editor::new(ctx.clone(), prefs);
         let session = saved
             .as_ref()
             .and_then(|s| s.session.clone())
@@ -380,6 +390,7 @@ impl App {
             browsed_kit: None,
             kit_pending: None,
             kit_seed: None,
+            kit_add: None,
             kit_grid: saved
                 .as_ref()
                 .map_or(Some(crate::editor::AUTO_GRID), |s| s.kit_grid),
@@ -408,6 +419,8 @@ impl App {
             last_stream_error: None,
             side_widths: [0.0; 2],
             volume: 1.0,
+            pitch: 0.0,
+            pitch_path: None,
             meter: [0.0; 2],
             meter_hold: [0.0; 2],
             window_focused: true,
@@ -450,6 +463,7 @@ impl App {
             undo_jobs: Default::default(),
             rename_after: None,
             reveal_after: None,
+            export_rename: None,
             finish_note: None,
             device_queued: Default::default(),
             path_edit: None,
@@ -494,7 +508,11 @@ impl App {
             dest: pane(&self.dest),
             focused: self.focused,
             show_hidden: self.show_hidden,
-            editor: self.editor.prefs.clone(),
+            editor: {
+                let mut p = self.editor.prefs.clone();
+                p.stash_mono(self.showing_kit);
+                p
+            },
             output_device: self.output_device.clone(),
             favourites: self.favourites.clone(),
             opened: if with_opened {

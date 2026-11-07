@@ -605,10 +605,23 @@ impl App {
         match std::fs::rename(from, &target) {
             Ok(()) => {
                 self.push_undo(undo::FileUndo::Moved {
-                    pairs: vec![(from.to_path_buf(), target)],
+                    pairs: vec![(from.to_path_buf(), target.clone())],
                     what: "rename",
                     replaced: false,
                 });
+                // The open file (sample or kit) follows its new name, so
+                // the cursor landing on it doesn't load it again.
+                for ed in [&mut self.editor, &mut self.other] {
+                    if ed.path() == Some(from) {
+                        ed.set_path(target.clone());
+                    }
+                }
+                if self.voice_path.as_deref() == Some(from) {
+                    self.voice_path = Some(target.clone());
+                }
+                // Keep the cursor on the renamed row, not whatever now sits
+                // at its old index.
+                self.reveal_when_listed(&target, false);
                 self.sizes.invalidate_subtree(parent);
                 self.reload_showing(parent, false);
             }

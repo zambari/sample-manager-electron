@@ -40,6 +40,9 @@ const UNDO_LIMIT: usize = 100;
 
 impl App {
     pub(super) fn push_undo(&mut self, step: FileUndo) {
+        // A newer file operation comes first; the kit add stays undoable
+        // in the kit itself.
+        self.kit_add = None;
         self.undo.push(step);
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
@@ -149,6 +152,9 @@ impl App {
     }
 
     pub(super) fn undo_file(&mut self) {
+        if self.undo_kit_add(false) {
+            return;
+        }
         if !self.active_jobs.is_empty() {
             self.status = "Undo waits until the running job finishes".to_owned();
             return;

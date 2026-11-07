@@ -21,7 +21,7 @@ pub(super) const MIN_SOUND_S: f64 = 0.1;
 const FADE_K_RANGE: (f32, f32) = (1.0 / 8.0, 8.0);
 
 /// A fade shaped by dragging on the wave: length in frames and curve.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct FadeShape {
     pub len: usize,
     pub k: f32,

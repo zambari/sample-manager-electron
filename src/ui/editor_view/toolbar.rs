@@ -55,31 +55,33 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
         {
             out.push(EdIntent::ShowKit(false));
         }
-        if !s.showing_kit && ed.current.is_some() {
-            if ui
-                .small_button("Start kit")
-                .on_hover_text("Make this file the slice kit, to add slices to its end")
-                .clicked()
-            {
-                out.push(EdIntent::UseAsKit);
-            }
-        }
+        let show_start = !s.showing_kit && ed.current.is_some();
         // No kit yet: nothing to show until K starts one.
         if let Some(k) = &s.kit_name {
-            ui.separator();
-            // Room the controls after the kit tabs need.
+            // Order: → add, slot boxes, slot picker, kit tabs, ▾ menu, Start kit.
             let fill_total = match s.kit_fill {
                 (n, Some(g)) if !s.showing_kit || n > 1 => {
                     Some(if s.kit_grid == Some(crate::editor::AUTO_GRID) { g.max(8) } else { g })
                 }
                 _ => None,
             };
+            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
+                out.push(EdIntent::AddSlice);
+            }
+            if let (n, Some(total)) = (s.kit_fill.0, fill_total) {
+                fill_boxes(ui, n, total);
+            }
+            grid_picker(ui, s.kit_grid, out);
+            ui.separator();
+            // Room the controls after the kit tabs need.
             let gap = ui.spacing().item_spacing.x;
             let reserve = 30.0 // ▾ menu
-                + 80.0 // grid picker
-                + ui.spacing().interact_size.y * 1.6 // →
-                + fill_total.map_or(0.0, fill_width)
-                + 6.0 * gap;
+                + if show_start {
+                    button_text_width(ui, "Start kit") + 2.0 * ui.spacing().button_padding.x + gap
+                } else {
+                    0.0
+                }
+                + 4.0 * gap;
             let all_fit = s.kits.len() > 1 && {
                 let tab_w = |t: &str| button_text_width(ui, t) + 2.0 * ui.spacing().button_padding.x + gap;
                 let active = tab_w(&format!("[00/00] {}      ●", crate::app::short_name(k, 28)));
@@ -111,12 +113,17 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
                 kit_tab(ui, k, s, out);
             }
             kit_switcher(ui, ed, s, !all_fit, out);
-            grid_picker(ui, s.kit_grid, out);
-            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
-                out.push(EdIntent::AddSlice);
+        }
+        if show_start {
+            if s.kit_name.is_none() {
+                ui.separator();
             }
-            if let (n, Some(total)) = (s.kit_fill.0, fill_total) {
-                fill_boxes(ui, n, total);
+            if ui
+                .small_button("Start kit")
+                .on_hover_text("Make this file the slice kit, to add slices to its end")
+                .clicked()
+            {
+                out.push(EdIntent::UseAsKit);
             }
         }
     });
@@ -610,20 +617,41 @@ pub(super) fn toolbar(
         section_header(ui, "Gain");
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(has, |ui| {
-                ui.label("Gain");
-                ui.add(
-                    egui::Slider::new(&mut ed.gain_db, -36.0..=36.0)
-                        .suffix(" dB")
-                        .step_by(0.1)
-                        .clamping(egui::SliderClamping::Never),
-                )
-                .on_hover_text("Double-click the number to type a value");
+                // In a kit, gain scales only the selected audio.
+                let kit = ed.is_kit;
+                ui.label(if kit { "Selection gain" } else { "Gain" });
+                let mut sel_db = ed.sel_gain_db();
+                let db = if kit { &mut sel_db } else { &mut ed.gain_db };
+                let changed = ui
+                    .add(
+                        egui::Slider::new(db, -36.0..=36.0)
+                            .suffix(" dB")
+                            .step_by(0.1)
+                            .clamping(egui::SliderClamping::Never),
+                    )
+                    .on_hover_text(if kit {
+                        "Gain on the selected audio only; the rest of the kit is untouched. Double-click the number to type a value"
+                    } else {
+                        "Double-click the number to type a value"
+                    })
+                    .changed();
+                if kit && changed {
+                    ed.set_sel_gain(sel_db);
+                }
                 if ui
                     .button("Normalize")
-                    .on_hover_text("N — set gain so the region peaks at the target")
+                    .on_hover_text(if kit {
+                        "N — gain the selection so it peaks at the target"
+                    } else {
+                        "N — set gain so the region peaks at the target"
+                    })
                     .clicked()
                 {
-                    ed.normalize();
+                    if kit {
+                        ed.normalize_sel();
+                    } else {
+                        ed.normalize();
+                    }
                 }
                 ui.add(
                     egui::DragValue::new(&mut ed.prefs.normalize_db)
@@ -634,10 +662,18 @@ pub(super) fn toolbar(
                 .on_hover_text("Normalize target peak");
                 if ui
                     .button("Reset")
-                    .on_hover_text("Whole file, 0 dB")
+                    .on_hover_text(if kit {
+                        "Selection back to 0 dB (while it's still selected)"
+                    } else {
+                        "Whole file, 0 dB"
+                    })
                     .clicked()
                 {
-                    ed.reset();
+                    if kit {
+                        ed.set_sel_gain(0.0);
+                    } else {
+                        ed.reset();
+                    }
                 }
             });
         });

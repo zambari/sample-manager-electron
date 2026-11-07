@@ -132,6 +132,7 @@ impl Editor {
             // The layout is where the kit starts, not an undo step.
             self.history = History {
                 committed: Some(self.state()),
+                stamp: self.history.stamp,
                 ..History::default()
             };
         }

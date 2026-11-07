@@ -39,6 +39,9 @@ struct Shared {
     error: Mutex<Option<String>>,
     /// Master volume (f32 bits), applied on top of the editor's gain.
     volume: AtomicU32,
+    /// Playback speed multiplier (f32 bits) from the pitch fader. Shifts
+    /// pitch and tempo together, like a turntable.
+    speed: AtomicU32,
     /// Output peak per side since the UI last read it (f32 bits; positive
     /// floats sort like their bit patterns, so `fetch_max` works).
     peak: [AtomicU32; 2],
@@ -87,6 +90,7 @@ impl Engine {
             playing: AtomicBool::new(false),
             error: Mutex::new(None),
             volume: AtomicU32::new(1.0f32.to_bits()),
+            speed: AtomicU32::new(1.0f32.to_bits()),
             peak: [AtomicU32::new(0), AtomicU32::new(0)],
             scope: (0..SCOPE_LEN).map(|_| AtomicU64::new(0)).collect(),
             scope_at: AtomicUsize::new(0),
@@ -215,6 +219,10 @@ impl Engine {
         self.shared.volume.store(v.to_bits(), Ordering::Relaxed);
     }
 
+    pub fn set_speed(&self, s: f32) {
+        self.shared.speed.store(s.to_bits(), Ordering::Relaxed);
+    }
+
     /// Output peaks (L, R) since the last call, then reset.
     pub fn take_peaks(&self) -> [f32; 2] {
         self.shared
@@ -293,7 +301,8 @@ fn render<T: SizedSample + FromSample<f32>>(
 
     // Play at the file's own rate on whatever the device runs at. Linear
     // interpolation is plenty for auditioning trim points.
-    let step = sample.rate as f64 / dev_rate;
+    let speed = f32::from_bits(sh.speed.load(Ordering::Relaxed)) as f64;
+    let step = sample.rate as f64 / dev_rate * speed.max(0.01);
     let src_ch = sample.channels.len();
     let frames = sample.frames();
     let end = v.end.min(frames).max(1);

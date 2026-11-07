@@ -25,6 +25,7 @@ pub use fade::{FadeEnd, fade_gain, fade_k_for_mid};
 pub use trim::{SliceEnd, TrimPlan};
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
 mod selection;
+mod sel_gain;
 
 use history::History;
 
@@ -46,9 +47,14 @@ pub struct Prefs {
     /// Scroll the waveform along with the play cursor.
     pub follow_playback: bool,
     /// Fold multichannel files to one channel: what you hear, the stats,
-    /// normalize and export all follow. Not saved: always starts off.
+    /// normalize and export all follow. The live value for the slot on
+    /// screen; saved through `sample_mono` / `kit_mono`.
     #[serde(skip)]
     pub mono: Option<Fold>,
+    /// Mono setting for the browsed sample (stereo by default).
+    pub sample_mono: Option<Fold>,
+    /// Mono setting for kits (left channel by default).
+    pub kit_mono: Option<Fold>,
     /// Last fold picked, so M turns mono back on the same way.
     pub fold: Fold,
     /// Which editor panels are shown.
@@ -104,6 +110,22 @@ impl Default for Panels {
     }
 }
 
+impl Prefs {
+    /// Remember the live mono setting as the kit's or the sample's.
+    pub fn stash_mono(&mut self, kit: bool) {
+        if kit {
+            self.kit_mono = self.mono;
+        } else {
+            self.sample_mono = self.mono;
+        }
+    }
+
+    /// Make the kit's or the sample's mono setting the live one.
+    pub fn load_mono(&mut self, kit: bool) {
+        self.mono = if kit { self.kit_mono } else { self.sample_mono };
+    }
+}
+
 impl Default for Prefs {
     fn default() -> Self {
         Self {
@@ -115,6 +137,8 @@ impl Default for Prefs {
             play_from_in: false,
             follow_playback: true,
             mono: None,
+            sample_mono: None,
+            kit_mono: Some(Fold::Left),
             fold: Fold::Mix,
             panels: Panels::default(),
             tail_db: -50.0,
@@ -354,6 +378,8 @@ pub struct Editor {
     clean_rev: u64,
     /// Audio cut or copied, for pasting (into this file or another).
     pub clip: Option<AudioClip>,
+    /// Kit gain being dialed in on the selection (see [`sel_gain`]).
+    sel_gain: Option<sel_gain::SelGain>,
     stats: Stats,
     phase: Phase,
     file_stats: Stats,
@@ -405,6 +431,7 @@ impl Editor {
             loaded_rev: 0,
             clean_rev: 0,
             clip: None,
+            sel_gain: None,
             stats: Stats::default(),
             phase: Phase::default(),
             file_stats: Stats::default(),
@@ -683,6 +710,7 @@ impl Editor {
         self.clean_rev = self.rev;
         self.history = History {
             committed: Some(self.state()),
+            stamp: self.history.stamp,
             ..History::default()
         };
         self.grid = self.infer_grid();
