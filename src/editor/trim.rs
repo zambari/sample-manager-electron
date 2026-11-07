@@ -207,7 +207,8 @@ impl Editor {
                         slice: i,
                         start: d.a + cut - l,
                         end: d.a + cut,
-                        k: shape.map_or(CUT_K, |sh| sh.k),
+                        k: shape.map_or(self.prefs.trim_fade_k, |sh| sh.k),
+                        own: shape.is_some(),
                         tail: false,
                     }
                 });
@@ -244,14 +245,14 @@ impl Editor {
                 } else if s + win >= e {
                     // Loud right up to where it stops: fade over its end.
                     (!d.decays && len >= frames(MIN_SOUND_S)).then(|| {
-                        let def = frames(FADE_S).min(len / 5);
-                        let l = shape.map_or(def, |sh| sh.len);
+                        let l = shape.map_or(tail_len, |sh| sh.len);
                         let l = l.clamp(frames(MIN_FADE_S).min(len / 2), len * 9 / 10);
                         FadeEnd {
                             slice: i,
                             start: e - l,
                             end: e,
-                            k: shape.map_or(CUT_K, |sh| sh.k),
+                            k: shape.map_or(self.prefs.trim_fade_k, |sh| sh.k),
+                            own: shape.is_some(),
                             tail: false,
                         }
                     })
@@ -263,7 +264,8 @@ impl Editor {
                         slice: i,
                         start: s,
                         end: s + l,
-                        k: shape.map_or(TAIL_K, |sh| sh.k),
+                        k: shape.map_or(self.prefs.trim_fade_k, |sh| sh.k),
+                        own: shape.is_some(),
                         tail: true,
                     })
                 };

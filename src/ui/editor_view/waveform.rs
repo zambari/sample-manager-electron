@@ -179,10 +179,12 @@ pub(super) fn waveform(
             .or(resp.interact_pointer_pos());
         let alt = ui.input(|i| i.modifiers.alt);
         ed.drag = origin.map(|o| {
-            if resp.dragged_by(egui::PointerButton::Middle) || alt {
+            let fade = handle_at(o).filter(|_| !resp.dragged_by(egui::PointerButton::Middle));
+            if let Some(e) = fade {
+                // Every fade shares one shape; ⌥ shapes just this one.
+                Drag::Fade(e.slice, if e.tail { e.start } else { e.end }, e.tail, alt || e.own)
+            } else if resp.dragged_by(egui::PointerButton::Middle) || alt {
                 Drag::Pan
-            } else if let Some(e) = handle_at(o) {
-                Drag::Fade(e.slice, if e.tail { e.start } else { e.end }, e.tail)
             } else if near(x_in, o)
                 && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs())
             {
@@ -209,7 +211,7 @@ pub(super) fn waveform(
                 Drag::Move(orig, grab) => ed.move_region(orig, m.frame(px) as i64 - grab as i64),
                 Drag::Pan => ed.view.start -= resp.drag_delta().x as f64 * ed.view.fpp,
                 Drag::Scrub(..) => {}
-                Drag::Fade(slice, fixed, tail) => {
+                Drag::Fade(slice, fixed, tail, own) => {
                     // Sideways: the knob is the fade's middle, so the fade
                     // runs twice that far from its fixed end. Up / down:
                     // the gain at the middle, which sets the curve.
@@ -218,8 +220,12 @@ pub(super) fn waveform(
                     } else {
                         2 * (fixed - m.frame(px).min(fixed.saturating_sub(1)))
                     };
-                    let g = (1.0 - (p.y - fade_top) / fade_h).clamp(0.5f32.powf(8.0), 0.5);
-                    ed.shape_fade(slice, len, g.ln() / 0.5f32.ln());
+                    let k = crate::editor::fade_k_for_mid(1.0 - (p.y - fade_top) / fade_h);
+                    if own {
+                        ed.shape_fade(slice, len, k);
+                    } else {
+                        ed.shape_all_fades(len, k);
+                    }
                 }
                 Drag::SlotCut(i) => {
                     if let Some((_, len, _, sounds)) = &slot_cut {
@@ -270,7 +276,13 @@ pub(super) fn waveform(
         let fade = p.and_then(handle_at);
         let target = p.and_then(|p| endpoint_at(p).or_else(|| mark_at(p)));
         if let Some(e) = fade {
-            ed.reset_fade(e.slice);
+            // Its own shape goes first, back to the shared one; then the
+            // shared one back to the default.
+            if e.own {
+                ed.reset_fade(e.slice);
+            } else {
+                ed.reset_all_fades();
+            }
         } else {
         match target {
             Some(f) => {
@@ -772,10 +784,22 @@ fn fade_cues(
             );
             if is_hot {
                 let ms = (e.end - e.start) as f64 * 1000.0 / rate.max(1) as f64;
-                let text = format!(
-                    "fade {ms:.0} ms · curve {:.1}\n↔ length  ↕ curve\ndouble-click: reset",
-                    e.k
-                );
+                let curve = if (e.k - 1.0).abs() < 0.05 {
+                    "linear".to_string()
+                } else if e.k < 1.0 {
+                    format!("holds ×{:.1}", 1.0 / e.k)
+                } else {
+                    format!("decays ×{:.1}", e.k)
+                };
+                let text = if e.own {
+                    format!(
+                        "fade {ms:.0} ms · {curve} · own shape\n↔ length  ↕ curve\ndouble-click: back to shared"
+                    )
+                } else {
+                    format!(
+                        "fade {ms:.0} ms · {curve} · all fades\n↔ length  ↕ curve  ⌥ this one only\ndouble-click: reset"
+                    )
+                };
                 let galley = painter.layout(text, FontId::monospace(10.0), col, 400.0);
                 let mut pos = Pos2::new(knob.x + 10.0, knob.y - galley.size().y - 6.0);
                 if pos.x + galley.size().x > lanes.right() {

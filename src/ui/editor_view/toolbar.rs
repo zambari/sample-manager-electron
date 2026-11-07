@@ -55,24 +55,7 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
         {
             out.push(EdIntent::ShowKit(false));
         }
-        // No kit yet: nothing to show until K starts one.
-        if let Some(k) = &s.kit_name {
-            kit_tab(ui, k, s, out);
-            kit_switcher(ui, ed, s, out);
-            grid_picker(ui, s.kit_grid, out);
-            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
-                out.push(EdIntent::AddSlice);
-            }
-            if let (n, Some(g)) = s.kit_fill {
-                if !s.showing_kit || n > 1 {
-                    // Auto shows the 8 to aim for, until it outgrows them.
-                    let total = if s.kit_grid == Some(crate::editor::AUTO_GRID) { g.max(8) } else { g };
-                    fill_boxes(ui, n, total);
-                }
-            }
-        }
         if !s.showing_kit && ed.current.is_some() {
-            ui.separator();
             if ui
                 .small_button("Start kit")
                 .on_hover_text("Make this file the slice kit, to add slices to its end")
@@ -81,7 +64,79 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
                 out.push(EdIntent::UseAsKit);
             }
         }
+        // No kit yet: nothing to show until K starts one.
+        if let Some(k) = &s.kit_name {
+            ui.separator();
+            // Room the controls after the kit tabs need.
+            let fill_total = match s.kit_fill {
+                (n, Some(g)) if !s.showing_kit || n > 1 => {
+                    Some(if s.kit_grid == Some(crate::editor::AUTO_GRID) { g.max(8) } else { g })
+                }
+                _ => None,
+            };
+            let gap = ui.spacing().item_spacing.x;
+            let reserve = 30.0 // ▾ menu
+                + 80.0 // grid picker
+                + ui.spacing().interact_size.y * 1.6 // →
+                + fill_total.map_or(0.0, fill_width)
+                + 6.0 * gap;
+            let all_fit = s.kits.len() > 1 && {
+                let tab_w = |t: &str| button_text_width(ui, t) + 2.0 * ui.spacing().button_padding.x + gap;
+                let active = tab_w(&format!("[00/00] {}      ●", crate::app::short_name(k, 28)));
+                let parked: f32 = s
+                    .kits
+                    .iter()
+                    .filter(|e| e.parked.is_some())
+                    .map(|e| tab_w(&parked_label(e)))
+                    .sum();
+                active + parked + reserve <= ui.available_width()
+            };
+            if all_fit {
+                // Every open kit as its own tab, in name order.
+                for e in &s.kits {
+                    match e.parked {
+                        None => kit_tab(ui, k, s, out),
+                        Some(i) => {
+                            if ui
+                                .selectable_label(false, parked_label(e))
+                                .on_hover_text(format!("{} — click to make it the kit K adds to", e.name))
+                                .clicked()
+                            {
+                                out.push(EdIntent::SwitchKit(i));
+                            }
+                        }
+                    }
+                }
+            } else {
+                kit_tab(ui, k, s, out);
+            }
+            kit_switcher(ui, ed, s, !all_fit, out);
+            grid_picker(ui, s.kit_grid, out);
+            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
+                out.push(EdIntent::AddSlice);
+            }
+            if let (n, Some(total)) = (s.kit_fill.0, fill_total) {
+                fill_boxes(ui, n, total);
+            }
+        }
     });
+}
+
+/// A parked kit's tab text.
+fn parked_label(e: &KitEntry) -> String {
+    let mut t = crate::app::short_name(&e.name, 20);
+    if e.dirty {
+        t.push_str(" ●");
+    }
+    t
+}
+
+fn button_text_width(ui: &Ui, text: &str) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
+        .size()
+        .x
 }
 
 /// The → (K) button: a big arrow in a button as tall as its neighbours.
@@ -112,12 +167,23 @@ fn add_slice_button(ui: &mut Ui, enabled: bool, kit: &str) -> bool {
     resp.clicked()
 }
 
+const FILL_SIDE: f32 = 7.0;
+const FILL_GAP: f32 = 2.0;
+const FILL_GROUP_GAP: f32 = 5.0;
+
+fn fill_width(total: usize) -> f32 {
+    let groups = total.div_ceil(4);
+    total as f32 * FILL_SIDE
+        + total.saturating_sub(1) as f32 * FILL_GAP
+        + groups.saturating_sub(1) as f32 * (FILL_GROUP_GAP - FILL_GAP)
+}
+
 /// A row of small boxes, `filled` of `total` in orange: how close the grid
 /// kit is to full. Grouped in fours.
 fn fill_boxes(ui: &mut Ui, filled: usize, total: usize) {
-    let (side, gap, group_gap) = (7.0, 2.0, 5.0);
-    let groups = total.div_ceil(4);
-    let w = total as f32 * side + (total - 1) as f32 * gap + (groups - 1) as f32 * (group_gap - gap);
+    let (side, gap) = (FILL_SIDE, FILL_GAP);
+    let group_gap = FILL_GROUP_GAP;
+    let w = fill_width(total);
     let h = ui.spacing().interact_size.y;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     resp.on_hover_text(format!("{filled} of {total} slots used"));
@@ -258,8 +324,8 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
 
 /// ▾ menu next to the Kit tab: the open kits, to pick which one K adds to,
 /// and "New kit" to start another.
-fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
-    let label = if s.kits.len() > 1 {
+fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, collapsed: bool, out: &mut Vec<EdIntent>) {
+    let label = if collapsed && s.kits.len() > 1 {
         format!("▾ {}", s.kits.len())
     } else {
         "▾".to_owned()

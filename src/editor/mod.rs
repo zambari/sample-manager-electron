@@ -21,7 +21,7 @@ mod history;
 mod trim;
 
 pub use analysis::{BANDS as WATERFALL_BANDS, LoudnessView, ROWS as WATERFALL_ROWS};
-pub use fade::{FadeEnd, fade_gain};
+pub use fade::{FadeEnd, fade_gain, fade_k_for_mid};
 pub use trim::{SliceEnd, TrimPlan};
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
 mod selection;
@@ -58,6 +58,9 @@ pub struct Prefs {
     pub tail_db: f32,
     /// Fade after each cut when trimming kit tails, ms.
     pub trim_fade_ms: f32,
+    /// Curve shared by every trim fade (see [`fade_gain`]): under 1 holds
+    /// the level and drops at the end, 1 is linear, over 1 decays.
+    pub trim_fade_k: f32,
     /// Grid kits: trim by level (each slice where it drops below
     /// `tail_db`) instead of by slot length.
     pub grid_trim_by_level: bool,
@@ -116,6 +119,7 @@ impl Default for Prefs {
             panels: Panels::default(),
             tail_db: -50.0,
             trim_fade_ms: 20.0,
+            trim_fade_k: 0.5,
             grid_trim_by_level: false,
         }
     }
@@ -269,8 +273,9 @@ pub enum Drag {
     /// playhead and pointer x at the start of the drag.
     Scrub(usize, f32),
     /// Shape a slice's fade-out: the slice, the fade's fixed end (its
-    /// start for a tail fade, else its end) and whether it's a tail fade.
-    Fade(usize, usize, bool),
+    /// start for a tail fade, else its end), whether it's a tail fade, and
+    /// whether only this one is shaped (⌥) rather than every fade.
+    Fade(usize, usize, bool, bool),
     /// Grid trim by length: drag the slot cut, grabbed in this slot.
     SlotCut(usize),
 }

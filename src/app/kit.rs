@@ -271,6 +271,17 @@ impl App {
                 self.kit_name().unwrap_or_default(),
                 self.other.sample().map_or(0.0, |s| s.seconds(s.frames())),
             );
+            // A fixed-slot kit just filled its last slot: go to it.
+            let fixed = self.other.grid_mode() != Some(crate::editor::AUTO_GRID);
+            if let Some(n) = self.other.grid.filter(|_| fixed) {
+                if self.other.kit_fill() >= n {
+                    self.show_kit(true);
+                    self.status = format!(
+                        "Kit full ({n}/{n}) — showing {}. ⌘S saves it, B goes back to the sample",
+                        self.kit_name().unwrap_or_default()
+                    );
+                }
+            }
             return;
         }
         self.ask_kit_name(clip);

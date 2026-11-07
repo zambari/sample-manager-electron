@@ -43,8 +43,9 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
                 .suffix(" ms"),
         )
         .on_hover_text(
-            "Default fade before a slot-length cut, or after a level's threshold point. Drag a fade's knob on the wave to shape one: \
-             sideways for length, up / down for the curve; double-click resets it.",
+            "Fade before a slot-length cut, or after a level's threshold point. Every fade shares one length and curve, remembered \
+             between runs. Drag any fade's knob on the wave to shape them all: sideways for length, up / down for the curve \
+             (up holds the level and drops at the end, down decays early). ⌥-drag shapes just that one; double-click resets.",
         );
         // Apply: cut and fade the kit in memory (one undo step); nothing
         // is written to disk until it's saved or sent.
