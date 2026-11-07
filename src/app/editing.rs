@@ -161,8 +161,10 @@ impl App {
         let Some(src) = self.editor.path().map(Path::to_path_buf) else {
             return;
         };
+        // Named as the kit will be, slot count included (see `export_name`).
+        let named = self.export_name(&src);
         if to_dev {
-            let dst = device::upload_target(&src, &dest);
+            let dst = device::upload_target(&named, &dest);
             let op = ops::Op {
                 conflict: self.device_has(&dst),
                 approx_bytes: 0,
@@ -177,12 +179,16 @@ impl App {
             };
             return self.offer(plan, PlanKind::DeviceExport { mono });
         }
-        let mut dst = crate::audio::export::target_for(&src, &dest);
-        // A grid kit exported somewhere new gets its slot count in the name.
-        if let (true, Some(n)) = (self.editor.is_kit, self.editor.grid) {
-            if dst != src {
-                dst = with_slot_count(&dst, n);
-            }
+        let dst = crate::audio::export::target_for(&named, &dest);
+        // A kit never saved yet, exported beside its planned file: that is its
+        // first save, so the kit takes the exported name instead of forking.
+        if self.editor.is_kit
+            && !src.is_file()
+            && dst != src
+            && dst.parent() == src.parent()
+            && !dst.exists()
+        {
+            self.editor.set_path(dst.clone());
         }
         // Export is "save as": a name that's taken asks for another one
         // instead of offering to overwrite.
@@ -207,6 +213,15 @@ impl App {
             return;
         }
         self.start_export(dst, mono);
+    }
+
+    /// The path an export of the open file is named after: a grid kit
+    /// carries its slot count as `[n] name`, replacing a stale one.
+    pub(super) fn export_name(&self, src: &Path) -> PathBuf {
+        match self.editor.grid.filter(|&n| self.editor.is_kit && n > 0) {
+            Some(n) => with_slot_count(src, n),
+            None => src.to_path_buf(),
+        }
     }
 
     /// Render the editor to exactly `dst`, overwriting it.
@@ -790,6 +805,7 @@ impl App {
                     };
                 }
                 EdIntent::CloseKit => self.close_kit(),
+                EdIntent::CloseAllKits(keep) => self.close_all_kits(keep),
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
                 EdIntent::RenameKit(name) => self.rename_kit(&name),
                 EdIntent::SendToDevice => self.begin_send_back(),

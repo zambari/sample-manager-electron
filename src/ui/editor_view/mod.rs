@@ -48,6 +48,9 @@ pub enum EdIntent {
     AddSlice,
     UseAsKit,
     CloseKit,
+    /// Close every open kit (`false`) or all but the active one (`true`),
+    /// asking about each with unsaved slices.
+    CloseAllKits(bool),
     /// Lay the kit out on this many equal slots, or free it.
     SetGrid(Option<usize>),
     /// Give the kit this name (no extension).

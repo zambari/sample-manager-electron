@@ -486,7 +486,7 @@ impl App {
                     self.errors.push(format!("{}: {e}", tmp.display()));
                     return;
                 }
-                let staged = crate::audio::export::target_for(&src, &tmp);
+                let staged = crate::audio::export::target_for(&self.export_name(&src), &tmp);
                 self.mark_committed([src]);
                 self.status = "Rendering for the device…".to_owned();
                 self.staged_upload = Some(StagedUpload {
@@ -767,6 +767,7 @@ impl App {
                         self.batch.absorb(a, cancelled);
                     }
                     self.active_jobs.retain(|a| a.id != job);
+                    self.pool_fetch_finished(job, !cancelled && errors.is_empty());
                     if self.active_jobs.is_empty() {
                         self.batch = Batch::default();
                     }

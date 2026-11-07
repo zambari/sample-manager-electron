@@ -25,6 +25,11 @@ impl App {
         if ui.ctx().text_edit_focused() {
             return; // a text field (filter box, typed value) has the keyboard
         }
+        // The Elk Sample Order view (full window, or docked and clicked
+        // into) drives its own keys.
+        if self.elk_mode || (self.elk_docked && self.dock_pool && self.pool_focused) {
+            return;
+        }
 
         // ⌘X / ⌘C / ⌘V arrive as clipboard events, not key presses.
         let clip: Vec<egui::Event> = ui.input(|i| {

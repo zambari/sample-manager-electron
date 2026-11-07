@@ -236,6 +236,8 @@ pub struct App {
     /// The kit was saved or discarded after its [x]: close it next frame
     /// (not mid-absorb, when the slots may be swapped).
     close_kit_now: bool,
+    /// "Close all kits" in progress: closing these one by one.
+    close_queue: Option<kit::CloseQueue>,
     /// Save in place is waiting on "trim to selection or whole file?".
     save_scope_pending: bool,
     /// Files the editor is writing (`None`) or just wrote (when), for the
@@ -254,6 +256,15 @@ pub struct App {
     /// The centre column shows the Elk Sample Order view instead of the editor.
     elk_mode: bool,
     elk: crate::ui::elk_view::ElkState,
+    /// The pool is docked into the right column (see [`elk`]).
+    elk_docked: bool,
+    /// While docked: the right column shows the pool, not the files.
+    dock_pool: bool,
+    /// The docked pool has the keyboard.
+    pool_focused: bool,
+    /// Where the docked pool was drawn last frame, to tell clicks into it.
+    pool_rect: Option<egui::Rect>,
+    pool_fetch: elk::PoolFetch,
     /// Device files we have a local copy of (see [`crate::links`]).
     links: crate::links::Links,
     /// Last device file opened through a local copy or a fetch:
@@ -403,6 +414,7 @@ impl App {
             leave_pending: None,
             leave_after_save: None,
             close_kit_now: false,
+            close_queue: None,
             save_scope_pending: false,
             export_naming: None,
             saving: Default::default(),
@@ -415,6 +427,11 @@ impl App {
             relaunch: false,
             elk_mode: false,
             elk: Default::default(),
+            elk_docked: false,
+            dock_pool: false,
+            pool_focused: false,
+            pool_rect: None,
+            pool_fetch: Default::default(),
             jobs,
             keymap: Keymap::platform_default(),
             sizes: SizeCache::default(),
@@ -583,6 +600,7 @@ impl eframe::App for App {
         if std::mem::take(&mut self.close_kit_now) && self.has_kit() {
             self.close_kit();
         }
+        self.step_close_queue();
 
         // Edits apply live to the running voice: drag an out point while the
         // loop plays and you hear the seam move.
@@ -646,7 +664,13 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_size(default_w)
                 .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
-                .show(ui, |ui| self.show_pane(ui, Role::Dest));
+                .show(ui, |ui| {
+                    if self.elk_docked {
+                        self.show_dock_col(ui);
+                    } else {
+                        self.show_pane(ui, Role::Dest);
+                    }
+                });
             self.side_widths[1] = right.response.rect.width();
             draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
             draw_divider(
@@ -656,6 +680,16 @@ impl eframe::App for App {
             );
 
             egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
+
+            // A click anywhere decides whether the docked pool keeps the keyboard.
+            let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
+            if let Some(pos) = press {
+                let inside = self.elk_docked && self.dock_pool && self.pool_rect.is_some_and(|r| r.contains(pos));
+                self.pool_focused = inside;
+                if inside {
+                    self.editor_focused = false;
+                }
+            }
         }
 
         // Modal last, so it paints over both panes.

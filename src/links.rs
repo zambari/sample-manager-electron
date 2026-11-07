@@ -116,6 +116,22 @@ fn stamp(p: &Path) -> Option<(u64, u64)> {
     md.is_file().then_some((md.len(), ms))
 }
 
+/// Where pool samples fetched only for previewing are kept, one folder per
+/// `(hash, length)`. Kept across restarts; the Elk view can empty it.
+pub fn pool_cache_dir() -> Option<PathBuf> {
+    let dir = if cfg!(target_os = "windows") {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("sample_manager").join("cache")
+    } else {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        if cfg!(target_os = "macos") {
+            home.join("Library/Caches/sample_manager")
+        } else {
+            home.join(".cache/sample_manager")
+        }
+    };
+    Some(dir.join("pool"))
+}
+
 fn path() -> Option<PathBuf> {
     let dir = if cfg!(target_os = "windows") {
         PathBuf::from(std::env::var_os("APPDATA")?).join("sample_manager")
@@ -164,10 +180,15 @@ impl Links {
             return out;
         };
         let mut lines = 0;
+        let cache = pool_cache_dir();
         for l in text.lines() {
             lines += 1;
             if let Some(link) = Link::parse(l) {
-                out.add(link);
+                // Preview cache emptied since: those links are gone for good.
+                let purged = cache.as_ref().is_some_and(|c| link.local.starts_with(c)) && !link.local.exists();
+                if !purged {
+                    out.add(link);
+                }
             }
         }
         let kept = out.len();
@@ -184,6 +205,15 @@ impl Links {
             });
         }
         out
+    }
+
+    /// Drop every link to a local file under `dir` (it was emptied).
+    pub fn forget_under(&mut self, dir: &Path) {
+        for v in self.by_hash.values_mut() {
+            v.retain(|l| !l.local.starts_with(dir));
+        }
+        self.by_hash.retain(|_, v| !v.is_empty());
+        self.by_local.retain(|p, _| !p.starts_with(dir));
     }
 
     fn len(&self) -> usize {
@@ -203,6 +233,12 @@ impl Links {
     pub fn for_local(&self, p: &Path) -> Option<&Link> {
         let (h, size) = *self.by_local.get(p)?;
         self.by_hash.get(&h)?.iter().find(|l| l.local == p && l.size == size)
+    }
+
+    /// The newest link of local file `p`, if the file is unchanged since.
+    /// Touches the disk.
+    pub fn local_link(&self, p: &Path) -> Option<&Link> {
+        self.for_local(p).filter(|l| l.fresh())
     }
 
     fn candidates(&self, hash: u32, size: u32) -> impl Iterator<Item = &Link> {

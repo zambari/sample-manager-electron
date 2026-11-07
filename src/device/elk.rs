@@ -275,6 +275,26 @@ impl PoolEntry {
     pub fn key(&self) -> (u32, u32) {
         (self.hash, self.size.saturating_sub(16))
     }
+
+    /// A +Drive file not in any pool yet. Inode and seqnr 0 mean "unknown":
+    /// the device works them out from the hash (elk-herd's notes on
+    /// `uniqueSampleFileID_t`).
+    pub fn new_file(hash: u32, len: u32) -> Self {
+        Self {
+            inode: 0,
+            hash,
+            size: len + 16,
+            seqnr: 0,
+        }
+    }
+
+    fn bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        for (i, v) in [self.inode, self.hash, self.size, self.seqnr].into_iter().enumerate() {
+            b[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+        }
+        b
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -612,7 +632,8 @@ impl ElkProject {
     /// `order[new_slot] = old_slot`: only those whose contents change, in
     /// dump order (settings last). Untouched patterns, kits and sounds are
     /// left alone on the device, so edits made there since the read survive.
-    pub fn build_push(&self, order: &[u16]) -> Vec<Vec<u8>> {
+    /// `fills` are new files put into slots that were empty, by old slot.
+    pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>) -> Vec<Vec<u8>> {
         let n = self.pool.len();
         let mut new_of = vec![0usize; n];
         for (new, &old) in order.iter().enumerate() {
@@ -630,13 +651,18 @@ impl ElkProject {
                 r.set(d, new);
             }
         }
-        if order.iter().enumerate().any(|(i, &o)| i != o as usize) {
+        if !fills.is_empty() || order.iter().enumerate().any(|(i, &o)| i != o as usize) {
             let d = data[self.settings_msg]
                 .get_or_insert_with(|| self.msgs[self.settings_msg].data.clone());
             for (new, &old) in order.iter().enumerate() {
-                let src = self.pool_at + old as usize * 16;
                 let dst = self.pool_at + new * 16;
-                d[dst..dst + 16].copy_from_slice(&self.msgs[self.settings_msg].data[src..src + 16]);
+                match fills.get(&old) {
+                    Some(e) => d[dst..dst + 16].copy_from_slice(&e.bytes()),
+                    None => {
+                        let src = self.pool_at + old as usize * 16;
+                        d[dst..dst + 16].copy_from_slice(&self.msgs[self.settings_msg].data[src..src + 16]);
+                    }
+                }
             }
         }
         self.msgs
@@ -664,6 +690,13 @@ pub enum ElkCmd {
     Read {
         known: std::collections::HashSet<(u32, u32)>,
     },
+    /// Which of `lens` the +Drive knows file `hash` by (asked in order),
+    /// for filling pool slot `slot` (old numbering).
+    Resolve {
+        slot: u16,
+        hash: u32,
+        lens: Vec<u32>,
+    },
     /// Messages to send, and the settings struct they were built from.
     Push {
         msgs: Vec<Vec<u8>>,
@@ -686,6 +719,12 @@ pub enum ElkEv {
     /// `(hash, length) → +Drive path` for pool entries.
     Names(Vec<((u32, u32), String)>),
     Pushed(Result<usize, String>),
+    /// Answer to `Resolve`: the length that matched and the +Drive path.
+    Resolved {
+        slot: u16,
+        hash: u32,
+        found: Result<Option<(u32, String)>, String>,
+    },
 }
 
 // ---- talking to the device ----------------------------------------------------
@@ -839,6 +878,7 @@ impl Conn {
         if !rd.bool().unwrap_or(false) {
             return Ok(None);
         }
+        // Then the length and hash asked about (in that order), then the path.
         let _ = rd.u32();
         let _ = rd.u32();
         Ok(rd.str().ok().filter(|s| !s.is_empty()))
@@ -937,6 +977,18 @@ impl Worker {
                 self.em.send(Ev::Elk(ElkEv::Loaded(r)));
                 // After `Loaded`: no progress, nothing would clear it.
                 self.look_up_names(&keys, &mut asked, false);
+            }
+            ElkCmd::Resolve { slot, hash, lens } => {
+                let found = self.with_conn(|c| {
+                    for &len in &lens {
+                        if let Some(p) = c.sample_path(hash, len)? {
+                            return Ok(Some((len, p)));
+                        }
+                    }
+                    Ok(None)
+                });
+                crate::log::line(format!("elk: resolve {hash:08x} lens {lens:?} -> {found:?}"));
+                self.em.send(Ev::Elk(ElkEv::Resolved { slot, hash, found }));
             }
             ElkCmd::Push { msgs, settings } => {
                 let total = msgs.len();

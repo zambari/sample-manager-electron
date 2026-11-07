@@ -31,6 +31,21 @@ pub(super) struct BrowsedKit {
     pub prev: Option<PathBuf>,
 }
 
+/// "Close all kits" working through the open kits one at a time, so each
+/// with unsaved slices gets its own question.
+pub(super) struct CloseQueue {
+    /// Still to close, last first.
+    todo: Vec<PathBuf>,
+    /// "All but current": the kit to leave active, and whether it was on screen.
+    keep: Option<(PathBuf, bool)>,
+    /// Kits open when it started, for the summary.
+    start: usize,
+}
+
+fn slot_key(ed: &Editor) -> Option<PathBuf> {
+    ed.path().or(ed.loading.as_deref()).map(Path::to_path_buf)
+}
+
 /// A slice waiting on the "name the kit" question.
 pub(super) struct KitNaming {
     pub clip: AudioClip,
@@ -580,6 +595,94 @@ impl App {
             }
             Err(e) => self.status = e,
         }
+    }
+
+    /// Right-click → Close all kits / Close all but current.
+    pub(super) fn close_all_kits(&mut self, keep_current: bool) {
+        if self.close_queue.is_some() {
+            return;
+        }
+        let keep = keep_current
+            .then(|| slot_key(self.kit()).map(|p| (p, self.showing_kit)))
+            .flatten();
+        let mut todo: Vec<PathBuf> = std::iter::once(&*self.kit())
+            .chain(self.parked.iter())
+            .filter_map(slot_key)
+            .filter(|p| keep.as_ref().is_none_or(|(k, _)| k != p))
+            .collect();
+        if todo.is_empty() {
+            self.status = "No other kits open".to_owned();
+            return;
+        }
+        // Parked ones first (popped from the end), the active one last, so
+        // closing doesn't keep unparking kits that are about to go anyway.
+        todo.reverse();
+        self.close_queue = Some(CloseQueue {
+            todo,
+            keep,
+            start: self.kit_list().len(),
+        });
+        self.step_close_queue();
+    }
+
+    /// Close queued kits until one needs a question (or is busy), then wait
+    /// for the answer. Cancel there just keeps that kit; the rest go on.
+    pub(super) fn step_close_queue(&mut self) {
+        if self.close_queue.is_none() {
+            return;
+        }
+        if self.leave_pending.is_some() || self.leave_after_save.is_some() || self.close_kit_now {
+            return;
+        }
+        loop {
+            if self.kit_busy().is_some() {
+                return;
+            }
+            let Some(p) = self.close_queue.as_mut().and_then(|q| q.todo.pop()) else {
+                break;
+            };
+            if slot_key(self.kit()).as_deref() == Some(p.as_path()) {
+                self.close_kit();
+            } else if let Some(i) = self.parked.iter().position(|k| slot_key(k).as_deref() == Some(p.as_path())) {
+                let k = &self.parked[i];
+                if k.is_dirty() && k.sounding_slices() > 1 {
+                    // Bring it in so the question shows it.
+                    self.switch_kit(i);
+                    self.close_kit();
+                } else {
+                    self.parked.remove(i);
+                }
+            }
+            if self.leave_pending.is_some() {
+                return;
+            }
+        }
+        let q = self.close_queue.take().expect("checked above");
+        if let Some((k, showing)) = &q.keep {
+            self.switch_to_open(k);
+            if *showing {
+                self.show_kit(true);
+            }
+        }
+        if let Some(b) = &self.browsed_kit {
+            let open = std::iter::once(&*self.kit())
+                .chain(self.parked.iter())
+                .any(|k| slot_key(k).as_deref() == Some(b.path.as_path()));
+            if !open {
+                self.browsed_kit = None;
+            }
+        }
+        let left = self.kit_list().len();
+        let closed = q.start.saturating_sub(left);
+        let kept = left - usize::from(q.keep.is_some() && left > 0);
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        self.status = match kept {
+            0 => format!("Closed {closed} kit{}", plural(closed)),
+            _ => format!(
+                "Closed {closed} kit{}, kept {kept} with unsaved slices",
+                plural(closed)
+            ),
+        };
     }
 
     pub(super) fn close_kit(&mut self) {

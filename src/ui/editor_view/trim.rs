@@ -34,10 +34,11 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
             level_row(ui, ed, ends);
         }
         ui.label("fade");
+        // Log slider: fine steps for short fades, still reaches 1 s.
+        ui.spacing_mut().slider_width = 140.0;
         ui.add(
-            egui::DragValue::new(&mut ed.prefs.trim_fade_ms)
-                .range(1.0..=500.0)
-                .speed(0.25)
+            egui::Slider::new(&mut ed.prefs.trim_fade_ms, 1.0..=1000.0)
+                .logarithmic(true)
                 .max_decimals(0)
                 .suffix(" ms"),
         )

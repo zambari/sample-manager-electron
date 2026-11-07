@@ -232,6 +232,7 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
              K adds the sample's selection to its end. ⌘S here saves the whole kit.\n\
              Click again (or double-click) to rename it — a saved kit's file is renamed too.",
         );
+        close_all_menu(&resp, s, out);
         if close_x(ui, resp.rect, s.kit_dirty) {
             out.push(EdIntent::CloseKit);
         } else if resp.double_clicked() || (resp.clicked() && s.showing_kit) {
@@ -291,8 +292,31 @@ fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
     })
     .response
     .on_hover_text(
-        "Open kits — pick the one K adds to. Right-click a file → Load as kit to open another.",
-    );
+        "Open kits — pick the one K adds to. Right-click a file → Load as kit to open another.\n\
+         Right-click here (or the kit tab) to close them all.",
+    )
+    .context_menu(|ui| close_all_items(ui, s, out));
+}
+
+/// Right-click on a kit tab: close all / all but this one.
+fn close_all_menu(resp: &egui::Response, s: &Slots, out: &mut Vec<EdIntent>) {
+    resp.context_menu(|ui| close_all_items(ui, s, out));
+}
+
+fn close_all_items(ui: &mut Ui, s: &Slots, out: &mut Vec<EdIntent>) {
+    const HINT: &str = "Kits with unsaved slices ask first; Cancel keeps that one and goes on with the rest";
+    if ui.button("Close all kits").on_hover_text(HINT).clicked() {
+        out.push(EdIntent::CloseAllKits(false));
+        ui.close();
+    }
+    if ui
+        .add_enabled(s.kits.len() > 1, egui::Button::new("Close all but current"))
+        .on_hover_text(HINT)
+        .clicked()
+    {
+        out.push(EdIntent::CloseAllKits(true));
+        ui.close();
+    }
 }
 
 /// Free / 4 / 8 / 16 switch for the kit's layout.

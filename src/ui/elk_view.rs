@@ -27,6 +27,7 @@ pub struct ElkState {
     pub linked: HashMap<(u32, u32), (String, std::path::PathBuf, bool)>,
     /// A row asked for its local copy: `(key, open in editor)`.
     want_local: Option<((u32, u32), bool)>,
+    want_files: Option<Vec<(u16, std::path::PathBuf)>>,
     pub bank: [usize; 2],
     /// `(label, done, total)` while the device works.
     pub busy: Option<(String, usize, usize)>,
@@ -43,12 +44,29 @@ pub struct ElkState {
     cursor: Option<usize>,
     /// Pane the keyboard drives.
     active: usize,
-    /// Earlier orders, for undo.
-    undo: Vec<Vec<u16>>,
+    /// Earlier orders and fills, for undo.
+    undo: Vec<(Vec<u16>, HashMap<u16, PoolEntry>)>,
+    /// New +Drive files put into slots that were empty, by slot as read.
+    pub fills: HashMap<u16, PoolEntry>,
+    /// Slots (as read) waiting for a dropped file to upload and be found
+    /// on the +Drive: the file's name, for the row.
+    pub filling: HashMap<u16, String>,
     /// Scroll offset of each pane last frame, and a slot to bring into view.
     scroll: [f32; 2],
     view_h: [f32; 2],
     reveal: Option<usize>,
+    /// Clicking a slot (or moving the cursor onto it) plays it.
+    pub preview: bool,
+    /// Shown as one pane in the right column, beside the files and editor.
+    pub docked: bool,
+    /// The view gets the keyboard this frame (set by the app).
+    pub keys_on: bool,
+    /// Pool files queued or on their way into the preview cache.
+    pub fetching: HashSet<(u32, u32)>,
+    /// Background fetch run: `(done, total)`.
+    pub fetch: Option<(usize, usize)>,
+    /// Preview cache on disk: `(bytes, files)`, once measured.
+    pub cache: Option<(u64, u64)>,
 }
 
 pub enum ElkIntent {
@@ -57,8 +75,21 @@ pub enum ElkIntent {
     Read,
     Push,
     /// Play the local copy of this pool file (`false`), or open it in the
-    /// editor (`true`).
+    /// editor (`true`). Fetched into the preview cache first when there is
+    /// no local copy.
     Local((u32, u32), bool),
+    /// Move into the right column, next to the file panes.
+    Dock,
+    /// Back to the full-window view.
+    Undock,
+    /// Fetch every pool file without a local copy, in the background.
+    FetchAll,
+    StopFetch,
+    /// Move the preview cache to the Trash.
+    PurgeCache,
+    /// Local files dropped on the pool: each goes to the empty slot paired
+    /// with it (numbered as read).
+    AddFiles(Vec<(u16, std::path::PathBuf)>),
 }
 
 impl ElkState {
@@ -66,8 +97,27 @@ impl ElkState {
         self.order
             .iter()
             .enumerate()
-            .filter(|(i, o)| *i != **o as usize)
+            .filter(|(i, o)| *i != **o as usize && !self.fills.contains_key(o))
             .count()
+            + self.fills.len()
+    }
+
+    /// Pool entry `old` (numbered as read), with any new file put there.
+    pub fn entry(&self, old: usize) -> PoolEntry {
+        let Some(p) = &self.project else { return PoolEntry::default() };
+        self.fills.get(&(old as u16)).copied().unwrap_or(p.pool[old])
+    }
+
+    /// Entry `old` holds nothing and nothing is on its way into it.
+    fn free(&self, old: u16) -> bool {
+        self.entry(old as usize).is_empty() && !self.filling.contains_key(&old)
+    }
+
+    /// Put a new +Drive file into empty entry `old`, as an undoable edit.
+    pub fn fill(&mut self, old: u16, e: PoolEntry) {
+        self.filling.remove(&old);
+        self.undo.push((self.order.clone(), self.fills.clone()));
+        self.fills.insert(old, e);
     }
 
     pub fn set_project(&mut self, p: Box<ElkProject>) {
@@ -78,6 +128,8 @@ impl ElkState {
             return;
         }
         self.order = (0..p.pool.len() as u16).collect();
+        self.fills.clear();
+        self.filling.clear();
         let banks = p.pool.len().div_ceil(BANK);
         self.bank = [0, 1.min(banks - 1)];
         self.sel.clear();
@@ -90,6 +142,8 @@ impl ElkState {
     fn close_project(&mut self) {
         self.project = None;
         self.order.clear();
+        self.fills.clear();
+        self.filling.clear();
         self.sel.clear();
         self.cursor = None;
         self.undo.clear();
@@ -101,7 +155,15 @@ impl ElkState {
         let Some(p) = &self.project else {
             return Vec::new();
         };
-        self.order.iter().map(|&o| p.pool[o as usize]).collect()
+        let _ = p;
+        self.order.iter().map(|&o| self.entry(o as usize)).collect()
+    }
+
+    /// The file in `slot` (as ordered now), unless it's empty or "off".
+    fn key_at(&self, slot: usize) -> Option<(u32, u32)> {
+        self.project.as_ref()?;
+        let e = self.entry(*self.order.get(slot)? as usize);
+        (slot > 0 && !e.is_empty()).then(|| e.key())
     }
 
     fn label(&self, slot: usize) -> String {
@@ -126,7 +188,7 @@ impl ElkState {
         if self.order == before {
             return;
         }
-        self.undo.push(before);
+        self.undo.push((before, self.fills.clone()));
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -142,8 +204,9 @@ impl ElkState {
     }
 
     fn undo(&mut self) {
-        if let Some(prev) = self.undo.pop() {
+        if let Some((prev, fills)) = self.undo.pop() {
             self.order = prev;
+            self.fills = fills;
             self.status = "Undone".into();
         }
     }
@@ -223,7 +286,7 @@ impl ElkState {
     fn is_empty_at(&self, slot: usize) -> bool {
         self.project
             .as_ref()
-            .is_some_and(|p| p.pool[self.order[slot] as usize].is_empty())
+            .is_some_and(|_| self.free(self.order[slot]))
     }
 
     /// Shifts the selection one slot up (`-1`) or down (`+1`), as a block.
@@ -252,9 +315,11 @@ impl ElkState {
     /// Puts an empty slot at `at`, pushing `at` and the samples below it down
     /// as far as the next empty slot, which is used up.
     fn insert_empty(&mut self, at: usize) {
-        let Some(p) = &self.project else { return };
+        if self.project.is_none() {
+            return;
+        }
         let Some(e) =
-            (at + 1..self.order.len()).find(|&i| p.pool[self.order[i] as usize].is_empty())
+            (at + 1..self.order.len()).find(|&i| self.free(self.order[i]))
         else {
             self.status = "No empty slot below to make room".into();
             return;
@@ -270,13 +335,45 @@ impl ElkState {
     /// Removes the empty slot at `at`, pulling the samples below it up as far
     /// as the next empty slot.
     fn close_gap(&mut self, at: usize) {
-        let Some(p) = &self.project else { return };
+        if self.project.is_none() {
+            return;
+        }
         let n = self.order.len();
         let e = (at + 1..n)
-            .find(|&i| p.pool[self.order[i] as usize].is_empty())
+            .find(|&i| self.free(self.order[i]))
             .unwrap_or(n);
         self.edit(|order| order[at..e].rotate_left(1));
         self.status = format!("Closed gap at {}", self.label(at));
+    }
+
+    /// Pair dropped files with this slot and the empty ones after it.
+    fn drop_files(&mut self, slot: usize, files: Vec<std::path::PathBuf>) {
+        let files: Vec<_> = files.into_iter().filter(|f| crate::fs_model::is_audio_path(f)).collect();
+        if files.is_empty() {
+            self.status = "Only audio files can go into the pool".into();
+            return;
+        }
+        if !self.free(self.order[slot]) {
+            self.status = "Drop onto an empty slot (\"-\"); replacing a sample isn't supported".into();
+            return;
+        }
+        let free: Vec<usize> = (slot..self.order.len()).filter(|&s| self.free(self.order[s])).take(files.len()).collect();
+        let short = files.len() - free.len();
+        let pairs: Vec<(u16, std::path::PathBuf)> = free.iter().map(|&s| self.order[s]).zip(files).collect();
+        let reused = pairs.iter().filter(|(o, _)| self.project.as_ref().is_some_and(|p| p.uses[*o as usize] > 0)).count();
+        for (o, f) in &pairs {
+            let name = f.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.filling.insert(*o, name);
+        }
+        let mut note = format!("Adding {} file(s) from {}", pairs.len(), self.label(slot));
+        if short > 0 {
+            note += &format!("; {short} left out (no more empty slots below)");
+        }
+        if reused > 0 {
+            note += &format!("; {reused} of those empty slots are still referenced by kits or locks, which will now play the new file");
+        }
+        self.status = note;
+        self.want_files = Some(pairs);
     }
 
     fn click(&mut self, slot: usize, m: egui::Modifiers) {
@@ -300,11 +397,11 @@ impl ElkState {
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() || self.project.is_none() {
+        if !self.keys_on || ctx.egui_wants_keyboard_input() || self.project.is_none() {
             return;
         }
         let n = self.order.len();
-        let (m, up, down, pgup, pgdn, esc, z, a) = ctx.input(|i| {
+        let (m, up, down, pgup, pgdn, esc, z, a, space) = ctx.input(|i| {
             (
                 i.modifiers,
                 i.key_pressed(egui::Key::ArrowUp),
@@ -314,8 +411,15 @@ impl ElkState {
                 i.key_pressed(egui::Key::Escape),
                 i.key_pressed(egui::Key::Z),
                 i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::Space),
             )
         });
+        // Space plays (or stops) the slot under the cursor.
+        if space && !m.any() {
+            if let Some(k) = self.cursor.and_then(|c| self.key_at(c)) {
+                self.want_local = Some((k, false));
+            }
+        }
         if m.command && z {
             self.undo();
         }
@@ -356,6 +460,11 @@ impl ElkState {
         }
         self.cursor = Some(next);
         self.reveal = Some(next);
+        if self.preview && !m.shift {
+            if let Some(k) = self.key_at(next) {
+                self.want_local = Some((k, false));
+            }
+        }
     }
 }
 
@@ -373,6 +482,8 @@ enum RowAct {
     MoveHere(usize),
     Nudge(i32),
     Local((u32, u32), bool),
+    /// Local files dropped on this slot.
+    DropFiles(usize, Vec<std::path::PathBuf>),
 }
 
 pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
@@ -390,43 +501,156 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
                     .small(),
             );
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .button("⇥ Dock beside files")
+                .on_hover_text("Show one pool pane in the right column, with the source files and the editor back on screen")
+                .clicked()
+            {
+                out.push(ElkIntent::Dock);
+            }
+        });
     });
 
     let busy = st.busy.is_some();
     if st.project.is_some() {
-        ui.horizontal(|ui| {
-        if ui.add_enabled(!busy, egui::Button::new("✕ Close / pick another")).on_hover_text("Close this project and go back to the project list").clicked() {
+        ui.horizontal_wrapped(|ui| {
+            project_tools(ui, st, &mut out, true);
+        });
+        ui.horizontal_wrapped(|ui| preview_tools(ui, st, &mut out));
+    }
+    body(ui, st, &mut out, busy);
+    finish(ui, st, &mut out);
+    out
+}
+
+/// The pool as one pane, for the right column.
+pub fn show_docked(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
+    let mut out = Vec::new();
+    let busy = st.busy.is_some();
+    if st.project.is_some() {
+        ui.horizontal_wrapped(|ui| {
+            project_tools(ui, st, &mut out, false);
+        });
+        ui.horizontal_wrapped(|ui| preview_tools(ui, st, &mut out));
+        if let Some(why) = st.project.as_ref().and_then(|p| p.read_only.clone()).filter(|_| !busy) {
+            ui.colored_label(Color32::from_rgb(230, 120, 90), "Read-only").on_hover_text(why);
+        }
+        st.active = 0;
+        st.keys(ui.ctx());
+        ui.push_id("docked", |ui| slot_pane(ui, st, 0));
+    } else {
+        ui.add_space(8.0);
+        if let Some((label, done, total)) = &st.busy {
+            ui.label(format!("{label}…"));
+            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(format!("{done}/{total}")));
+        } else {
+            if ui.button(RichText::new("⬇ Load current project").color(theme::ACCENT_BRIGHT)).on_hover_text("Read the project open on the device now").clicked() {
+                out.push(ElkIntent::Read);
+            }
+            if !st.status.is_empty() {
+                ui.colored_label(Color32::from_rgb(230, 120, 90), &st.status);
+            }
+        }
+    }
+    finish(ui, st, &mut out);
+    out
+}
+
+/// Bytes as "12.3 MB".
+fn mb(b: u64) -> String {
+    format!("{:.1} MB", b as f64 / 1_048_576.0)
+}
+
+/// Preview toggle, background fetch and the cache size.
+fn preview_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
+    ui.toggle_value(&mut st.preview, "🔊 Preview on click")
+        .on_hover_text("Clicking a slot, or moving onto it with ↑/↓, plays it. Without a local copy it is fetched from the device first (that slot jumps the fetch queue). Space plays the slot under the cursor either way.");
+    match st.fetch {
+        Some((done, total)) => {
+            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_width(140.0).text(format!("Fetching {done}/{total}")));
+            if ui.small_button("Stop").on_hover_text("Stop fetching; what's already here stays").clicked() {
+                out.push(ElkIntent::StopFetch);
+            }
+        }
+        None => {
+            if ui
+                .button("⬇ Fetch all for preview")
+                .on_hover_text("Copy every pool sample without a local copy into the preview cache, one at a time in the background. Other device work and clicked slots go first.")
+                .clicked()
+            {
+                out.push(ElkIntent::FetchAll);
+            }
+        }
+    }
+    let (txt, files) = match st.cache {
+        Some((b, f)) => (format!("Cache {}", mb(b)), f),
+        None => ("Cache …".to_owned(), 0),
+    };
+    ui.menu_button(txt, |ui| {
+        ui.label(format!("{files} sample(s) fetched for previewing, kept by content hash so they play instantly next time, whichever project uses them."));
+        if ui
+            .add_enabled(files > 0 && st.fetch.is_none(), egui::Button::new("Move cache to Trash"))
+            .on_hover_text("Previews fetch again on demand")
+            .clicked()
+        {
+            out.push(ElkIntent::PurgeCache);
+            ui.close();
+        }
+    });
+}
+
+/// Close / reload / push / undo / reset, and progress or status.
+fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
+    let busy = st.busy.is_some();
+    {
+        if !wide {
+            if ui.button("⤢").on_hover_text("Undock: back to the full-window Sample Order view").clicked() {
+                out.push(ElkIntent::Undock);
+            }
+        }
+        let close = if wide { "✕ Close / pick another" } else { "✕" };
+        if ui.add_enabled(!busy, egui::Button::new(close)).on_hover_text("Close this project and go back to the project list").clicked() {
             if st.changed() > 0 {
                 st.confirm_close = true;
             } else {
                 st.close_project();
             }
         }
-        if ui.add_enabled(!busy, egui::Button::new("⬇ Reload")).on_hover_text("Fetch the project open on the device right now again (from its memory)").clicked() {
+        if ui.add_enabled(!busy, egui::Button::new(if wide { "⬇ Reload" } else { "⬇" })).on_hover_text("Fetch the project open on the device right now again (from its memory)").clicked() {
             out.push(ElkIntent::Read);
         }
         let changed = st.changed();
-        let can_push = !busy && changed > 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
+        let waiting = st.filling.len();
+        let can_push = !busy && changed > 0 && waiting == 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
         let push = ui
-            .add_enabled(can_push, egui::Button::new(RichText::new(format!("⬆ Push to memory ({changed})")).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
-            .on_hover_text("Write the new order into the project loaded on the device (not the saved copy on +Drive)");
+            .add_enabled(can_push, egui::Button::new(RichText::new(if wide { format!("⬆ Push to memory ({changed})") } else { format!("⬆ Push ({changed})") }).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
+            .on_hover_text(if waiting > 0 {
+                format!("Waiting for {waiting} dropped file(s) to reach the +Drive")
+            } else {
+                "Write the new order (and any files put into empty slots) into the project loaded on the device (not the saved copy on +Drive)".to_owned()
+            });
         if push.clicked() {
             st.confirm_push = true;
         }
-        if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new("↶ Undo")).on_hover_text("Undo the last move (⌘Z)").clicked() {
+        if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new(if wide { "↶ Undo" } else { "↶" })).on_hover_text("Undo the last move (⌘Z)").clicked() {
             st.undo();
         }
-        if ui.add_enabled(!busy && changed > 0, egui::Button::new("↺ Reset")).on_hover_text("Back to the order as read from the device").clicked() {
-            st.edit(|o| *o = (0..o.len() as u16).collect());
+        if ui.add_enabled(!busy && changed > 0, egui::Button::new(if wide { "↺ Reset" } else { "↺" })).on_hover_text("Back to the order as read from the device").clicked() {
+            st.undo.push((st.order.clone(), st.fills.clone()));
+            st.order = (0..st.order.len() as u16).collect();
+            st.fills.clear();
         }
         if let Some((label, done, total)) = &st.busy {
-            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(ui.available_width().max(320.0)).text(format!("{label} {done}/{total}")));
+            let w = if wide { ui.available_width().max(320.0) } else { ui.available_width().max(160.0) };
+            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
         } else if !st.status.is_empty() && st.project.is_some() {
             ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
         }
-    });
     }
+}
 
+fn body(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, busy: bool) {
     if st.project.as_ref().is_some_and(|p| p.partial) && busy {
         ui.label(RichText::new("Sample pool loaded; use counts fill in as the patterns arrive. You can start arranging, pushing unlocks when the read finishes.").weak());
     } else if let Some(why) = st.project.as_ref().and_then(|p| p.read_only.clone()) {
@@ -457,7 +681,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
             }
         });
         ui.add_space(12.0);
-        projects_list(ui, st, &mut out);
+        projects_list(ui, st, out);
     } else {
         st.keys(ui.ctx());
         ui.label(
@@ -480,9 +704,15 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
             }
         });
     }
+}
 
+/// Requests and confirmations common to both layouts.
+fn finish(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
     if let Some((k, open)) = st.want_local.take() {
         out.push(ElkIntent::Local(k, open));
+    }
+    if let Some(pairs) = st.want_files.take() {
+        out.push(ElkIntent::AddFiles(pairs));
     }
     if st.confirm_close {
         if let Some(yes) = confirm_close(ui.ctx(), st.changed()) {
@@ -500,7 +730,6 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
             }
         }
     }
-    out
 }
 
 fn projects_list(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
@@ -695,6 +924,11 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
             RowAct::Click(s, m) => {
                 st.active = side;
                 st.click(s, m);
+                if st.preview && !m.shift && !m.command {
+                    if let Some(k) = st.key_at(s) {
+                        st.want_local = Some((k, false));
+                    }
+                }
             }
             RowAct::DragStart(s) => {
                 st.active = side;
@@ -715,6 +949,10 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
             RowAct::MoveHere(s) => st.move_sel_to(s),
             RowAct::Nudge(d) => st.nudge(d),
             RowAct::Local(k, open) => st.want_local = Some((k, open)),
+            RowAct::DropFiles(s, files) => {
+                st.active = side;
+                st.drop_files(s, files);
+            }
         }
     }
 }
@@ -724,7 +962,9 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     let Some(p) = st.project.as_ref() else { return };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::empty());
     let from = st.order[slot] as usize;
-    let e = p.pool[from];
+    let e = st.entry(from);
+    let filling = st.filling.get(&(from as u16));
+    let added = st.fills.contains_key(&(from as u16)) || filling.is_some();
     let off = slot == 0;
     let resp = ui.interact(
         rect,
@@ -736,7 +976,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
         },
     );
     let selected = st.sel.contains(&slot);
-    let moved = from != slot;
+    let moved = from != slot || added;
 
     let painter = ui.painter();
     if selected {
@@ -781,6 +1021,8 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     );
     let name = if off {
         "OFF".to_owned()
+    } else if let Some(n) = filling {
+        format!("+ {n} …")
     } else if e.is_empty() {
         "-".to_owned()
     } else {
@@ -802,8 +1044,12 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     let uses_w = 44.0;
     let name_x = rect.left() + 8.0 + label_w;
     // A local copy is known: a small dot before the name.
+    let dot_c = if selected { OLED_BG } else { theme::ACCENT_BRIGHT };
     if linked.is_some() {
-        painter.circle_filled(egui::pos2(name_x - 7.0, y), 2.5, if selected { OLED_BG } else { theme::ACCENT_BRIGHT });
+        painter.circle_filled(egui::pos2(name_x - 7.0, y), 2.5, dot_c);
+    } else if !off && !e.is_empty() && st.fetching.contains(&e.key()) {
+        // Queued for the preview cache.
+        painter.circle_stroke(egui::pos2(name_x - 7.0, y), 2.5, Stroke::new(1.0, dot_c));
     }
     let clip = egui::Rect::from_min_max(
         egui::pos2(name_x, rect.top()),
@@ -814,7 +1060,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
         egui::Align2::LEFT_CENTER,
         name,
         font.clone(),
-        if e.is_empty() || off { dim } else { fg },
+        if (e.is_empty() && filling.is_none()) || off { dim } else { fg },
     );
     if uses > 0 {
         painter.text(
@@ -836,10 +1082,11 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     if off {
         return;
     }
-    if resp.clicked() {
+    // With preview on, the first click of a double-click already played it.
+    if resp.clicked() && !(st.preview && resp.double_clicked()) {
         acts.push(RowAct::Click(slot, ui.input(|i| i.modifiers)));
     }
-    if resp.double_clicked() && linked.is_some() {
+    if resp.double_clicked() && !st.preview && !e.is_empty() {
         acts.push(RowAct::Local(e.key(), false));
     }
     if resp.drag_started() {
@@ -879,6 +1126,17 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
             );
         }
     }
+    // Local files from a file pane (or Finder) onto an empty slot.
+    if let Some(d) = resp.dnd_hover_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
+        let ok = st.free(from as u16);
+        let n = if ok { d.paths.len().min(st.order.len() - slot) } else { 1 };
+        let r = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_H * n as f32));
+        let c = if ok { theme::ACCENT_BRIGHT } else { Color32::from_rgb(230, 120, 90) };
+        ui.painter().rect_stroke(r, 0.0, Stroke::new(2.0, c), egui::StrokeKind::Inside);
+    }
+    if let Some(d) = resp.dnd_release_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
+        acts.push(RowAct::DropFiles(slot, d.paths.clone()));
+    }
     if resp.dnd_release_payload::<SlotDrag>().is_some() {
         acts.push(if shift_mode {
             RowAct::DropBefore(before(pointer))
@@ -889,16 +1147,17 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
 
     let n_sel = st.sel.len();
     resp.context_menu(|ui| {
-        if linked.is_some() {
-            if ui.button("Play local copy  (double-click)").clicked() {
+        if !e.is_empty() {
+            let (play, open, tip) = if linked.is_some() {
+                ("Play local copy  (Space)", "Open local copy in editor", "Nothing is fetched from the device")
+            } else {
+                ("Fetch and play  (Space)", "Fetch and open in editor", "Copied into the preview cache first; other fetches wait")
+            };
+            if ui.button(play).on_hover_text(tip).clicked() {
                 acts.push(RowAct::Local(e.key(), false));
                 ui.close();
             }
-            if ui
-                .button("Open local copy in editor")
-                .on_hover_text("Leaves this view; nothing is fetched from the device")
-                .clicked()
-            {
+            if ui.button(open).on_hover_text(tip).clicked() {
                 acts.push(RowAct::Local(e.key(), true));
                 ui.close();
             }
@@ -914,7 +1173,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
             acts.push(RowAct::InsertEmpty(slot));
             ui.close();
         }
-        if e.is_empty()
+        if st.free(from as u16)
             && ui
                 .button("Remove this empty slot")
                 .on_hover_text("Pull the samples below up by one, up to the next empty slot")
@@ -951,11 +1210,23 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
             .cloned()
             .unwrap_or_else(|| "(not found on +Drive)".into());
         if let Some((_, local, original)) = linked {
+            let cached = crate::links::pool_cache_dir().is_some_and(|c| local.starts_with(c));
             tip.push_str(&format!(
-                "\n{}: {}\n(double-click to play it)",
-                if *original { "uploaded from" } else { "fetched to" },
+                "\n{}: {}",
+                if *original {
+                    "uploaded from"
+                } else if cached {
+                    "in the preview cache"
+                } else {
+                    "fetched to"
+                },
                 local.display()
             ));
+        } else if st.fetching.contains(&e.key()) {
+            tip.push_str("\nqueued for the preview cache");
+        }
+        if st.fills.contains_key(&(from as u16)) {
+            tip.push_str("\nnew in this slot: goes to the device with the next push");
         }
         tip.push_str(&format!("\npool slot {slot}"));
         if moved {
@@ -965,6 +1236,8 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
             "\nused {uses}× (kit tracks, sample locks, sounds)"
         ));
         resp.on_hover_text(tip);
+    } else if filling.is_some() {
+        resp.on_hover_text("Uploading to the +Drive, then checking the device can find it. Pushing waits for this.");
     }
 }
 
