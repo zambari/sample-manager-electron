@@ -774,6 +774,15 @@ impl App {
                 }
                 EdIntent::Seek(f) => self.engine.seek(f),
                 EdIntent::Export => self.export(),
+                EdIntent::ExportAndClose => {
+                    // Same path as "export" in the close-kit question: the
+                    // kit closes once the file is written, and stays open if
+                    // the export is cancelled or fails.
+                    if self.leave_pending.is_none() && self.leave_after_save.is_none() {
+                        self.leave_after_save = Some(Leave::CloseKit);
+                        self.export();
+                    }
+                }
                 EdIntent::SaveInPlace => self.save_in_place(),
                 EdIntent::ShowKit(on) => self.show_kit(on),
                 EdIntent::AddSlice => self.add_slice(),

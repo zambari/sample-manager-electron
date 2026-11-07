@@ -358,7 +358,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
                 "Play, loop, follow, snap and auto-load / auto-play",
             ),
             (&mut p.gain, "Gain", "Gain and normalize"),
-            (&mut p.tools, "Tools", "Undo, cut / paste, crop, loop scaling, mono"),
+            (&mut p.tools, "Tools", "Undo, cut / paste, crop, loop scaling"),
             (
                 &mut p.nums,
                 "Nums",
@@ -400,11 +400,13 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
 /// Save and Export, always shown. Each button means the same thing in every
 /// state: Save writes over the open file, Export writes a new file into the
 /// destination tab.
-pub(super) fn file_row(ui: &mut Ui, ed: &Editor, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
+pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
     let showing_kit = slots.showing_kit;
     let has = ed.current.is_some();
     section_header(ui, "File");
     ui.horizontal_wrapped(|ui| {
+        mono_picker(ui, ed);
+        ui.separator();
         let mono = if ed.exports_mono() {
             match ed.fold() {
                 Some(Fold::Left) => " (mono L)",
@@ -459,6 +461,17 @@ pub(super) fn file_row(ui: &mut Ui, ed: &Editor, can_export: bool, slots: &Slots
             .clicked()
         {
             out.push(EdIntent::Export);
+        }
+        if showing_kit
+            && ui
+                .add_enabled(has && can_export && !ed.exporting, egui::Button::new("Export and close"))
+                .on_hover_text(
+                    "Export the kit as above, then close it once it's written. \
+                     Nothing closes if the export is cancelled or fails.",
+                )
+                .clicked()
+        {
+            out.push(EdIntent::ExportAndClose);
         }
         if let Some(home) = slots.device_home.as_ref().filter(|_| !showing_kit) {
             let tip = format!(
@@ -644,25 +657,6 @@ pub(super) fn toolbar(
             {
                 ed.shift_selection(1);
             }
-            ui.separator();
-            // One control for listening and export: stereo, or which mono fold.
-            ui.label("◐").on_hover_text("Mono: what you hear, the stats, Normalize and export all follow. M toggles.");
-            let mut mono = ed.prefs.mono;
-            let mut changed = ui
-                .selectable_value(&mut mono, None, "Stereo")
-                .on_hover_text("Keep all channels. M toggles mono.")
-                .changed();
-            for f in Fold::ALL {
-                let tip = match f {
-                    Fold::Mix => "Mono: L+R averaged. Very wide stereo can lose level or sound hollow (phase cancellation).",
-                    Fold::Left => "Mono from the left channel only — no phase cancellation.",
-                    Fold::Right => "Mono from the right channel only — no phase cancellation.",
-                };
-                changed |= ui.selectable_value(&mut mono, Some(f), f.short()).on_hover_text(tip).changed();
-            }
-            if changed {
-                ed.set_mono(mono);
-            }
             if !showing_kit
                 && ui
                     .add_enabled(ed.current.is_some(), egui::Button::new("+ Slice → Kit"))
@@ -719,4 +713,31 @@ pub(super) fn positions(ui: &mut Ui, ed: &mut Editor, pv: &PlayView) {
                 .monospace(),
         );
     });
+}
+
+/// Stereo, or which mono fold: one control for listening and export alike.
+/// Greyed out on a mono file, where there is nothing to fold.
+fn mono_picker(ui: &mut Ui, ed: &mut Editor) {
+    let multi = ed.is_multichannel();
+    ui.add_enabled_ui(multi || ed.current.is_none(), |ui| {
+        ui.label("◐").on_hover_text("Mono: what you hear, the stats, Normalize, Save and Export all follow. M toggles.");
+        let mut mono = ed.prefs.mono;
+        let mut changed = ui
+            .selectable_value(&mut mono, None, "Stereo")
+            .on_hover_text("Keep all channels. M toggles mono.")
+            .changed();
+        for f in Fold::ALL {
+            let tip = match f {
+                Fold::Mix => "Mono: L+R averaged. Very wide stereo can lose level or sound hollow (phase cancellation).",
+                Fold::Left => "Mono from the left channel only — the right one is dimmed and dropped. No phase cancellation.",
+                Fold::Right => "Mono from the right channel only — the left one is dimmed and dropped. No phase cancellation.",
+            };
+            changed |= ui.selectable_value(&mut mono, Some(f), f.short()).on_hover_text(tip).changed();
+        }
+        if changed {
+            ed.set_mono(mono);
+        }
+    })
+    .response
+    .on_disabled_hover_text("This file is already mono");
 }

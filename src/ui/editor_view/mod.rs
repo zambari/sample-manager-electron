@@ -42,6 +42,8 @@ pub enum EdIntent {
     /// Playhead was moved while playing: jump the voice there.
     Seek(usize),
     Export,
+    /// Export the kit, then close it once the file is written.
+    ExportAndClose,
     SaveInPlace,
     /// Show the slice kit (`true`) or the browsed sample.
     ShowKit(bool),

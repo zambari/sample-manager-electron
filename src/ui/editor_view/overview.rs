@@ -30,11 +30,22 @@ pub(super) fn overview(
         let mid = rect.center().y;
         let half = rect.height() * 0.45;
         let col = vis.weak_text_color();
+        // Only the channel a left / right mono fold keeps.
+        let n_ch = cur.sample.channels.len().max(1);
+        let fold = ed.fold();
+        let kept = |c: usize| match fold {
+            Some(Fold::Left) => c == 0,
+            Some(Fold::Right) => c == 1.min(n_ch - 1),
+            _ => true,
+        };
         for px in 0..rect.width() as usize {
             let f0 = (px as f64 * fpp) as usize;
             let f1 = (((px + 1) as f64 * fpp) as usize).max(f0 + 1);
             let mut hi = 0f32;
-            for (data, peaks) in cur.sample.channels.iter().zip(cur.peaks.iter()) {
+            for (c, (data, peaks)) in cur.sample.channels.iter().zip(cur.peaks.iter()).enumerate() {
+                if !kept(c) {
+                    continue;
+                }
                 let (lo, h) = peaks.range(data, f0, f1);
                 hi = hi.max(h.abs()).max(lo.abs());
             }
