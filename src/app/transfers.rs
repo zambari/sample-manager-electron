@@ -814,10 +814,7 @@ impl App {
                         // A transfer changes sizes up the whole chain, so the
                         // cached values above it are now wrong too.
                         self.sizes.invalidate_subtree(&dir);
-                        for anc in dir.ancestors() {
-                            self.sizes.invalidate_subtree(anc);
-                            break;
-                        }
+                        self.sizes.invalidate_ancestors(&dir);
                         self.reload_showing(&dir, false);
                     }
                     if let Some((_, p)) = self.reveal_after.take_if(|(id, _)| *id == job) {

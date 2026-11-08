@@ -44,6 +44,14 @@ impl SizeCache {
         self.map.retain(|k, _| !k.starts_with(root));
     }
 
+    /// Drop the cached sizes of the folders above `path` (not their other
+    /// children): a change inside a folder changes every total above it.
+    pub fn invalidate_ancestors(&mut self, path: &Path) {
+        for anc in path.ancestors().skip(1) {
+            self.map.remove(anc);
+        }
+    }
+
     pub fn bytes_of(&self, path: &Path) -> Option<u64> {
         match self.get(path) {
             Some(Size::Known { bytes, .. }) => Some(bytes),
