@@ -35,6 +35,8 @@ pub struct ElkState {
     pub confirm_push: bool,
     /// Asking whether to drop unpushed changes and close the project.
     confirm_close: bool,
+    /// Asking whether to clear these still-referenced slots (as read).
+    confirm_clear: Option<Vec<u16>>,
     /// After a push: the pool the device should now have.
     pub expect: Option<Vec<PoolEntry>>,
     pub asked_projects: bool,
@@ -90,6 +92,8 @@ pub enum ElkIntent {
     /// Local files dropped on the pool: each goes to the empty slot paired
     /// with it (numbered as read).
     AddFiles(Vec<(u16, std::path::PathBuf)>),
+    /// Write the dump as read to disk, for format research.
+    SaveDump,
 }
 
 impl ElkState {
@@ -128,6 +132,7 @@ impl ElkState {
             return;
         }
         self.order = (0..p.pool.len() as u16).collect();
+        self.confirm_clear = None;
         self.fills.clear();
         self.filling.clear();
         let banks = p.pool.len().div_ceil(BANK);
@@ -142,6 +147,7 @@ impl ElkState {
     fn close_project(&mut self) {
         self.project = None;
         self.order.clear();
+        self.confirm_clear = None;
         self.fills.clear();
         self.filling.clear();
         self.sel.clear();
@@ -346,6 +352,60 @@ impl ElkState {
         self.status = format!("Closed gap at {}", self.label(at));
     }
 
+    /// Empties `slots` (as ordered now): the unused ones straight away, then
+    /// asks before emptying any that kits, locks or sounds still point at.
+    fn clear(&mut self, slots: &[usize]) {
+        let Some(p) = &self.project else { return };
+        if p.partial {
+            self.status = "Wait for the read to finish: use counts aren't known yet".into();
+            return;
+        }
+        let olds: Vec<u16> = slots
+            .iter()
+            .filter(|&&s| s > 0 && s < self.order.len())
+            .map(|&s| self.order[s])
+            .filter(|&o| !self.free(o))
+            .collect();
+        let (used, unused): (Vec<u16>, Vec<u16>) = olds.into_iter().partition(|&o| p.uses[o as usize] > 0);
+        if !unused.is_empty() {
+            self.clear_olds(&unused);
+        }
+        self.status = match (unused.len(), used.len()) {
+            (0, 0) => "Nothing to clear".into(),
+            (0, _) => String::new(),
+            (n, _) => format!("Cleared {n} unused sample(s)"),
+        };
+        if !used.is_empty() {
+            self.confirm_clear = Some(used);
+        }
+    }
+
+    /// Empties pool entries `olds` (as read), as one undoable edit.
+    fn clear_olds(&mut self, olds: &[u16]) {
+        let Some(p) = &self.project else { return };
+        let was: Vec<bool> = olds.iter().map(|&o| p.pool[o as usize].is_empty()).collect();
+        self.undo.push((self.order.clone(), self.fills.clone()));
+        for (&o, empty_as_read) in olds.iter().zip(was) {
+            if empty_as_read {
+                // A file added this session: just take it back out.
+                self.fills.remove(&o);
+            } else {
+                self.fills.insert(o, PoolEntry::EMPTY);
+            }
+        }
+    }
+
+    /// Every non-empty slot nothing points at.
+    fn unused_slots(&self) -> Vec<usize> {
+        let Some(p) = &self.project else { return Vec::new() };
+        (1..self.order.len())
+            .filter(|&s| {
+                let o = self.order[s];
+                !self.free(o) && p.uses[o as usize] == 0
+            })
+            .collect()
+    }
+
     /// Pair dropped files with this slot and the empty ones after it.
     fn drop_files(&mut self, slot: usize, files: Vec<std::path::PathBuf>) {
         let files: Vec<_> = files.into_iter().filter(|f| crate::fs_model::is_audio_path(f)).collect();
@@ -481,6 +541,9 @@ enum RowAct {
     CloseGap(usize),
     MoveHere(usize),
     Nudge(i32),
+    /// Empty these slots (unused ones at once, asks about the rest).
+    Clear(Vec<usize>),
+    ClearUnused,
     Local((u32, u32), bool),
     /// Local files dropped on this slot.
     DropFiles(usize, Vec<std::path::PathBuf>),
@@ -633,6 +696,14 @@ fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>,
         if push.clicked() {
             st.confirm_push = true;
         }
+        let can_save = !busy && st.project.as_ref().is_some_and(|p| !p.partial);
+        if ui
+            .add_enabled(can_save, egui::Button::new(if wide { "💾 Save dump" } else { "💾" }))
+            .on_hover_text("Save the project as read (raw .syx, decoded structs, names and strings) to ~/Documents/sample_manager/project_dumps, for format research")
+            .clicked()
+        {
+            out.push(ElkIntent::SaveDump);
+        }
         if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new(if wide { "↶ Undo" } else { "↶" })).on_hover_text("Undo the last move (⌘Z)").clicked() {
             st.undo();
         }
@@ -719,6 +790,17 @@ fn finish(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
             st.confirm_close = false;
             if yes {
                 st.close_project();
+            }
+        }
+    }
+    if let Some(olds) = &st.confirm_clear {
+        if let Some(yes) = confirm_clear(ui.ctx(), st, olds) {
+            let olds = st.confirm_clear.take().unwrap_or_default();
+            if yes {
+                st.clear_olds(&olds);
+                st.status = format!("Cleared {} used sample(s); what pointed at them now plays nothing", olds.len());
+            } else {
+                st.status = format!("Kept {} used sample(s)", olds.len());
             }
         }
     }
@@ -948,6 +1030,11 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
             RowAct::CloseGap(s) => st.close_gap(s),
             RowAct::MoveHere(s) => st.move_sel_to(s),
             RowAct::Nudge(d) => st.nudge(d),
+            RowAct::Clear(slots) => st.clear(&slots),
+            RowAct::ClearUnused => {
+                let slots = st.unused_slots();
+                st.clear(&slots);
+            }
             RowAct::Local(k, open) => st.want_local = Some((k, open)),
             RowAct::DropFiles(s, files) => {
                 st.active = side;
@@ -1202,6 +1289,42 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
                 acts.push(RowAct::Nudge(1));
             }
         }
+        // Clearing: the selection when right-clicking inside it, else this row.
+        let targets: Vec<usize> = if selected {
+            st.sel.iter().copied().filter(|&s| !st.free(st.order[s])).collect()
+        } else if !st.free(from as u16) {
+            vec![slot]
+        } else {
+            Vec::new()
+        };
+        let counted = !p.partial;
+        ui.separator();
+        if !targets.is_empty() {
+            let used = targets.iter().filter(|&&s| p.uses[st.order[s] as usize] > 0).count();
+            let label = if targets.len() == 1 {
+                "Clear sample from project".to_owned()
+            } else {
+                format!("Clear {} samples from project", targets.len())
+            };
+            let tip = if used > 0 {
+                format!("Unused ones are cleared right away; {used} still used by kits, locks or sounds will ask first")
+            } else {
+                "Empties the slot in the pool; the file stays on the +Drive. Undo with ⌘Z".to_owned()
+            };
+            if ui.add_enabled(counted, egui::Button::new(label)).on_hover_text(tip).on_disabled_hover_text("Wait for the read to finish").clicked() {
+                acts.push(RowAct::Clear(targets));
+                ui.close();
+            }
+        }
+        if ui
+            .add_enabled(counted, egui::Button::new("Clear all unused samples"))
+            .on_hover_text("Empties every slot nothing in the project points at; the files stay on the +Drive. Undo with ⌘Z")
+            .on_disabled_hover_text("Wait for the read to finish")
+            .clicked()
+        {
+            acts.push(RowAct::ClearUnused);
+            ui.close();
+        }
     });
     if !e.is_empty() {
         let mut tip = st
@@ -1233,7 +1356,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
             tip.push_str(&format!(", was {}", st.label(from)));
         }
         tip.push_str(&format!(
-            "\nused {uses}× (kit tracks, sample locks, sounds)"
+            "\nused {uses}× (once per pattern track, plus pool sounds)"
         ));
         resp.on_hover_text(tip);
     } else if filling.is_some() {
@@ -1257,6 +1380,46 @@ fn confirm_push(ctx: &egui::Context, changed: usize) -> Option<bool> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button(RichText::new("Push to device").color(theme::ACCENT_BRIGHT)).clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                answer = Some(false);
+            }
+        });
+    });
+    answer
+}
+
+fn confirm_clear(ctx: &egui::Context, st: &ElkState, olds: &[u16]) -> Option<bool> {
+    let Some(p) = &st.project else { return Some(false) };
+    let mut answer = None;
+    egui::Modal::new(egui::Id::unique("elk_clear_modal")).show(ctx, |ui| {
+        ui.set_width(440.0);
+        ui.heading(format!("Clear {} used sample(s)?", olds.len()));
+        ui.add_space(6.0);
+        if !st.status.is_empty() {
+            ui.label(RichText::new(format!("{}.", st.status)).weak());
+        }
+        ui.label(
+            "These samples are still used by kit tracks, sample locks or pool sounds. \
+             Clearing them disconnects those sounds: they will play nothing after the push.",
+        );
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+            for &o in olds {
+                let slot = st.order.iter().position(|&x| x == o).unwrap_or(o as usize);
+                let e = st.entry(o as usize);
+                let name = st
+                    .names
+                    .get(&e.key())
+                    .map(|n| n.rsplit('/').next().unwrap_or(n).to_owned())
+                    .unwrap_or_else(|| format!("#{:08x}", e.hash));
+                ui.label(format!("{}  {name}  (used {}×)", st.label(slot), p.uses[o as usize]));
+            }
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("Clear anyway").color(Color32::from_rgb(230, 120, 90))).clicked() {
                 answer = Some(true);
             }
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {

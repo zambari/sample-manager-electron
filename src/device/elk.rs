@@ -7,6 +7,8 @@
 
 use super::*;
 
+mod dump;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Model {
     Digitakt,
@@ -267,6 +269,9 @@ pub struct PoolEntry {
 }
 
 impl PoolEntry {
+    /// An empty slot, as the device writes it.
+    pub const EMPTY: Self = Self { inode: 0xFFFF_FFFF, hash: 0, size: 0, seqnr: 0 };
+
     pub fn is_empty(&self) -> bool {
         self.inode == 0xFFFF_FFFF
     }
@@ -313,9 +318,19 @@ struct SlotRef {
     msg: usize,
     at: usize,
     enc: Enc,
+    /// Kit track the reference belongs to (`NO_TRACK` for pool sounds), so a
+    /// slot counts once per track per pattern, not once per locked step.
+    track: u8,
 }
 
+const NO_TRACK: u8 = u8::MAX;
+
 impl SlotRef {
+    /// Key for counting: one use per message, track and slot.
+    fn use_key(&self, slot: usize) -> (usize, u8, usize) {
+        (self.msg, self.track, slot)
+    }
+
     fn get(&self, d: &[u8]) -> Option<usize> {
         match self.enc {
             Enc::U8 => d.get(self.at).map(|&v| v as usize),
@@ -356,9 +371,12 @@ impl Scan {
     pub(super) fn count(&mut self, model: Model, mi: usize, m: &DumpMsg, uses: &mut [u32]) {
         let from = self.refs.len();
         self.msg(model, mi, m);
+        let mut seen = std::collections::HashSet::new();
         for r in &self.refs[from..] {
             if let Some(s) = r.get(&m.data).filter(|&s| s > 0 && s < uses.len()) {
-                uses[s] += 1;
+                if seen.insert(r.use_key(s)) {
+                    uses[s] += 1;
+                }
             }
         }
     }
@@ -427,6 +445,7 @@ impl Scan {
                         msg: mi,
                         at: s + slot_at,
                         enc,
+                        track: t as u8,
                     });
                 }
                 let midi_mask = kit_midi_mask(model, kv)
@@ -453,6 +472,7 @@ impl Scan {
                             msg: mi,
                             at: at + 2 + s * 2,
                             enc,
+                            track: d[at + 1],
                         };
                         if r.get(d).is_some() {
                             self.refs.push(r);
@@ -477,6 +497,7 @@ impl Scan {
                         msg: mi,
                         at: slot_at,
                         enc,
+                        track: NO_TRACK,
                     });
                 }
             }
@@ -491,7 +512,8 @@ pub struct ElkProject {
     pool_at: usize,
     pub pool: Vec<PoolEntry>,
     refs: Vec<SlotRef>,
-    /// References to each slot: kit tracks, sample locks, sound pool.
+    /// Uses of each slot: once per pattern track that plays it (kit sound or
+    /// sample locks), plus once per pool sound.
     pub uses: Vec<u32>,
     /// Struct versions found, for display.
     pub versions: String,
@@ -561,9 +583,14 @@ impl ElkProject {
         }
 
         let mut uses = vec![0u32; n];
+        let mut seen = std::collections::HashSet::new();
         for r in &refs {
             match r.get(&msgs[r.msg].data) {
-                Some(s) if s < n => uses[s] += 1,
+                Some(s) if s < n => {
+                    if seen.insert(r.use_key(s)) {
+                        uses[s] += 1;
+                    }
+                }
                 Some(s) => {
                     problems.push(format!("a reference points at slot {s}, past the pool"));
                     break;

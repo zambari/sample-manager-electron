@@ -111,12 +111,32 @@ impl App {
                     self.device.elk(ElkCmd::ListProjects);
                 }
                 ElkIntent::Read => self.elk_read(),
+                ElkIntent::SaveDump => {
+                    let Some(p) = &self.elk.project else { continue };
+                    let Some(home) = std::env::var_os("HOME") else { continue };
+                    let root = PathBuf::from(home).join("Documents/sample_manager/project_dumps");
+                    match p.save_dump(&root) {
+                        Ok(dir) => {
+                            crate::log::line(format!("elk: dump saved to {}", dir.display()));
+                            self.elk.status = format!("Dump saved to {}", dir.display());
+                            reveal(&dir);
+                        }
+                        Err(e) => {
+                            self.elk.status = format!("Couldn't save the dump: {e}");
+                            self.errors.push(format!("save dump: {e}"));
+                        }
+                    }
+                }
                 ElkIntent::Local(k, open) => self.elk_local(k, open),
                 ElkIntent::Push => {
                     let Some(p) = &self.elk.project else { continue };
                     let msgs = p.build_push(&self.elk.order, &self.elk.fills);
                     for (slot, e) in &self.elk.fills {
-                        crate::log::line(format!("elk: pushing new file in slot {slot} (as read): hash {:08x} size {} inode {} seqnr {}", e.hash, e.size, e.inode, e.seqnr));
+                        if e.is_empty() {
+                            crate::log::line(format!("elk: pushing slot {slot} (as read) cleared"));
+                        } else {
+                            crate::log::line(format!("elk: pushing new file in slot {slot} (as read): hash {:08x} size {} inode {} seqnr {}", e.hash, e.size, e.inode, e.seqnr));
+                        }
                     }
                     if msgs.is_empty() {
                         self.elk.status = "Nothing to send: no pattern, kit or sound changes with this order.".into();
