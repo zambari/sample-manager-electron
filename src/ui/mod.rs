@@ -1,5 +1,5 @@
 pub mod dialogs;
-pub mod dnd;
+pub mod drag_drop;
 pub mod editor_view;
 pub mod elk_project_view;
 pub mod elk_view;

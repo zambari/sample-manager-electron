@@ -9,7 +9,7 @@ use crate::fs_model::{self, SortKey};
 use crate::preview::Preview;
 use crate::sizes::{Size, SizeCache};
 use crate::tab::DirTab;
-use crate::ui::dnd::ResponseDnd;
+use crate::ui::drag_drop::ResponseDnd;
 use crate::ui::theme::{oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
 use egui::{Align, Key, Sense, Stroke, StrokeKind, Ui};
 use std::path::PathBuf;

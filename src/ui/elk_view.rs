@@ -4,7 +4,7 @@
 //! device pages share.
 
 use crate::device::{ElkProject, PoolEntry, SavedProject};
-use crate::ui::dnd::ResponseDnd;
+use crate::ui::drag_drop::ResponseDnd;
 use crate::ui::theme;
 use egui::{Color32, RichText, Sense, Stroke};
 use std::collections::{BTreeSet, HashMap, HashSet};

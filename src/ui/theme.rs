@@ -306,7 +306,7 @@ pub const OLED_FAMILY: &str = "oled";
 /// Dogica draws about 2pt larger than Silkscreen did at the same size, and
 /// layouts were tuned for Silkscreen, so every pixel-font size is scaled
 /// down by this factor.
-const OLED_SIZE_SCALE: f32 = 0.7;
+const OLED_SIZE_SCALE: f32 = 0.6;
 
 /// Device-screen text: the Dogica Pixel font.
 pub fn oled_font(size: f32) -> egui::FontId {
