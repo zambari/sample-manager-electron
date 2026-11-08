@@ -277,7 +277,7 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
         }
     });
 
-    // Device listings sit on a dark "screen", like the Elk Sample Order view,
+    // Device listings sit on a dark "screen", like the Elek Sample Order view,
     // so it's obvious at a glance which side is the device.
     if tab.device {
         ui.painter()
@@ -942,7 +942,7 @@ const OLED_TEXT: f32 = 16.0;
 /// Selected device row while the other pane has focus.
 const OLED_UNFOCUSED_SEL: egui::Color32 = egui::Color32::from_rgb(96, 106, 102);
 
-/// A device row, in the device-screen style of the Elk Sample Order view:
+/// A device row, in the device-screen style of the Elek Sample Order view:
 /// pixel font, green-white on black, inverted when selected. Folders get a
 /// small painted folder (filled, or hollow when empty), since the pixel font
 /// has no symbol glyphs.

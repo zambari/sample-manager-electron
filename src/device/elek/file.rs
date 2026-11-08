@@ -215,9 +215,9 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&s).map_err(|e| format!("not a readable file: {e}"))
 }
 
-impl ElkProject {
+impl ElekProject {
     /// The project as edited (unpushed changes included). `pool` is the
-    /// pool as it will be after a push (`ElkState::new_pool`).
+    /// pool as it will be after a push (`ElekState::new_pool`).
     pub fn project_file(
         &self,
         order: &[u16],

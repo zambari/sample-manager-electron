@@ -1,8 +1,8 @@
-//! The Elk Sample Order mode: device requests and their answers.
+//! The Elek Sample Order mode: device requests and their answers.
 
 use super::*;
-use crate::device::{ElkCmd, ElkEv};
-use crate::ui::elk_view::{self, ElkIntent};
+use crate::device::{ElekCmd, ElekEv};
+use crate::ui::elek_view::{self, ElekIntent};
 use crate::device::file;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -87,53 +87,53 @@ enum Stage {
 impl App {
     /// A full-window page. The docked pool stays docked for the way back,
     /// but the right column shows the files meanwhile.
-    pub(super) fn enter_full_elk(&mut self) {
+    pub(super) fn enter_full_elek(&mut self) {
         self.dock_pool = false;
         self.pool_focused = false;
-        self.enter_elk();
+        self.enter_elek();
     }
 
-    pub(super) fn enter_elk(&mut self) {
-        self.elk_mode = true;
+    pub(super) fn enter_elek(&mut self) {
+        self.elek_mode = true;
         self.editor_focused = false;
         self.measure_cache();
-        if !self.elk.asked_projects {
-            self.elk.asked_projects = true;
-            self.device.elk(ElkCmd::ListProjects);
+        if !self.elek.asked_projects {
+            self.elek.asked_projects = true;
+            self.device.elek(ElekCmd::ListProjects);
         }
     }
 
     /// Optional home of the pool: docked in the right column, beside the
     /// files and the editor. (The Device button opens the center view.)
-    pub(super) fn dock_elk(&mut self) {
-        self.elk_mode = false;
-        self.elk_docked = true;
+    pub(super) fn dock_elek(&mut self) {
+        self.elek_mode = false;
+        self.elek_docked = true;
         self.dock_pool = true;
         self.pool_focused = true;
         self.editor_focused = false;
         self.measure_cache();
-        if !self.elk.asked_projects {
-            self.elk.asked_projects = true;
-            self.device.elk(ElkCmd::ListProjects);
+        if !self.elek.asked_projects {
+            self.elek.asked_projects = true;
+            self.device.elek(ElekCmd::ListProjects);
         }
     }
 
-    pub(super) fn show_elk(&mut self, ui: &mut egui::Ui) {
-        self.elk.docked = false;
-        self.elk.keys_on = true;
-        let intents = match self.elk.page {
-            elk_view::ElkPage::Order => elk_view::show(ui, &mut self.elk),
-            elk_view::ElkPage::Project => crate::ui::elk_project_view::show(ui, &mut self.elk),
+    pub(super) fn show_elek(&mut self, ui: &mut egui::Ui) {
+        self.elek.docked = false;
+        self.elek.keys_on = true;
+        let intents = match self.elek.page {
+            elek_view::ElekPage::Order => elek_view::show(ui, &mut self.elek),
+            elek_view::ElekPage::Project => crate::ui::elek_project_view::show(ui, &mut self.elek),
         };
-        self.elk_intents(intents);
+        self.elek_intents(intents);
     }
 
     /// The pool as a pane in the right column.
-    pub(super) fn show_elk_docked(&mut self, ui: &mut egui::Ui) {
-        self.elk.docked = true;
-        self.elk.keys_on = self.pool_focused;
-        let intents = elk_view::show_docked(ui, &mut self.elk);
-        self.elk_intents(intents);
+    pub(super) fn show_elek_docked(&mut self, ui: &mut egui::Ui) {
+        self.elek.docked = true;
+        self.elek.keys_on = self.pool_focused;
+        let intents = elek_view::show_docked(ui, &mut self.elek);
+        self.elek_intents(intents);
     }
 
     /// The right column while docked: a Files / Sample pool switch above
@@ -151,14 +151,14 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(theme::close_button(None, true)).on_hover_text("Close the docked pool (the project stays loaded; reopen it from the Device view's Dock button)").clicked() {
-                    self.elk_docked = false;
+                    self.elek_docked = false;
                     self.pool_focused = false;
                 }
             });
         });
         if self.dock_pool {
             let r = ui.max_rect();
-            self.show_elk_docked(ui);
+            self.show_elek_docked(ui);
             self.pool_rect = Some(r);
         } else {
             self.pool_rect = None;
@@ -166,93 +166,93 @@ impl App {
         }
     }
 
-    fn elk_intents(&mut self, intents: Vec<ElkIntent>) {
+    fn elek_intents(&mut self, intents: Vec<ElekIntent>) {
         self.sync_pool_fetch();
         for i in intents {
             match i {
-                ElkIntent::BackToEditor => {
-                    self.elk_mode = false;
+                ElekIntent::BackToEditor => {
+                    self.elek_mode = false;
                     // Back to where the pool lives by default.
-                    if self.elk_docked {
+                    if self.elek_docked {
                         self.dock_pool = true;
                     }
                 }
-                ElkIntent::Dock => self.dock_elk(),
-                ElkIntent::Undock => {
-                    self.elk.page = elk_view::ElkPage::Order;
-                    self.enter_full_elk();
+                ElekIntent::Dock => self.dock_elek(),
+                ElekIntent::Undock => {
+                    self.elek.page = elek_view::ElekPage::Order;
+                    self.enter_full_elek();
                 }
-                ElkIntent::OpenPatterns => {
-                    self.elk.page = elk_view::ElkPage::Project;
-                    self.enter_full_elk();
+                ElekIntent::OpenPatterns => {
+                    self.elek.page = elek_view::ElekPage::Project;
+                    self.enter_full_elek();
                 }
-                ElkIntent::FetchAll => self.fetch_all(),
-                ElkIntent::StopFetch => self.stop_fetch(),
-                ElkIntent::PurgeCache => self.purge_cache(),
-                ElkIntent::AddFiles(pairs) => self.add_pool_files(pairs),
-                ElkIntent::ListProjects => {
-                    self.elk.projects = None;
-                    self.device.elk(ElkCmd::ListProjects);
+                ElekIntent::FetchAll => self.fetch_all(),
+                ElekIntent::StopFetch => self.stop_fetch(),
+                ElekIntent::PurgeCache => self.purge_cache(),
+                ElekIntent::AddFiles(pairs) => self.add_pool_files(pairs),
+                ElekIntent::ListProjects => {
+                    self.elek.projects = None;
+                    self.device.elek(ElekCmd::ListProjects);
                 }
-                ElkIntent::Read => self.elk_read(),
-                ElkIntent::SaveDump => {
-                    let Some(p) = &self.elk.project else { continue };
+                ElekIntent::Read => self.elek_read(),
+                ElekIntent::SaveDump => {
+                    let Some(p) = &self.elek.project else { continue };
                     let Some(home) = std::env::var_os("HOME") else { continue };
                     let root = PathBuf::from(home).join("Documents/sample_manager/project_dumps");
                     match p.save_dump(&root) {
                         Ok(dir) => {
-                            crate::log::line(format!("elk: dump saved to {}", dir.display()));
-                            self.elk.status = format!("Dump saved to {}", dir.display());
+                            crate::log::line(format!("elek: dump saved to {}", dir.display()));
+                            self.elek.status = format!("Dump saved to {}", dir.display());
                             reveal(&dir);
                         }
                         Err(e) => {
-                            self.elk.status = format!("Couldn't save the dump: {e}");
+                            self.elek.status = format!("Couldn't save the dump: {e}");
                             self.errors.push(format!("save dump: {e}"));
                         }
                     }
                 }
-                ElkIntent::SaveProject(bundle) => self.save_project_file(bundle),
-                ElkIntent::LoadProject => self.load_project_file(),
-                ElkIntent::SavePattern(slot, name, bundle) => self.save_pattern_file(slot, &name, bundle),
-                ElkIntent::LoadPattern(slot) => self.load_pattern_file(slot),
-                ElkIntent::Local(k, open) => self.elk_local(k, open),
-                ElkIntent::Push { force } => {
-                    let Some(p) = &self.elk.project else { continue };
+                ElekIntent::SaveProject(bundle) => self.save_project_file(bundle),
+                ElekIntent::LoadProject => self.load_project_file(),
+                ElekIntent::SavePattern(slot, name, bundle) => self.save_pattern_file(slot, &name, bundle),
+                ElekIntent::LoadPattern(slot) => self.load_pattern_file(slot),
+                ElekIntent::Local(k, open) => self.elek_local(k, open),
+                ElekIntent::Push { force } => {
+                    let Some(p) = &self.elek.project else { continue };
                     // A project from a file: the device holds something else
                     // entirely, so there's nothing to compare against.
                     let whole = p.from_file.is_some();
                     let force = force || whole;
-                    let cells = &self.elk.proj.cells;
-                    let msgs = p.build_push(&self.elk.order, &self.elk.fills, cells);
-                    let pat_changed = self.elk.proj.changed();
+                    let cells = &self.elek.proj.cells;
+                    let msgs = p.build_push(&self.elek.order, &self.elek.fills, cells);
+                    let pat_changed = self.elek.proj.changed();
                     if pat_changed > 0 {
                         for (i, c) in cells.iter().enumerate().filter(|(i, c)| **c != crate::device::Cell::as_read(*i)) {
-                            crate::log::line(format!("elk-pat: pushing {}: {:?}", crate::device::patterns::label(i), c));
+                            crate::log::line(format!("elek-pat: pushing {}: {:?}", crate::device::patterns::label(i), c));
                         }
                     }
-                    self.elk.expect_patterns = (pat_changed > 0 || whole).then(|| p.expected_patterns(&self.elk.order, &self.elk.fills, cells));
-                    for (slot, e) in &self.elk.fills {
+                    self.elek.expect_patterns = (pat_changed > 0 || whole).then(|| p.expected_patterns(&self.elek.order, &self.elek.fills, cells));
+                    for (slot, e) in &self.elek.fills {
                         if e.is_empty() {
-                            crate::log::line(format!("elk: pushing slot {slot} (as read) cleared"));
+                            crate::log::line(format!("elek: pushing slot {slot} (as read) cleared"));
                         } else {
-                            crate::log::line(format!("elk: pushing new file in slot {slot} (as read): hash {:08x} size {} inode {} seqnr {}", e.hash, e.size, e.inode, e.seqnr));
+                            crate::log::line(format!("elek: pushing new file in slot {slot} (as read): hash {:08x} size {} inode {} seqnr {}", e.hash, e.size, e.inode, e.seqnr));
                         }
                     }
                     if msgs.is_empty() {
-                        self.elk.status = "Nothing to send: no pattern, kit or sound changes with this order.".into();
+                        self.elek.status = "Nothing to send: no pattern, kit or sound changes with this order.".into();
                         continue;
                     }
                     crate::log::line(format!(
-                        "elk: {} push, {} of {} dump messages",
+                        "elek: {} push, {} of {} dump messages",
                         if whole { "whole-project" } else { "partial" },
                         msgs.len(),
                         p.msg_count()
                     ));
                     let model = p.model;
                     let settings = p.settings_data().to_vec();
-                    self.elk.expect = Some(self.elk.new_pool());
-                    self.elk.busy = Some(("Sending to device".into(), 0, msgs.len()));
-                    self.device.elk(ElkCmd::Push { msgs, settings, force, model });
+                    self.elek.expect = Some(self.elek.new_pool());
+                    self.elek.busy = Some(("Sending to device".into(), 0, msgs.len()));
+                    self.device.elek(ElekCmd::Push { msgs, settings, force, model });
                 }
             }
         }
@@ -260,11 +260,11 @@ impl App {
 
     /// Play or open pool file `k`: from a local copy when there is one,
     /// else fetch it into the preview cache first (ahead of the queue).
-    fn elk_local(&mut self, k: Key, open: bool) {
+    fn elek_local(&mut self, k: Key, open: bool) {
         if let Some(l) = self.links.local(k.0, k.1) {
             let (local, note) = (l.local.clone(), super::editing::link_note(l));
             if open {
-                self.elk_mode = false;
+                self.elek_mode = false;
                 self.load_into_editor(&local);
             } else {
                 self.preview_toggle(&local);
@@ -272,8 +272,8 @@ impl App {
             self.status = note;
             return;
         }
-        let Some(name) = self.elk.names.get(&k).cloned() else {
-            self.elk.status = if self.elk.busy.is_some() {
+        let Some(name) = self.elek.names.get(&k).cloned() else {
+            self.elek.status = if self.elek.busy.is_some() {
                 "Its +Drive path isn't known yet; try again once the names are in.".into()
             } else {
                 "Not found on +Drive, so there's nothing to fetch.".into()
@@ -291,7 +291,7 @@ impl App {
             }
             f.queue.push_front(k);
         }
-        self.elk.status = format!("Fetching {short} from the device to {}…", if open { "open" } else { "play" });
+        self.elek.status = format!("Fetching {short} from the device to {}…", if open { "open" } else { "play" });
         self.pump_fetch();
     }
 
@@ -327,9 +327,9 @@ impl App {
         }
         let Some(dir) = self.pool_upload_dir() else {
             for (slot, _) in &upload {
-                self.elk.filling.remove(slot);
+                self.elek.filling.remove(slot);
             }
-            self.elk.status = "Open the device's +Drive in a file tab first, at the folder new samples should go to".into();
+            self.elek.status = "Open the device's +Drive in a file tab first, at the folder new samples should go to".into();
             return;
         };
         let bytes: u64 = upload.iter().filter_map(|(_, p)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
@@ -342,7 +342,7 @@ impl App {
         };
         let n = upload.len();
         let id = self.run_device(task, &format!("Uploading {n} file(s) for the pool"), n, bytes);
-        self.elk.status = format!("Uploading {n} file(s) to {} for the pool…", device::dev_str(&dir));
+        self.elek.status = format!("Uploading {n} file(s) to {} for the pool…", device::dev_str(&dir));
         self.pool_fetch.uploads.insert(id, upload);
     }
 
@@ -352,12 +352,12 @@ impl App {
         let mut lens = vec![size, size.saturating_sub(64), size + 64];
         lens.retain(|&l| l > 0);
         lens.dedup();
-        self.device.elk(ElkCmd::Resolve { slot, hash, lens });
+        self.device.elek(ElekCmd::Resolve { slot, hash, lens });
     }
 
     /// Queue every pool file without a usable local copy.
     fn fetch_all(&mut self) {
-        let Some(p) = &self.elk.project else { return };
+        let Some(p) = &self.elek.project else { return };
         let mut keys: Vec<Key> = p.pool.iter().skip(1).filter(|e| !e.is_empty()).map(|e| e.key()).collect();
         keys.sort();
         keys.dedup();
@@ -366,7 +366,7 @@ impl App {
             if self.links.local(k.0, k.1).is_some() {
                 continue;
             }
-            if !self.elk.names.contains_key(&k) {
+            if !self.elek.names.contains_key(&k) {
                 nameless += 1;
                 continue;
             }
@@ -385,7 +385,7 @@ impl App {
         } else {
             f.total += added;
         }
-        self.elk.status = match (added, nameless) {
+        self.elek.status = match (added, nameless) {
             (0, 0) => "Every pool sample already has a local copy".into(),
             (n, 0) => format!("Fetching {n} sample(s) in the background"),
             (n, m) => format!("Fetching {n} sample(s); {m} skipped (no +Drive path)"),
@@ -403,7 +403,7 @@ impl App {
         if let Some((id, _)) = f.running {
             self.jobs.cancel(id);
         }
-        self.elk.status = "Fetching stopped".into();
+        self.elek.status = "Fetching stopped".into();
         // A bundle waiting on the dropped fetches saves what it has.
         self.bundle_progress();
     }
@@ -415,7 +415,7 @@ impl App {
         }
         let Some(cache) = crate::links::pool_cache_dir() else { return };
         while let Some(k) = self.pool_fetch.queue.pop_front() {
-            let Some(name) = self.elk.names.get(&k).cloned() else {
+            let Some(name) = self.elek.names.get(&k).cloned() else {
                 self.pool_fetch.done += 1;
                 continue;
             };
@@ -448,13 +448,13 @@ impl App {
         if let Some(files) = self.pool_fetch.uploads.remove(&job) {
             for (slot, path) in files {
                 match self.links.local_link(&path).map(|l| (l.hash, l.size)) {
-                    Some((hash, size)) if self.elk.filling.contains_key(&slot) => self.resolve_fill(slot, hash, size),
+                    Some((hash, size)) if self.elek.filling.contains_key(&slot) => self.resolve_fill(slot, hash, size),
                     _ if self.pool_fetch.import.as_ref().is_some_and(|i| i.slots.contains_key(&slot)) => {
                         self.import_done(slot, Some(format!("{} didn't make it to the device", path.display())));
                     }
                     _ => {
-                        self.elk.filling.remove(&slot);
-                        self.elk.status = format!("{} didn't make it to the device", path.display());
+                        self.elek.filling.remove(&slot);
+                        self.elek.status = format!("{} didn't make it to the device", path.display());
                     }
                 }
             }
@@ -469,7 +469,7 @@ impl App {
             // Likely moved on the device since the names were looked up.
             if self.pool_fetch.then.is_some_and(|(w, _)| w == k) {
                 self.pool_fetch.then = None;
-                self.elk.status = "Couldn't fetch that one (moved on the device since the read?)".into();
+                self.elek.status = "Couldn't fetch that one (moved on the device since the read?)".into();
             }
         } else if !ok {
             // Unplugged or refused: don't run down the rest of the queue
@@ -478,10 +478,10 @@ impl App {
             self.pool_fetch.queue.clear();
             self.pool_fetch.then = None;
             if left > 0 {
-                self.elk.status = format!("Fetch failed; {left} queued fetch(es) dropped");
+                self.elek.status = format!("Fetch failed; {left} queued fetch(es) dropped");
             }
         } else if let Some((want, open)) = self.pool_fetch.then.take_if(|(w, _)| *w == k) {
-            self.elk_local(want, open);
+            self.elek_local(want, open);
         }
         if self.pool_fetch.done % 10 == 0 {
             self.measure_cache();
@@ -492,9 +492,9 @@ impl App {
     /// Mirror the fetch queue into the view.
     fn sync_pool_fetch(&mut self) {
         let f = &self.pool_fetch;
-        self.elk.fetching = f.queue.iter().copied().chain(f.running.map(|(_, k)| k)).collect();
-        self.elk.fetch = (f.total > 1 && (f.running.is_some() || !f.queue.is_empty())).then_some((f.done, f.total));
-        self.elk.cache = crate::links::pool_cache_dir().and_then(|c| match self.sizes.get(&c) {
+        self.elek.fetching = f.queue.iter().copied().chain(f.running.map(|(_, k)| k)).collect();
+        self.elek.fetch = (f.total > 1 && (f.running.is_some() || !f.queue.is_empty())).then_some((f.done, f.total));
+        self.elek.cache = crate::links::pool_cache_dir().and_then(|c| match self.sizes.get(&c) {
             Some(crate::sizes::Size::Known { bytes, files }) => Some((bytes, files)),
             _ => None,
         });
@@ -519,19 +519,19 @@ impl App {
             self.engine.stop();
         }
         self.links.forget_under(&c);
-        self.refresh_elk_links();
+        self.refresh_elek_links();
         if c.is_dir() {
             self.trash_local(vec![c.clone()]);
         }
         self.sizes.set(c, 0, 0);
-        self.elk.status = "Preview cache moved to the Trash".into();
+        self.elek.status = "Preview cache moved to the Trash".into();
     }
 
     /// Which pool files we have a local copy of, for the view.
-    pub(super) fn refresh_elk_links(&mut self) {
-        let Some(p) = &self.elk.project else { return };
+    pub(super) fn refresh_elek_links(&mut self) {
+        let Some(p) = &self.elek.project else { return };
         let linked: std::collections::HashMap<_, _> = (0..p.pool.len())
-            .map(|i| self.elk.entry(i))
+            .map(|i| self.elek.entry(i))
             .filter(|e| !e.is_empty())
             .filter_map(|e| {
                 let k = e.key();
@@ -539,14 +539,14 @@ impl App {
                 Some((k, (l.device_name().to_owned(), l.local.clone(), l.uploaded)))
             })
             .collect();
-        if linked.len() != self.elk.linked.len() {
-            crate::log::line(format!("elk: {} pool files have a local copy", linked.len()));
+        if linked.len() != self.elek.linked.len() {
+            crate::log::line(format!("elek: {} pool files have a local copy", linked.len()));
         }
-        self.elk.linked = linked;
+        self.elek.linked = linked;
     }
 
     /// Where project and pattern files go by default.
-    fn elk_files_dir(sub: &str) -> Option<PathBuf> {
+    fn elek_files_dir(sub: &str) -> Option<PathBuf> {
         let d = PathBuf::from(std::env::var_os("HOME")?).join("Documents/sample_manager").join(sub);
         let _ = std::fs::create_dir_all(&d);
         Some(d)
@@ -554,7 +554,7 @@ impl App {
 
     fn json_dialog(sub: &str, what: &str) -> rfd::FileDialog {
         let mut d = rfd::FileDialog::new().add_filter(what, &["json"]);
-        if let Some(dir) = Self::elk_files_dir(sub) {
+        if let Some(dir) = Self::elek_files_dir(sub) {
             d = d.set_directory(dir);
         }
         d
@@ -565,7 +565,7 @@ impl App {
     fn ask_save_path(sub: &str, what: &str, base: &str, bundle: bool) -> Option<PathBuf> {
         if bundle {
             let mut d = rfd::FileDialog::new().set_title(format!("Save {what} with its samples (a folder)")).set_file_name(base);
-            if let Some(dir) = Self::elk_files_dir(sub) {
+            if let Some(dir) = Self::elek_files_dir(sub) {
                 d = d.set_directory(dir);
             }
             let p = d.save_file()?;
@@ -576,33 +576,33 @@ impl App {
     }
 
     fn save_project_file(&mut self, bundle: bool) {
-        let Some(p) = &self.elk.project else { return };
+        let Some(p) = &self.elek.project else { return };
         let base = format!("{} project", p.model.name());
         let Some(path) = Self::ask_save_path("projects", "Project", &base, bundle) else { return };
-        let st = &self.elk;
+        let st = &self.elek;
         let file = p.project_file(&st.order, &st.fills, &st.proj.cells, &st.new_pool(), &st.names);
-        self.save_elk_file(file, path, bundle, "Project".into());
+        self.save_elek_file(file, path, bundle, "Project".into());
     }
 
     fn save_pattern_file(&mut self, slot: usize, name: &str, bundle: bool) {
-        let Some(p) = &self.elk.project else { return };
+        let Some(p) = &self.elek.project else { return };
         let label = crate::device::patterns::label(slot);
         let base = if name.trim().is_empty() { label.clone() } else { format!("{label} {}", name.trim()) };
         let base: String = base.chars().map(|c| if "/\\:".contains(c) { '_' } else { c }).collect();
         let Some(path) = Self::ask_save_path("patterns", "Pattern", &base, bundle) else { return };
-        let st = &self.elk;
+        let st = &self.elek;
         let file = p.pattern_file(slot, name, &st.order, &st.fills, &st.proj.cells, &st.new_pool(), &st.names);
-        self.save_elk_file(file, path, bundle, label);
+        self.save_elek_file(file, path, bundle, label);
     }
 
     /// Write a built file, or for a bundle gather its samples first:
     /// local copies where we have them, the rest fetched from the device
     /// into the preview cache (`finish_bundle` runs once they're in).
-    fn save_elk_file(&mut self, file: Result<file::SaveFile, String>, path: PathBuf, bundle: bool, what: String) {
+    fn save_elek_file(&mut self, file: Result<file::SaveFile, String>, path: PathBuf, bundle: bool, what: String) {
         let mut file = match file {
             Ok(f) => f,
             Err(e) => {
-                self.elk.status = format!("Couldn't save {}: {e}", what.to_lowercase());
+                self.elek.status = format!("Couldn't save {}: {e}", what.to_lowercase());
                 self.errors.push(format!("save {}: {e}", what.to_lowercase()));
                 return;
             }
@@ -610,29 +610,29 @@ impl App {
         if !bundle {
             match file.write(&path) {
                 Ok(()) => {
-                    crate::log::line(format!("elk: {what} saved to {}", path.display()));
-                    self.elk.status = format!("{what} saved to {}", path.display());
+                    crate::log::line(format!("elek: {what} saved to {}", path.display()));
+                    self.elek.status = format!("{what} saved to {}", path.display());
                 }
                 Err(e) => {
-                    self.elk.status = format!("Couldn't save {}: {e}", what.to_lowercase());
+                    self.elek.status = format!("Couldn't save {}: {e}", what.to_lowercase());
                     self.errors.push(format!("save {}: {e}", what.to_lowercase()));
                 }
             }
             return;
         }
         if self.pool_fetch.bundle.is_some() {
-            self.elk.status = "Another bundle is still gathering its samples; try again once it's saved".into();
+            self.elek.status = "Another bundle is still gathering its samples; try again once it's saved".into();
             return;
         }
         if path.is_file() {
-            self.elk.status = format!("{} is a file; a bundle needs a folder there", path.display());
+            self.elek.status = format!("{} is a file; a bundle needs a folder there", path.display());
             return;
         }
         let stem = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "bundle".into());
         let mut waiting = HashSet::new();
         for s in file.samples_mut().iter() {
             let Some(k) = s.key() else { continue };
-            if self.links.local(k.0, k.1).is_none() && self.elk.names.contains_key(&k) {
+            if self.links.local(k.0, k.1).is_none() && self.elek.names.contains_key(&k) {
                 waiting.insert(k);
             }
         }
@@ -654,7 +654,7 @@ impl App {
         }
         f.bundle = Some(BundleSave { file, json: format!("{stem}.json"), dir: path, what, waiting });
         if n > 0 {
-            self.elk.status = format!("Fetching {n} sample(s) from the device for the bundle…");
+            self.elek.status = format!("Fetching {n} sample(s) from the device for the bundle…");
         }
         // Finishes right away when nothing needs fetching.
         self.pump_fetch();
@@ -677,7 +677,7 @@ impl App {
         let samples = b.dir.join("samples");
         let what = b.what.clone();
         let fail = |app: &mut Self, e: String| {
-            app.elk.status = format!("Couldn't save {}: {e}", what.to_lowercase());
+            app.elek.status = format!("Couldn't save {}: {e}", what.to_lowercase());
             app.errors.push(format!("save bundle {}: {e}", b.dir.display()));
         };
         if let Err(e) = std::fs::create_dir_all(&samples) {
@@ -714,7 +714,7 @@ impl App {
             return fail(self, e);
         }
         crate::log::line(format!(
-            "elk: {what} bundle saved to {}: {copied} sample(s), missing {missing:?}, failed {failed:?}",
+            "elek: {what} bundle saved to {}: {copied} sample(s), missing {missing:?}, failed {failed:?}",
             b.dir.display()
         ));
         let mut msg = format!("{what} saved with {copied} sample(s) to {}", b.dir.display());
@@ -725,13 +725,13 @@ impl App {
             msg.push_str(&format!(". {} couldn't be copied (see errors)", failed.len()));
             self.errors.extend(failed);
         }
-        self.elk.status = msg;
+        self.elek.status = msg;
         reveal(&json);
     }
 
     /// A load is still placing samples from its file.
     fn importing(&self) -> bool {
-        self.pool_fetch.import.as_ref().is_some_and(|i| i.slots.keys().any(|s| self.elk.filling.contains_key(s)))
+        self.pool_fetch.import.as_ref().is_some_and(|i| i.slots.keys().any(|s| self.elek.filling.contains_key(s)))
     }
 
     /// +Drive folder for samples a bundle brings that the device lacks.
@@ -751,9 +751,9 @@ impl App {
         for (slot, s) in slots {
             let Some(key) = s.key() else { continue };
             let name = s.short();
-            self.elk.filling.insert(slot, name.clone());
+            self.elek.filling.insert(slot, name.clone());
             imp.slots.insert(slot, ImportSlot { name, key, file: s.bundled(json), dir: dir.clone(), stage: Stage::Hash, verify });
-            self.device.elk(ElkCmd::Resolve { slot, hash: key.0, lens: vec![key.1] });
+            self.device.elek(ElekCmd::Resolve { slot, hash: key.0, lens: vec![key.1] });
         }
         let empty = imp.slots.is_empty();
         self.pool_fetch.import = Some(imp);
@@ -764,7 +764,7 @@ impl App {
 
     fn import_resolved(&mut self, slot: u16, hash: u32, found: Result<Option<(u32, String)>, String>) {
         let Some(is) = self.pool_fetch.import.as_mut().and_then(|i| i.slots.get_mut(&slot)) else { return };
-        if !self.elk.filling.contains_key(&slot) {
+        if !self.elek.filling.contains_key(&slot) {
             // The project was closed or replaced meanwhile.
             self.pool_fetch.import = None;
             return;
@@ -776,19 +776,19 @@ impl App {
                 let up = is.stage != Stage::Hash;
                 if up && e.key() != is.key {
                     crate::log::line(format!(
-                        "elk: {name} came back as {:08x}/{} (bundle had {:08x}/{})",
+                        "elek: {name} came back as {:08x}/{} (bundle had {:08x}/{})",
                         e.hash, len, is.key.0, is.key.1
                     ));
                 }
-                let same = is.verify && self.elk.entry(slot as usize).key() == e.key();
-                self.elk.names.insert(e.key(), path);
+                let same = is.verify && self.elek.entry(slot as usize).key() == e.key();
+                self.elek.names.insert(e.key(), path);
                 if !same {
-                    self.elk.fill(slot, e);
+                    self.elek.fill(slot, e);
                 }
                 let imp = self.pool_fetch.import.as_mut().expect("checked above");
                 if up { imp.uploaded += 1 } else { imp.found += 1 }
                 self.import_done(slot, None);
-                self.refresh_elk_links();
+                self.refresh_elek_links();
             }
             Ok(None) => match is.stage {
                 Stage::Hash => {
@@ -831,13 +831,13 @@ impl App {
             total_bytes: bytes,
         };
         let id = self.run_device(task, &format!("Uploading {short} for the pool"), 1, bytes);
-        crate::log::line(format!("elk: {short} not on the device; uploading to {}", device::dev_str(&dir)));
+        crate::log::line(format!("elek: {short} not on the device; uploading to {}", device::dev_str(&dir)));
         self.pool_fetch.uploads.insert(id, vec![(slot, file)]);
     }
 
     /// Slot `slot` is placed (or failed with `err`); sums up once all are.
     fn import_done(&mut self, slot: u16, err: Option<String>) {
-        self.elk.filling.remove(&slot);
+        self.elek.filling.remove(&slot);
         let Some(imp) = self.pool_fetch.import.as_mut() else { return };
         imp.slots.remove(&slot);
         if let Some(e) = err {
@@ -847,7 +847,7 @@ impl App {
             self.import_summary();
         } else {
             let left = imp.slots.len();
-            self.elk.status = format!("{}: placing samples, {left} to go…", imp.what);
+            self.elek.status = format!("{}: placing samples, {left} to go…", imp.what);
         }
     }
 
@@ -870,34 +870,34 @@ impl App {
         if !imp.failed.is_empty() {
             msg.push_str(&format!(". {} sample(s) failed (see errors)", imp.failed.len()));
         }
-        crate::log::line(format!("elk: import done: {msg}; failed {:?}", imp.failed));
+        crate::log::line(format!("elek: import done: {msg}; failed {:?}", imp.failed));
         self.errors.extend(imp.failed);
-        self.elk.status = msg;
+        self.elek.status = msg;
     }
 
     fn load_project_file(&mut self) {
-        if self.elk.changed() > 0 {
-            self.elk.status = "Push or close the current project first: it has unpushed changes".into();
+        if self.elek.changed() > 0 {
+            self.elek.status = "Push or close the current project first: it has unpushed changes".into();
             return;
         }
         if self.importing() {
-            self.elk.status = "Still placing samples from the last load; try again once it's done".into();
+            self.elek.status = "Still placing samples from the last load; try again once it's done".into();
             return;
         }
         let Some(path) = Self::json_dialog("projects", "Project").pick_file() else { return };
-        match crate::device::ElkProject::load_file(&path) {
+        match crate::device::ElekProject::load_file(&path) {
             Ok((p, samples)) => {
                 crate::log::line(format!(
-                    "elk: project loaded from {}: {}{}",
+                    "elek: project loaded from {}: {}{}",
                     path.display(),
                     p.versions,
                     p.read_only.as_ref().map(|w| format!(", READ-ONLY: {w}")).unwrap_or_default()
                 ));
                 let n = p.pool.len();
-                let st = &mut self.elk;
+                let st = &mut self.elek;
                 st.names.extend(samples.iter().filter_map(|s| Some((s.key()?, s.path.clone()?))));
                 st.set_project(p);
-                self.refresh_elk_links();
+                self.refresh_elek_links();
                 let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let bundled = samples.iter().filter(|s| s.bundled(&path).is_some()).count();
                 let slots: Vec<_> = samples.into_iter().filter(|s| s.slot > 0 && s.slot < n).map(|s| (s.slot as u16, s)).collect();
@@ -905,11 +905,11 @@ impl App {
                     "Opened {file_name}{}. It's only here for now: Push sends the whole project into the device's memory",
                     if bundled > 0 { format!(" ({bundled} bundled sample(s))") } else { String::new() }
                 );
-                self.elk.status = format!("{what}. Checking its samples on the device…");
+                self.elek.status = format!("{what}. Checking its samples on the device…");
                 self.start_import(what, &path, slots, true);
             }
             Err(e) => {
-                self.elk.status = format!("Couldn't open the project: {e}");
+                self.elek.status = format!("Couldn't open the project: {e}");
                 self.errors.push(format!("load project {}: {e}", path.display()));
             }
         }
@@ -920,19 +920,19 @@ impl App {
     /// on the device by hash or, from a bundle, uploaded (push waits).
     fn load_pattern_file(&mut self, slot: usize) {
         if self.importing() {
-            self.elk.status = "Still placing samples from the last load; try again once it's done".into();
+            self.elek.status = "Still placing samples from the last load; try again once it's done".into();
             return;
         }
         let Some(path) = Self::json_dialog("patterns", "Pattern").pick_file() else { return };
-        let Some(p) = &self.elk.project else { return };
+        let Some(p) = &self.elek.project else { return };
         let lp = match p.load_pattern(&path) {
             Ok(lp) => lp,
             Err(e) => {
-                self.elk.status = format!("Couldn't load the pattern: {e}");
+                self.elek.status = format!("Couldn't load the pattern: {e}");
                 return;
             }
         };
-        let st = &self.elk;
+        let st = &self.elek;
         let n = p.pool.len();
         let mut map = HashMap::new();
         let mut taken = HashSet::new();
@@ -964,22 +964,22 @@ impl App {
                 None => no_room.push(s.short()),
             }
         }
-        let Some(p) = self.elk.project.as_mut() else { return };
+        let Some(p) = self.elek.project.as_mut() else { return };
         let idx = match p.import_pattern(lp.data, &map) {
             Ok(i) => i,
             Err(e) => {
-                self.elk.status = format!("Couldn't load the pattern: {e}");
+                self.elek.status = format!("Couldn't load the pattern: {e}");
                 return;
             }
         };
         let label = crate::device::patterns::label(slot);
         crate::log::line(format!(
-            "elk-pat: {} loaded into {label}: {found} sample(s) in the pool, {} to place, {} without room; map {map:?}",
+            "elek-pat: {} loaded into {label}: {found} sample(s) in the pool, {} to place, {} without room; map {map:?}",
             path.display(),
             lookup.len(),
             no_room.len()
         ));
-        self.elk.proj.place_import(slot, idx);
+        self.elek.proj.place_import(slot, idx);
         let mut msg = format!("Loaded \"{}\" into {label}", lp.name);
         if found > 0 {
             msg.push_str(&format!(" ({found} sample(s) already in the pool)"));
@@ -988,34 +988,34 @@ impl App {
             msg.push_str(&format!(". No empty pool slot for {}: those tracks play nothing", no_room.join(", ")));
         }
         if !lookup.is_empty() {
-            self.elk.status = format!("{msg}. Placing {} sample(s)…", lookup.len());
+            self.elek.status = format!("{msg}. Placing {} sample(s)…", lookup.len());
         } else {
-            self.elk.status = msg.clone();
+            self.elek.status = msg.clone();
         }
         self.start_import(msg, &path, lookup, false);
     }
 
-    fn elk_read(&mut self) {
-        self.elk.busy = Some(("Reading project".into(), 0, 129));
-        let known = self.elk.names.keys().copied().collect();
-        self.device.elk(ElkCmd::Read { known });
+    fn elek_read(&mut self) {
+        self.elek.busy = Some(("Reading project".into(), 0, 129));
+        let known = self.elek.names.keys().copied().collect();
+        self.device.elek(ElekCmd::Read { known });
     }
 
-    pub(super) fn elk_event(&mut self, e: ElkEv) {
-        let st = &mut self.elk;
+    pub(super) fn elek_event(&mut self, e: ElekEv) {
+        let st = &mut self.elek;
         match e {
-            ElkEv::Projects(r) => st.projects = Some(r),
-            ElkEv::Partial(p) => {
+            ElekEv::Projects(r) => st.projects = Some(r),
+            ElekEv::Partial(p) => {
                 st.set_project(p);
-                self.refresh_elk_links();
+                self.refresh_elek_links();
             }
-            ElkEv::Uses(v) => {
+            ElekEv::Uses(v) => {
                 if let Some(p) = st.project.as_mut().filter(|p| p.partial && p.uses.len() == v.len()) {
                     p.uses = v;
                 }
             }
-            ElkEv::Progress { label, done, total } => st.busy = Some((label, done, total)),
-            ElkEv::Loaded(r) => {
+            ElekEv::Progress { label, done, total } => st.busy = Some((label, done, total)),
+            ElekEv::Loaded(r) => {
                 st.busy = None;
                 match r {
                     Ok(p) => {
@@ -1023,13 +1023,13 @@ impl App {
                         // Entries the device hasn't given an inode yet (new files pushed
                         // with 0), on any read: tells whether a save + reload fills it in.
                         let unset: Vec<String> = p.pool.iter().enumerate().filter(|(_, e)| !e.is_empty() && e.inode == 0).map(|(i, e)| format!("{i} ({:08x})", e.hash)).collect();
-                        crate::log::line(format!("elk: {} pool entries with inode 0: {}", unset.len(), unset.join(", ")));
+                        crate::log::line(format!("elek: {} pool entries with inode 0: {}", unset.len(), unset.join(", ")));
                         // New files pushed with inode/seqnr 0: what did the device make of them?
                         if let Some(want) = &st.expect {
                             for (i, (w, got)) in want.iter().zip(&p.pool).enumerate() {
                                 if !w.is_empty() && w.inode == 0 {
                                     crate::log::line(format!(
-                                        "elk: read back new slot {i}: inode {} hash {:08x} size {} seqnr {} (sent hash {:08x} size {})",
+                                        "elek: read back new slot {i}: inode {} hash {:08x} size {} seqnr {} (sent hash {:08x} size {})",
                                         got.inode, got.hash, got.size, got.seqnr, w.hash, w.size
                                     ));
                                 }
@@ -1037,7 +1037,7 @@ impl App {
                         }
                         for (i, e) in p.pool.iter().enumerate().skip(1).filter(|(_, e)| !e.is_empty()).take(12) {
                             crate::log::line(format!(
-                                "elk: pool {i}: inode {} hash {:08x} size {} seqnr {}",
+                                "elek: pool {i}: inode {} hash {:08x} size {} seqnr {}",
                                 e.inode, e.hash, e.size, e.seqnr
                             ));
                         }
@@ -1056,7 +1056,7 @@ impl App {
                             let off: Vec<usize> = (0..want.len()).filter(|&i| got.get(i).is_none_or(|g| *g != &want[i][..])).collect();
                             for &i in off.iter().take(8) {
                                 crate::log::line(format!(
-                                    "elk-pat: read back {} differs from what was sent: {}",
+                                    "elek-pat: read back {} differs from what was sent: {}",
                                     crate::device::patterns::label(i),
                                     got.get(i).map_or("missing".into(), |g| pats.describe_diff(&want[i], g))
                                 ));
@@ -1077,18 +1077,18 @@ impl App {
                         };
                         match pat_check {
                             Some(Ok(())) => {
-                                crate::log::line("elk-pat: read back after push: every pattern matches what was sent".to_owned());
+                                crate::log::line("elek-pat: read back after push: every pattern matches what was sent".to_owned());
                                 st.status = "Pushed and read back: the device has the new patterns. Save on the device (PROJECT › SAVE) to keep it.".into();
                             }
                             Some(Err(e)) => {
-                                let msg = format!("{e} (details in the log, elk-pat:). Check on the device before saving; if anything is off, reload the project from +Drive.");
+                                let msg = format!("{e} (details in the log, elek-pat:). Check on the device before saving; if anything is off, reload the project from +Drive.");
                                 self.errors.push(msg.clone());
                                 st.status = msg;
                             }
                             None => {}
                         }
                         st.set_project(p);
-                        self.refresh_elk_links();
+                        self.refresh_elek_links();
                     }
                     Err(e) => {
                         st.expect = None;
@@ -1100,8 +1100,8 @@ impl App {
                     }
                 }
             }
-            ElkEv::Names(v) => st.names.extend(v),
-            ElkEv::Resolved { slot, hash, found } => {
+            ElekEv::Names(v) => st.names.extend(v),
+            ElekEv::Resolved { slot, hash, found } => {
                 if self.pool_fetch.import.as_ref().is_some_and(|i| i.slots.contains_key(&slot)) {
                     self.import_resolved(slot, hash, found);
                     return;
@@ -1111,7 +1111,7 @@ impl App {
                 let prior = self.pool_fetch.prior.remove(&slot);
                 if let (Ok(None), Some(path)) = (&found, prior) {
                     // Uploaded once, gone from the device since: send it again.
-                    crate::log::line(format!("elk: {} no longer on the device; uploading again", path.display()));
+                    crate::log::line(format!("elek: {} no longer on the device; uploading again", path.display()));
                     self.add_pool_files_upload(vec![(slot, path)]);
                     return;
                 }
@@ -1130,7 +1130,7 @@ impl App {
                             st.fill(slot, e);
                             st.names.insert((hash, len), path.clone());
                             st.status = format!("{name} is ready in its slot; push to send it to the device");
-                            self.refresh_elk_links();
+                            self.refresh_elek_links();
                         }
                     }
                     Ok(None) => {
@@ -1144,17 +1144,17 @@ impl App {
                     }
                 }
             }
-            ElkEv::PushStale => {
+            ElekEv::PushStale => {
                 st.busy = None;
                 st.expect = None;
                 st.expect_patterns = None;
                 st.status = "Not pushed: the project on the device changed since it was read".into();
                 st.confirm_stale = true;
             }
-            ElkEv::Pushed(r) => match r {
+            ElekEv::Pushed(r) => match r {
                 Ok(n) => {
                     st.status = format!("Sent {n} messages; reading back to check…");
-                    self.elk_read();
+                    self.elek_read();
                 }
                 Err(e) => {
                     st.busy = None;

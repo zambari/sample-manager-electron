@@ -12,8 +12,8 @@
 //! `PathBuf`s; they never touch the local filesystem.
 
 mod conn;
-mod elk;
-pub use elk::{file, patterns, Cell, ElkCmd, ElkEv, ElkProject, PatState, PoolEntry, SavedProject};
+mod elek;
+pub use elek::{file, patterns, Cell, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, SavedProject};
 mod proto;
 mod sample;
 mod transfer;
@@ -92,7 +92,7 @@ enum Cmd {
         cancel: Arc<AtomicBool>,
         task: Task,
     },
-    Elk(ElkCmd),
+    Elek(ElekCmd),
 }
 
 pub struct Device {
@@ -129,9 +129,9 @@ impl Device {
         let _ = self.tx.send(Cmd::Job { job, cancel, task });
     }
 
-    /// Project dump work (see [`elk`]): runs in turn with other jobs.
-    pub fn elk(&self, cmd: ElkCmd) {
-        let _ = self.tx.send(Cmd::Elk(cmd));
+    /// Project dump work (see [`elek`]): runs in turn with other jobs.
+    pub fn elek(&self, cmd: ElekCmd) {
+        let _ = self.tx.send(Cmd::Elek(cmd));
     }
 }
 

@@ -13,7 +13,7 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
             .on_hover_text("The project loaded on the Digitakt (Samples / Patterns), in place of the editor. Its ⇥ Dock button puts the sample pool in the right column instead.")
             .clicked()
         {
-            out.push(EdIntent::ElkMode);
+            out.push(EdIntent::ElekMode);
         }
         ui.separator();
         if let Some(p) = ed.path() {

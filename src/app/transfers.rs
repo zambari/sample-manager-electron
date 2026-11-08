@@ -724,7 +724,7 @@ impl App {
                 Ev::Note { job, text } => self.finish_note = Some((job, text)),
                 Ev::Linked(l) => {
                     self.links.add(l);
-                    self.refresh_elk_links();
+                    self.refresh_elek_links();
                 }
                 Ev::DeviceStatus(s) => {
                     if let Err(e) = &s {
@@ -732,7 +732,7 @@ impl App {
                     }
                     self.device_status = Some(s)
                 }
-                Ev::Elk(e) => self.elk_event(e),
+                Ev::Elek(e) => self.elek_event(e),
                 Ev::DeviceLost => {
                     for role in [Role::Source, Role::Dest] {
                         if !self.pane_mut(role).leave_device() {

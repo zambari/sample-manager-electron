@@ -821,7 +821,7 @@ impl App {
                 }
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
-                EdIntent::ElkMode => self.enter_full_elk(),
+                EdIntent::ElekMode => self.enter_full_elek(),
                 EdIntent::TrimTails => {
                     let rate = self.editor.sample().map_or(1, |s| s.rate.max(1)) as f64;
                     self.status = match self.editor.trim_tails() {

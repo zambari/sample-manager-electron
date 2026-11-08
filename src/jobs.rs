@@ -80,7 +80,7 @@ pub enum Ev {
     /// The device's MIDI port went away (unplugged or switched off).
     DeviceLost,
     /// Project dump news (sample order view).
-    Elk(crate::device::ElkEv),
+    Elek(crate::device::ElekEv),
     /// A summary to show in place of "Done" when `job` finishes.
     Note { job: u64, text: String },
     /// A device file and a local file now known to hold the same sample.

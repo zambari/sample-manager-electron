@@ -207,7 +207,7 @@ impl Worker {
                     self.job(job, &cancel, task);
                     self.busy.clear();
                 }
-                Cmd::Elk(cmd) => self.elk(cmd),
+                Cmd::Elek(cmd) => self.elek(cmd),
             }
         }
     }

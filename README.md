@@ -128,9 +128,9 @@ its real start on the device.
   browser as files committed to the destination, so you can see what's
   already in the kit.
 
-### Elk Sample Order
+### Elek Sample Order
 
-Click **Elk Sample Order** next to the editor title to rearrange the sample
+Click **Elek Sample Order** next to the editor title to rearrange the sample
 pool of the project loaded on a Digitakt or Digitakt II. Drag a slot onto
 any other (in any bank) to swap them, or select several and move them with
 **⌥↑ / ⌥↓**. **Push to memory** writes the new order into the project in
@@ -150,7 +150,7 @@ whole pool in the background. Drop audio files onto empty slots to add
 them to the project: they're uploaded into the +Drive folder open in a
 file tab (files already on the +Drive are just linked).
 
-![Elk Sample Order: two bank panes of a Digitakt II project](docs/elk_sample_order.png)
+![Elek Sample Order: two bank panes of a Digitakt II project](docs/elek_sample_order.png)
 
 > **Use at your own risk.** Push to memory rewrites the project that is
 > currently loaded on the device. The saved copy on the +Drive is left

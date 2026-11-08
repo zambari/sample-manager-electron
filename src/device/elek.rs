@@ -509,7 +509,7 @@ impl Scan {
         }
     }
 }
-pub struct ElkProject {
+pub struct ElekProject {
     pub model: Model,
     /// The project's own messages, then patterns loaded from files
     /// (`import_pattern`), which are only ever sent placed into a slot.
@@ -557,7 +557,7 @@ fn read_pool(model: Model, sd: &[u8]) -> Result<(u32, usize, Vec<PoolEntry>), St
     Ok((sv, pool_at, pool))
 }
 
-impl ElkProject {
+impl ElekProject {
     pub(super) fn parse(model: Model, msgs: Vec<DumpMsg>) -> Result<Self, String> {
         let patterns = msgs.iter().filter(|m| m.kind == PATTERN_KIT).count();
         let settings_msg = msgs
@@ -632,7 +632,7 @@ impl ElkProject {
             Patterns::parse(model, &msgs).map(Box::new)
         };
         if let Err(e) = &patterns {
-            crate::log::line(format!("elk-pat: project editor unavailable: {e}"));
+            crate::log::line(format!("elek-pat: project editor unavailable: {e}"));
         }
         Ok(Self {
             model,
@@ -848,7 +848,7 @@ pub struct SavedProject {
     pub size: u32,
 }
 
-pub enum ElkCmd {
+pub enum ElekCmd {
     ListProjects,
     /// Read the project; `known` names needn't be looked up again.
     Read {
@@ -872,7 +872,7 @@ pub enum ElkCmd {
     },
 }
 
-pub enum ElkEv {
+pub enum ElekEv {
     Projects(Result<Vec<SavedProject>, String>),
     Progress {
         label: String,
@@ -880,10 +880,10 @@ pub enum ElkEv {
         total: usize,
     },
     /// The pool, before the patterns: shown while the rest streams in.
-    Partial(Box<ElkProject>),
+    Partial(Box<ElekProject>),
     /// Use counts so far, as patterns arrive.
     Uses(Vec<u32>),
-    Loaded(Result<Box<ElkProject>, String>),
+    Loaded(Result<Box<ElekProject>, String>),
     /// `(hash, length) → +Drive path` for pool entries.
     Names(Vec<((u32, u32), String)>),
     Pushed(Result<usize, String>),
@@ -938,7 +938,7 @@ impl Conn {
                 } else {
                     format!("the project dump stopped after {} parts", out.len())
                 };
-                crate::log::line(format!("elk: {e} ({ignored} other SysEx messages ignored)"));
+                crate::log::line(format!("elek: {e} ({ignored} other SysEx messages ignored)"));
                 Fail::Refused(e)
             })?;
             wait = GAP_WAIT;
@@ -949,14 +949,14 @@ impl Conn {
                     if ignored <= 5 {
                         let head: Vec<u8> = raw.iter().take(12).copied().collect();
                         crate::log::line(format!(
-                            "elk: ignored SysEx, {} bytes, starts {head:02x?}",
+                            "elek: ignored SysEx, {} bytes, starts {head:02x?}",
                             raw.len()
                         ));
                     }
                     continue;
                 }
                 Err(e) => {
-                    crate::log::line(format!("elk: {e}"));
+                    crate::log::line(format!("elek: {e}"));
                     return refused(e);
                 }
             };
@@ -980,7 +980,7 @@ impl Conn {
         while self.rx.try_recv().is_ok() {}
         let req = build_dump(m, REQ_PROJECT, 0, &[]);
         crate::log::line(format!(
-            "elk: requesting project dump from {} ({req:02x?})",
+            "elek: requesting project dump from {} ({req:02x?})",
             m.name()
         ));
         self.send_sysex(&req)?;
@@ -988,7 +988,7 @@ impl Conn {
         let msgs = self.collect_dump(m, SETTINGS, on_msg)?;
         let bytes: usize = msgs.iter().map(|m| m.raw.len()).sum();
         crate::log::line(format!(
-            "elk: got {} dump messages, {} KB in {:.1}s",
+            "elek: got {} dump messages, {} KB in {:.1}s",
             msgs.len(),
             bytes / 1024,
             started.elapsed().as_secs_f32()
@@ -1084,21 +1084,21 @@ impl Conn {
 }
 
 impl Worker {
-    pub(super) fn elk(&mut self, cmd: ElkCmd) {
+    pub(super) fn elek(&mut self, cmd: ElekCmd) {
         let em = self.em.clone();
         let prog = |label: &str, done: usize, total: usize| {
-            em.send(Ev::Elk(ElkEv::Progress {
+            em.send(Ev::Elek(ElekEv::Progress {
                 label: label.to_owned(),
                 done,
                 total,
             }));
         };
         match cmd {
-            ElkCmd::ListProjects => {
+            ElekCmd::ListProjects => {
                 let r = self.with_conn(|c| c.list_projects());
-                self.em.send(Ev::Elk(ElkEv::Projects(r)));
+                self.em.send(Ev::Elek(ElekEv::Projects(r)));
             }
-            ElkCmd::Read { known } => {
+            ElekCmd::Read { known } => {
                 let mut asked = known;
                 prog("Reading sample pool", 0, 129);
                 // The pool comes last in the dump, so ask for it on its own
@@ -1107,18 +1107,18 @@ impl Worker {
                     let m = c.model()?;
                     Ok((m, c.read_settings_msg(m)?))
                 });
-                let mut live = match early.map(|(m, s)| (m, ElkProject::partial(m, s))) {
+                let mut live = match early.map(|(m, s)| (m, ElekProject::partial(m, s))) {
                     Ok((m, Ok(p))) => {
                         let uses = vec![0u32; p.pool.len()];
                         let keys = pool_keys(&p.pool, &asked);
-                        em.send(Ev::Elk(ElkEv::Partial(Box::new(p))));
+                        em.send(Ev::Elek(ElekEv::Partial(Box::new(p))));
                         // Names before the dump: a quick request each, where
                         // the dump takes half a minute.
                         self.look_up_names(&keys, &mut asked, true);
                         Some((m, Scan::default(), uses))
                     }
                     Ok((_, Err(e))) | Err(e) => {
-                        crate::log::line(format!("elk: early pool read skipped: {e}"));
+                        crate::log::line(format!("elek: early pool read skipped: {e}"));
                         None
                     }
                 };
@@ -1128,16 +1128,16 @@ impl Worker {
                             let before: u32 = uses.iter().sum();
                             scan.count(*m, i, msg, uses);
                             if uses.iter().sum::<u32>() != before {
-                                em.send(Ev::Elk(ElkEv::Uses(uses.clone())));
+                                em.send(Ev::Elek(ElekEv::Uses(uses.clone())));
                             }
                         }
                         prog("Reading project", i + 1, 129.max(i + 2))
                     })
                 });
-                let r = r.and_then(|(m, msgs)| ElkProject::parse(m, msgs).map(Box::new));
+                let r = r.and_then(|(m, msgs)| ElekProject::parse(m, msgs).map(Box::new));
                 match &r {
                     Ok(p) => crate::log::line(format!(
-                        "elk: parsed {}, {} references{}",
+                        "elek: parsed {}, {} references{}",
                         p.versions,
                         p.uses.iter().sum::<u32>(),
                         p.read_only
@@ -1145,14 +1145,14 @@ impl Worker {
                             .map(|w| format!(", READ-ONLY: {w}"))
                             .unwrap_or_default()
                     )),
-                    Err(e) => crate::log::line(format!("elk: read failed: {e}")),
+                    Err(e) => crate::log::line(format!("elek: read failed: {e}")),
                 }
                 let keys = r.as_ref().map(|p| pool_keys(&p.pool, &asked)).unwrap_or_default();
-                self.em.send(Ev::Elk(ElkEv::Loaded(r)));
+                self.em.send(Ev::Elek(ElekEv::Loaded(r)));
                 // After `Loaded`: no progress, nothing would clear it.
                 self.look_up_names(&keys, &mut asked, false);
             }
-            ElkCmd::Resolve { slot, hash, lens } => {
+            ElekCmd::Resolve { slot, hash, lens } => {
                 let found = self.with_conn(|c| {
                     for &len in &lens {
                         if let Some(p) = c.sample_path(hash, len)? {
@@ -1161,10 +1161,10 @@ impl Worker {
                     }
                     Ok(None)
                 });
-                crate::log::line(format!("elk: resolve {hash:08x} lens {lens:?} -> {found:?}"));
-                self.em.send(Ev::Elk(ElkEv::Resolved { slot, hash, found }));
+                crate::log::line(format!("elek: resolve {hash:08x} lens {lens:?} -> {found:?}"));
+                self.em.send(Ev::Elek(ElekEv::Resolved { slot, hash, found }));
             }
-            ElkCmd::Push { msgs, settings, force, model } => {
+            ElekCmd::Push { msgs, settings, force, model } => {
                 let total = msgs.len();
                 prog("Checking project", 0, total);
                 let r = self.with_conn(|c| {
@@ -1173,8 +1173,8 @@ impl Worker {
                     })
                 });
                 if let Ok(false) = r {
-                    crate::log::line("elk: push held back: the device's project changed since the read");
-                    self.em.send(Ev::Elk(ElkEv::PushStale));
+                    crate::log::line("elek: push held back: the device's project changed since the read");
+                    self.em.send(Ev::Elek(ElekEv::PushStale));
                     return;
                 }
                 if r.is_ok() {
@@ -1183,9 +1183,9 @@ impl Worker {
                     std::thread::sleep(Duration::from_secs(3));
                 }
                 if let Err(e) = &r {
-                    crate::log::line(format!("elk: push failed: {e}"));
+                    crate::log::line(format!("elek: push failed: {e}"));
                 }
-                self.em.send(Ev::Elk(ElkEv::Pushed(r.map(|_| total))));
+                self.em.send(Ev::Elek(ElekEv::Pushed(r.map(|_| total))));
             }
         }
     }
@@ -1212,15 +1212,15 @@ impl Worker {
             }
             asked.insert((h, l));
             if progress {
-                self.em.send(Ev::Elk(ElkEv::Progress { label: "Looking up names".into(), done: i + 1, total: keys.len() }));
+                self.em.send(Ev::Elek(ElekEv::Progress { label: "Looking up names".into(), done: i + 1, total: keys.len() }));
             }
             if batch.len() >= 8 || i + 1 == keys.len() {
-                self.em.send(Ev::Elk(ElkEv::Names(std::mem::take(&mut batch))));
+                self.em.send(Ev::Elek(ElekEv::Names(std::mem::take(&mut batch))));
                 self.serve_pending();
             }
         }
         if !batch.is_empty() {
-            self.em.send(Ev::Elk(ElkEv::Names(batch)));
+            self.em.send(Ev::Elek(ElekEv::Names(batch)));
         }
     }
 }

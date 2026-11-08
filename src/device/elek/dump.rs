@@ -98,7 +98,7 @@ pub(super) fn stamp() -> String {
     )
 }
 
-impl ElkProject {
+impl ElekProject {
     /// Write the dump into a new timestamped folder under `root`; returns it.
     pub fn save_dump(&self, root: &Path) -> std::io::Result<PathBuf> {
         let dir = root.join(format!("{}_{}", stamp(), self.model.name().replace(' ', "")));

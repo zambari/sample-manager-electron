@@ -62,7 +62,7 @@ pub enum EdIntent {
     /// Start another kit from the sample's selection.
     NewKit,
     /// Open the Device view in the editor's place.
-    ElkMode,
+    ElekMode,
     /// Fade and cut every kit slice's tail below the threshold.
     TrimTails,
     /// Upload what you hear as a new file next to its device original.

@@ -117,7 +117,7 @@ fn stamp(p: &Path) -> Option<(u64, u64)> {
 }
 
 /// Where pool samples fetched only for previewing are kept, one folder per
-/// `(hash, length)`. Kept across restarts; the Elk view can empty it.
+/// `(hash, length)`. Kept across restarts; the Elek view can empty it.
 pub fn pool_cache_dir() -> Option<PathBuf> {
     let dir = if cfg!(target_os = "windows") {
         PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("sample_manager").join("cache")

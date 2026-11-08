@@ -99,7 +99,7 @@ pub fn pane_title(label: &str, focused: bool) -> impl egui::Widget + '_ {
     mode_title(label, focused, focused)
 }
 
-/// A title that doubles as a mode switch (Sample Editor / Elk Sample Order):
+/// A title that doubles as a mode switch (Sample Editor / Elek Sample Order):
 /// the active mode is always underlined so you can tell which one you're in;
 /// it lights up orange only when its column also has keyboard focus.
 pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget + '_ {
@@ -317,7 +317,7 @@ pub fn oled_font(size: f32) -> egui::FontId {
 }
 
 /// Readout green-white, like the device screen. Used for anything that lives
-/// on the device (Elk Sample Order slots, +Drive file lists).
+/// on the device (Elek Sample Order slots, +Drive file lists).
 pub const OLED: Color32 = Color32::from_rgb(222, 236, 230);
 pub const OLED_DIM: Color32 = Color32::from_rgb(110, 122, 118);
 pub const OLED_BG: Color32 = Color32::from_rgb(12, 14, 14);

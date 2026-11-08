@@ -7,7 +7,7 @@
 //! sound references are project-wide and stay valid.
 //!
 //! elk-herd was mostly tested on the Digitakt II, so every assumption made
-//! here is checked against the dump and logged (`elk-pat:`) when it doesn't
+//! here is checked against the dump and logged (`elek-pat:`) when it doesn't
 //! hold. See `project_management_discovery.md` §8.
 
 use super::*;
@@ -176,7 +176,7 @@ pub struct Patterns {
 }
 
 fn log(s: String) {
-    crate::log::line(format!("elk-pat: {s}"));
+    crate::log::line(format!("elek-pat: {s}"));
 }
 
 fn text_at(d: &[u8], at: usize) -> String {

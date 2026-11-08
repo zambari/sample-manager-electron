@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 mod actions;
 mod bars;
 mod editing;
-mod elk;
+mod elek;
 use editing::ExportNaming;
 mod kit;
 mod nav;
@@ -264,18 +264,18 @@ pub struct App {
     build_watch: relaunch::BuildWatch,
     /// The window is closing to start the new build.
     relaunch: bool,
-    /// The centre column shows the Elk Sample Order view instead of the editor.
-    elk_mode: bool,
-    elk: crate::ui::elk_view::ElkState,
-    /// The pool is docked into the right column (see [`elk`]).
-    elk_docked: bool,
+    /// The centre column shows the Elek Sample Order view instead of the editor.
+    elek_mode: bool,
+    elek: crate::ui::elek_view::ElekState,
+    /// The pool is docked into the right column (see [`elek`]).
+    elek_docked: bool,
     /// While docked: the right column shows the pool, not the files.
     dock_pool: bool,
     /// The docked pool has the keyboard.
     pool_focused: bool,
     /// Where the docked pool was drawn last frame, to tell clicks into it.
     pool_rect: Option<egui::Rect>,
-    pool_fetch: elk::PoolFetch,
+    pool_fetch: elek::PoolFetch,
     /// Device files we have a local copy of (see [`crate::links`]).
     links: crate::links::Links,
     /// Last device file opened through a local copy or a fetch:
@@ -441,9 +441,9 @@ impl App {
             device_origin: None,
             send_back: None,
             relaunch: false,
-            elk_mode: false,
-            elk: Default::default(),
-            elk_docked: false,
+            elek_mode: false,
+            elek: Default::default(),
+            elek_docked: false,
             dock_pool: false,
             pool_focused: false,
             pool_rect: None,
@@ -476,8 +476,8 @@ impl App {
             errors_logged: 0,
             last_state: None,
         };
-        app.elk.hide_files = hide_files;
-        app.elk.proj.banks = open_banks;
+        app.elek.hide_files = hide_files;
+        app.elek.proj.banks = open_banks;
         // The active kit's file went missing: bring in a parked one.
         if !app.has_kit() && !app.parked.is_empty() {
             app.unpark_first();
@@ -534,8 +534,8 @@ impl App {
             kit_session: self.kit().session(),
             parked_kits: self.parked.iter().filter_map(Editor::session).collect(),
             kit_grid: self.kit_grid,
-            device_hides_files: self.elk.hide_files,
-            device_open_banks: self.elk.proj.banks,
+            device_hides_files: self.elek.hide_files,
+            device_open_banks: self.elek.proj.banks,
         }
     }
 
@@ -673,10 +673,10 @@ impl eframe::App for App {
         };
         let max_for = |other: f32| (w - other - MIN_EDITOR_W).max(MIN_SIDE_W);
 
-        // Elk Sample Order mode takes the whole window: the file panes have
+        // Elek Sample Order mode takes the whole window: the file panes have
         // nothing to do with it.
-        if self.elk_mode && self.elk.hide_files {
-            egui::CentralPanel::default().show(ui, |ui| self.show_elk(ui));
+        if self.elek_mode && self.elek.hide_files {
+            egui::CentralPanel::default().show(ui, |ui| self.show_elek(ui));
         } else {
             let left = egui::Panel::left("source_col")
                 .resizable(true)
@@ -690,7 +690,7 @@ impl eframe::App for App {
                 .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
                 .show(ui, |ui| {
                     // A full-window page in the middle: no second pool here.
-                    if self.elk_docked && !self.elk_mode {
+                    if self.elek_docked && !self.elek_mode {
                         self.show_dock_col(ui);
                     } else {
                         self.show_pane(ui, Role::Dest);
@@ -704,8 +704,8 @@ impl eframe::App for App {
                 right.response.rect.y_range(),
             );
 
-            if self.elk_mode {
-                egui::CentralPanel::default().show(ui, |ui| self.show_elk(ui));
+            if self.elek_mode {
+                egui::CentralPanel::default().show(ui, |ui| self.show_elek(ui));
             } else {
                 egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
             }
@@ -713,7 +713,7 @@ impl eframe::App for App {
             // A click anywhere decides whether the docked pool keeps the keyboard.
             let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
             if let Some(pos) = press {
-                let inside = self.elk_docked && self.dock_pool && self.pool_rect.is_some_and(|r| r.contains(pos));
+                let inside = self.elek_docked && self.dock_pool && self.pool_rect.is_some_and(|r| r.contains(pos));
                 self.pool_focused = inside;
                 if inside {
                     self.editor_focused = false;

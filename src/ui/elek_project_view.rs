@@ -1,12 +1,12 @@
-//! The Elk Project Editor (experimental, Digitakt 1 only): the loaded
+//! The Elek Project Editor (experimental, Digitakt 1 only): the loaded
 //! project's 128 patterns as one long list, filtered by bank. Each row folds
 //! out into a dot view of its tracks' steps. Move, copy, clear and rename
 //! whole patterns; the result goes to the device with the same push as the
 //! sample order, so both pages edit one loaded project.
 
 use crate::device::patterns::{self, Patterns, Step, TrackSeq, NAME_MAX, PATTERNS};
-use crate::device::{Cell, ElkProject, PatState};
-use crate::ui::elk_view::{self, ElkIntent, ElkState};
+use crate::device::{Cell, ElekProject, PatState};
+use crate::ui::elek_view::{self, ElekIntent, ElekState};
 use crate::ui::theme::{self, oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
 use egui::{Color32, Rect, RichText, Sense, Stroke};
 use std::collections::BTreeSet;
@@ -58,11 +58,11 @@ pub struct ProjEd {
     list_rect: Option<Rect>,
     scroll_to: Option<usize>,
     /// Asked for from the list, for the app (file dialogs).
-    want: Vec<ElkIntent>,
+    want: Vec<ElekIntent>,
 }
 
 impl ProjEd {
-    pub fn reset(&mut self, p: &ElkProject) {
+    pub fn reset(&mut self, p: &ElekProject) {
         let (used_only, banks) = (self.used_only, self.banks);
         *self = Self { used_only, banks, ..Self::default() };
         if p.patterns.is_ok() {
@@ -278,9 +278,9 @@ fn bank_letter(b: usize) -> char {
     (b'A' + b as u8) as char
 }
 
-pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
+pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     let mut out = Vec::new();
-    elk_view::top(ui, st, &mut out, |ui, st| {
+    elek_view::top(ui, st, &mut out, |ui, st| {
         let busy = st.busy.is_some();
         let ed = &mut st.proj;
         if ui.add_enabled(!busy && !ed.undo.is_empty(), egui::Button::new("↶ Undo")).on_hover_text("Undo the last pattern edit (⌘Z)").clicked() {
@@ -292,8 +292,8 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
         }
     });
     if st.project.is_none() {
-        elk_view::load_screen(ui, st, &mut out);
-        elk_view::finish(ui, st, &mut out);
+        elek_view::load_screen(ui, st, &mut out);
+        elek_view::finish(ui, st, &mut out);
         return out;
     }
     let busy = st.busy.is_some();
@@ -306,15 +306,15 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     if let Some(m) = msg {
         ui.add_space(8.0);
         ui.colored_label(WARN, m);
-        elk_view::finish(ui, st, &mut out);
+        elek_view::finish(ui, st, &mut out);
         return out;
     }
     let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else {
-        elk_view::finish(ui, st, &mut out);
+        elek_view::finish(ui, st, &mut out);
         return out;
     };
     if let Some(why) = &p.read_only {
-        ui.colored_label(WARN, format!("Read-only: {why}. Details in the log (lines starting elk-pat:)."));
+        ui.colored_label(WARN, format!("Read-only: {why}. Details in the log (lines starting elek-pat:)."));
     }
     keys(ui.ctx(), st);
     action_bar(ui, st, busy);
@@ -325,11 +325,11 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     );
     list(ui, st, busy);
     out.append(&mut st.proj.want);
-    elk_view::finish(ui, st, &mut out);
+    elek_view::finish(ui, st, &mut out);
     out
 }
 
-fn keys(ctx: &egui::Context, st: &mut ElkState) {
+fn keys(ctx: &egui::Context, st: &mut ElekState) {
     if ctx.egui_wants_keyboard_input() || st.busy.is_some() {
         return;
     }
@@ -413,7 +413,7 @@ fn keys(ctx: &egui::Context, st: &mut ElkState) {
 }
 
 /// View options, beside the Samples / Patterns tabs.
-pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElkState) {
+pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElekState) {
     if st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()).is_none() {
         return;
     }
@@ -430,7 +430,7 @@ pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElkState) {
 }
 
 /// What to do with the selection: copy / paste / clear / pack / rename.
-fn action_bar(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
+fn action_bar(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else { return };
     let editable = p.read_only.is_none() && !busy;
     let ed = &mut st.proj;
@@ -507,7 +507,7 @@ fn shown_tracks(seq: &[TrackSeq], audio: usize) -> Vec<(String, usize)> {
     v
 }
 
-fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
+fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     let Some(proj) = st.project.as_ref() else { return };
     let Ok(p) = proj.patterns.as_deref() else { return };
     let editable = p.read_only.is_none() && !busy;
@@ -807,7 +807,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
                         .on_hover_text("This pattern and its kit as you see it here, as a JSON file, with the +Drive files its samples point at")
                         .clicked()
                     {
-                        ed.want.push(ElkIntent::SavePattern(i, view(p, &ed.cells[i]).1, false));
+                        ed.want.push(ElekIntent::SavePattern(i, view(p, &ed.cells[i]).1, false));
                         ui.close();
                     }
                     if ui
@@ -815,7 +815,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
                         .on_hover_text("A folder: the pattern file plus the WAVs of the samples it uses, from local copies or fetched from the device, to carry into other projects")
                         .clicked()
                     {
-                        ed.want.push(ElkIntent::SavePattern(i, view(p, &ed.cells[i]).1, true));
+                        ed.want.push(ElekIntent::SavePattern(i, view(p, &ed.cells[i]).1, true));
                         ui.close();
                     }
                     if ui
@@ -823,7 +823,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
                         .on_hover_text("Replace this slot with a saved pattern (or the .json inside a bundle folder). Its samples are matched to this pool by +Drive hash; others go into empty slots, found on the device or uploaded from the bundle. Push to send.")
                         .clicked()
                     {
-                        ed.want.push(ElkIntent::LoadPattern(i));
+                        ed.want.push(ElekIntent::LoadPattern(i));
                         ui.close();
                     }
                 });
