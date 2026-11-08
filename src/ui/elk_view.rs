@@ -117,6 +117,13 @@ impl ElkState {
         self.entry(old as usize).is_empty() && !self.filling.contains_key(&old)
     }
 
+    /// Uses of entry `old` (as read) with the edits so far: an emptied slot
+    /// plays nothing, so whatever still points at it doesn't count.
+    fn uses(&self, old: usize) -> u32 {
+        let Some(p) = &self.project else { return 0 };
+        if self.free(old as u16) { 0 } else { p.uses[old] }
+    }
+
     /// Put a new +Drive file into empty entry `old`, as an undoable edit.
     pub fn fill(&mut self, old: u16, e: PoolEntry) {
         self.filling.remove(&old);
@@ -1121,7 +1128,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
         }
     };
     let linked = (!off && !e.is_empty()).then(|| st.linked.get(&e.key())).flatten();
-    let uses = p.uses[from];
+    let uses = st.uses(from);
     let size = if e.is_empty() || off {
         String::new()
     } else {
