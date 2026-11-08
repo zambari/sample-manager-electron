@@ -63,6 +63,8 @@ pub enum EdIntent {
     NewKit,
     /// Open the Device view in the editor's place.
     ElekMode,
+    /// Open the Device view on this page (Samples / Patterns).
+    DevicePage(crate::ui::elek_view::ElekPage),
     /// Fade and cut every kit slice's tail below the threshold.
     TrimTails,
     /// Upload what you hear as a new file next to its device original.

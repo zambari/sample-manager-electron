@@ -608,6 +608,11 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
     }
     ui.add_space(14.0);
     theme::device_switch(ui, true, true);
+    if crate::device::presence().available() || st.project.is_some() {
+        if let Some(page) = device_pages(ui, Some(st.page)) {
+            st.page = page;
+        }
+    }
     ui.separator();
     if let Some(p) = &st.project {
         ui.label(RichText::new(format!("{} · {}", p.model.name(), p.versions)).weak().small());
@@ -630,6 +635,24 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
     });
 }
 
+/// Samples / Patterns: the Device's sub-pages, drawn small right after the
+/// Device switch. `active` is the page shown (`None` from the editor, where
+/// neither is). Returns the page clicked.
+pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>) -> Option<ElekPage> {
+    let mut picked = None;
+    ui.add_space(2.0);
+    ui.label(RichText::new("›").weak());
+    for (page, name, tip) in [
+        (ElekPage::Order, "Samples", "The sample pool in two side-by-side panes"),
+        (ElekPage::Project, "Patterns", "Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)"),
+    ] {
+        if ui.add(theme::mode_title(name, active == Some(page), false)).on_hover_text(tip).clicked() {
+            picked = Some(page);
+        }
+    }
+    picked
+}
+
 /// The full-window top: mode tabs, then the device bar with the page's own
 /// tools and the status.
 pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, page_tools: impl FnOnce(&mut egui::Ui, &mut ElekState)) {
@@ -645,20 +668,9 @@ pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekInten
     if st.project.is_none() {
         return;
     }
-    // Samples / Patterns, with each page's view options beside them.
+    // The page's own view options (the Samples / Patterns switch is up by Device).
     ui.add_space(2.0);
     ui.horizontal_wrapped(|ui| {
-        ui.add_space(6.0);
-        if ui.add(theme::mode_title("Samples", st.page == ElekPage::Order, false)).on_hover_text("The sample pool in two side-by-side panes").clicked() {
-            st.page = ElekPage::Order;
-        }
-        ui.add_space(14.0);
-        let pat = theme::mode_title("Patterns", st.page == ElekPage::Project, false);
-        if ui.add(pat).on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)").clicked() {
-            st.page = ElekPage::Project;
-        }
-        ui.add_space(6.0);
-        ui.separator();
         match st.page {
             ElekPage::Order => preview_tools(ui, st, out),
             ElekPage::Project => crate::ui::elek_project_view::view_tools(ui, st),

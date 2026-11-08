@@ -14,25 +14,15 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
         {
             out.push(EdIntent::ElekMode);
         }
-        ui.separator();
-        if let Some(p) = ed.path() {
-            let mut name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            if ed.is_dirty() {
-                name.push_str("  ● unsaved");
-            } else if ed.is_edited() {
-                name.push_str("  •");
+        if crate::device::presence().available() {
+            if let Some(page) = crate::ui::elek_view::device_pages(ui, None) {
+                out.push(EdIntent::DevicePage(page));
             }
-            ui.add(egui::Label::new(RichText::new(name).strong()).truncate())
-                .on_hover_text(p.display().to_string());
         }
+        ui.separator();
         if let (Some((a, b)), Some(s)) = (ed.crop, ed.sample()) {
             ui.label(RichText::new(format!("✂ cropped view {:.3}–{:.3}s", s.seconds(a), s.seconds(b))).weak())
                 .on_hover_text("Only part of the file is loaded for editing. ⇧C or Uncrop shows the whole file again.");
-        }
-        if let Some(f) = ed.fold() {
-            let txt = if f == Fold::Mix { "◐ MONO".to_owned() } else { format!("◐ MONO {}", f.short()) };
-            ui.label(RichText::new(txt).color(MONO_COLOR).strong())
-                .on_hover_text("Playing folded to mono. M toggles.");
         }
         if ed.loading.is_some() {
             ui.spinner();
@@ -46,11 +36,21 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         let sample = s.sample_name.as_deref().unwrap_or("—");
+        let mut label = crate::app::short_name(sample, 28);
+        let mut tip = "B — the sample you're browsing. Moving the file cursor always loads here.".to_owned();
+        if !s.showing_kit {
+            if ed.is_dirty() {
+                label.push_str("  ● unsaved");
+            } else if ed.is_edited() {
+                label.push_str("  •");
+            }
+            if let Some(p) = ed.path() {
+                tip = format!("{}\n{tip}", p.display());
+            }
+        }
         if ui
-            .selectable_label(!s.showing_kit, crate::app::short_name(sample, 28))
-            .on_hover_text(
-                "B — the sample you're browsing. Moving the file cursor always loads here.",
-            )
+            .selectable_label(!s.showing_kit, label)
+            .on_hover_text(tip)
             .clicked()
         {
             out.push(EdIntent::ShowKit(false));
@@ -118,13 +118,16 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
             if s.kit_name.is_none() {
                 ui.separator();
             }
-            if ui
-                .small_button("Start kit")
-                .on_hover_text("Make this file the slice kit, to add slices to its end")
-                .clicked()
-            {
-                out.push(EdIntent::UseAsKit);
-            }
+            // Pinned to the right edge; the rest of the row flows from the left.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Start kit")
+                    .on_hover_text("Make this file the slice kit, to add slices to its end")
+                    .clicked()
+                {
+                    out.push(EdIntent::UseAsKit);
+                }
+            });
         }
     });
 }
@@ -555,6 +558,14 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
             {
                 out.push(EdIntent::SendToDevice);
             }
+        }
+        if let Some(f) = ed.fold() {
+            // Pinned to the right edge of the row.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let txt = if f == Fold::Mix { "◐ MONO".to_owned() } else { format!("◐ MONO {}", f.short()) };
+                ui.label(RichText::new(txt).color(MONO_COLOR).strong())
+                    .on_hover_text("Playing folded to mono. M toggles.");
+            });
         }
     });
 }
