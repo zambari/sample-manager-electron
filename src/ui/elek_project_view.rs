@@ -50,6 +50,8 @@ pub struct ProjEd {
     pub banks: [bool; BANKS],
     /// Hide empty slots.
     used_only: bool,
+    /// Folded-out rows show raw track / pattern bytes instead of steps.
+    bytes: bool,
     /// Folded-out rows.
     open: BTreeSet<usize>,
     /// Each row's rect last frame, and the list's visible area, to find the
@@ -63,8 +65,8 @@ pub struct ProjEd {
 
 impl ProjEd {
     pub fn reset(&mut self, p: &ElekProject) {
-        let (used_only, banks) = (self.used_only, self.banks);
-        *self = Self { used_only, banks, ..Self::default() };
+        let (used_only, banks, bytes) = (self.used_only, self.banks, self.bytes);
+        *self = Self { used_only, banks, bytes, ..Self::default() };
         if p.patterns.is_ok() {
             self.cells = (0..PATTERNS).map(Cell::as_read).collect();
         }
@@ -419,6 +421,10 @@ pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElekState) {
     }
     let ed = &mut st.proj;
     ui.toggle_value(&mut ed.used_only, "Hide empty").on_hover_text("Hide empty slots (selected and changed ones stay)");
+    ui.toggle_value(&mut ed.bytes, "Bytes").on_hover_text(
+        "Folded-out patterns show raw bytes instead of steps: the last 32 bytes of each track, and the bytes after the pattern name. \
+         Offsets are from the end of the track (-32..-1) and from the start of the pattern payload",
+    );
     let all_open = ed.banks.iter().all(|&b| b);
     let all_folded = ed.banks.iter().all(|&b| !b);
     if ui.add_enabled(!all_open, egui::Button::new("Open all banks").small()).clicked() {
@@ -609,7 +615,9 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 let info = cell.src.map(|s| &p.info[s as usize]);
                 let open = ed.open.contains(&i);
                 let tracks = info.map(|n| shown_tracks(&n.seq, audio)).unwrap_or_default();
-                let extra = if open { 4.0 + tracks.len().max(1) as f32 * TRACK_H + 4.0 } else { 0.0 };
+                let mut step_hover: Option<String> = None;
+                let byte_rows = if ed.bytes && info.is_some() { 2.0 } else { 0.0 };
+                let extra = if open { 4.0 + (tracks.len().max(1) as f32 + byte_rows) * TRACK_H + 4.0 } else { 0.0 };
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H + extra), Sense::hover());
                 let rect = rect.shrink2(egui::vec2(0.0, 1.0));
                 rows.push((i, rect));
@@ -693,24 +701,48 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                         if tracks.is_empty() {
                             painter.text(egui::pos2(x0 + 26.0, ty + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, "step layout unknown for this version", oled_font(10.0), OLED_DIM);
                         }
+                        if ed.bytes && !tracks.is_empty() {
+                            // Column offsets (from the track end), then the
+                            // pattern-level bytes after the name.
+                            let cols: Vec<String> = (0..patterns::TAIL).map(|k| format!("{:>2}", patterns::TAIL - k)).collect();
+                            hex_row(&painter, egui::pos2(dots_x, ty + TRACK_H / 2.0), &cols, OLED_DIM, None);
+                            painter.text(egui::pos2(x0 + DOTS_X - 10.0, ty + TRACK_H / 2.0), egui::Align2::RIGHT_CENTER, "bytes from track end: -", oled_font(10.0), OLED_DIM);
+                            ty += TRACK_H;
+                            let cy = ty + TRACK_H / 2.0;
+                            painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, format!("PATTERN @{}", n.tail_at), oled_font(11.0), OLED_DIM);
+                            let hx: Vec<String> = n.tail.iter().map(|b| format!("{b:02x}")).collect();
+                            hex_row(&painter, egui::pos2(x0 + NAME_X + 60.0, cy), &hx, OLED, Some(&n.tail));
+                            ty += TRACK_H;
+                        }
                         for (label, t) in &tracks {
                             let cy = ty + TRACK_H / 2.0;
-                            painter.text(egui::pos2(x0 + 46.0, cy), egui::Align2::LEFT_CENTER, label, oled_font(11.0), OLED_DIM);
+                            painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, label, oled_font(11.0), OLED_DIM);
                             if let Some(ti) = n.tracks.get(*t) {
                                 // The sample, then the sound's own name when it isn't the default.
                                 let mut text = sample_name(ti.slot);
                                 if ti.name != format!("SOUND {}", t + 1) && !ti.name.is_empty() {
                                     text = format!("{text}  ·  {}", ti.name);
                                 }
-                                let sr = Rect::from_min_size(egui::pos2(x0 + NAME_X + 30.0, ty), egui::vec2(DOTS_X - NAME_X - 74.0, TRACK_H));
+                                let sr = Rect::from_min_size(egui::pos2(x0 + NAME_X, ty), egui::vec2(DOTS_X - NAME_X - 56.0, TRACK_H));
                                 painter.with_clip_rect(sr).text(sr.left_center(), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), OLED);
-                                if ti.slot != 0 {
-                                    painter.text(egui::pos2(x0 + DOTS_X - 10.0, cy), egui::Align2::RIGHT_CENTER, format!("{:03}", ti.slot), oled_font(10.0), OLED_DIM);
-                                }
                             }
                             let seq = &n.seq[*t];
-                            let end = dots(&painter, egui::pos2(dots_x, cy), (rect.right() - dots_x - 50.0).max(120.0), seq);
-                            painter.text(egui::pos2(end + 8.0, cy), egui::Align2::LEFT_CENTER, format!("{}", seq.len), oled_font(10.0), OLED_DIM);
+                            // Track length in steps (16 = one bar); ≈ when
+                            // guessed from the last used step.
+                            let len = if seq.len_known { seq.len.to_string() } else { format!("≈{}", seq.len) };
+                            painter.text(egui::pos2(x0 + DOTS_X - 10.0, cy), egui::Align2::RIGHT_CENTER, len, oled_font(10.0), OLED_DIM);
+                            if ed.bytes {
+                                let hx: Vec<String> = seq.tail.iter().map(|b| format!("{b:02x}")).collect();
+                                hex_row(&painter, egui::pos2(dots_x, cy), &hx, OLED, Some(&seq.tail));
+                            } else {
+                                let max_w = (rect.right() - dots_x - 10.0).max(120.0);
+                                dots(&painter, egui::pos2(dots_x, cy), max_w, seq);
+                                if let Some(pp) = pointer.filter(|pp| (pp.y - cy).abs() <= TRACK_H / 2.0 && rect.contains(*pp)) {
+                                    if let Some(k) = step_at(seq.steps.len(), dots_x, max_w, pp.x).filter(|&k| k < seq.len && seq.steps[k] != Step::None) {
+                                        step_hover = Some(step_tip(seq, k, label, &sample_name));
+                                    }
+                                }
+                            }
                             ty += TRACK_H;
                         }
                     }
@@ -732,7 +764,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     }
                 }
 
-                let hover = match (state, info) {
+                let hover = if let Some(h) = step_hover.take() { h } else { match (state, info) {
                     (PatState::Used, Some(n)) if !n.kit_name.is_empty() && n.kit_name != n.name => format!(
                         "{}: {} bytes differ from an empty pattern\nkit name: \"{}\"",
                         patterns::label(i),
@@ -742,7 +774,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     (PatState::Used, Some(n)) => format!("{}: {} bytes differ from an empty pattern", patterns::label(i), n.diff),
                     (PatState::Phantom, Some(n)) => format!("{}: nearly empty ({} bytes differ from an empty pattern: kit tweaks, no trigs)", patterns::label(i), n.diff),
                     _ => format!("{}: empty", patterns::label(i)),
-                };
+                } };
                 let resp = resp.on_hover_text_at_pointer(hover);
                 if resp.drag_started() {
                     if !ed.sel.contains(&i) {
@@ -871,11 +903,66 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
 /// One track's steps as dots, from `at` (left, vertical centre), groups of
 /// 16 slightly apart. Steps past the track's length aren't drawn. Returns
 /// the right edge.
-fn dots(painter: &egui::Painter, at: egui::Pos2, max_w: f32, seq: &TrackSeq) -> f32 {
-    let n = seq.steps.len();
+/// Byte cells in a fixed grid; zero bytes dimmed when `raw` is given.
+fn hex_row(painter: &egui::Painter, at: egui::Pos2, cells: &[String], color: Color32, raw: Option<&[u8]>) {
+    const PITCH: f32 = 20.0;
+    for (k, c) in cells.iter().enumerate() {
+        let x = at.x + k as f32 * PITCH + (k / 8) as f32 * 6.0;
+        let col = if raw.is_some_and(|r| r.get(k) == Some(&0)) { DOT_BEAT } else { color };
+        painter.text(egui::pos2(x, at.y), egui::Align2::LEFT_CENTER, c, oled_font(10.0), col);
+    }
+}
+
+/// Step dot spacing: `(pitch, gap between 16-step groups)`.
+fn dot_pitch(n: usize, max_w: f32) -> (f32, f32) {
     let gap = 5.0;
     let groups = n.div_ceil(16).saturating_sub(1) as f32;
-    let pitch = ((max_w - groups * gap) / n as f32).clamp(3.0, 9.0);
+    (((max_w - groups * gap) / n.max(1) as f32).clamp(3.0, 9.0), gap)
+}
+
+/// The step under `x` in a dot line drawn from `x0`.
+fn step_at(n: usize, x0: f32, max_w: f32, x: f32) -> Option<usize> {
+    let (pitch, gap) = dot_pitch(n, max_w);
+    (0..n).find(|&k| (x - (x0 + k as f32 * pitch + (k / 16) as f32 * gap + pitch / 2.0)).abs() <= pitch / 2.0)
+}
+
+/// What's on step `k`: note-ish bytes, flags, p-locks.
+fn step_tip(seq: &TrackSeq, k: usize, track: &str, sample_name: &dyn Fn(usize) -> String) -> String {
+    let mut s = format!("{track} step {} (bar {}, step {})", k + 1, k / 16 + 1, k % 16 + 1);
+    s += &format!("\ntrig flags {:04x}", seq.flags.get(k).copied().unwrap_or(0));
+    let locks: Vec<String> = seq
+        .locks
+        .iter()
+        .filter_map(|(p, v)| v.get(k).copied().flatten().map(|v| (*p, v)))
+        .map(|(p, v)| {
+            if Some(p) == seq.sample_param {
+                // DT1 (64 steps) keeps the slot in the high byte.
+                let slot = if seq.flags.len() == 64 { v >> 8 } else { v } as usize;
+                format!("  sample → {slot:03} {}", sample_name(slot))
+            } else {
+                format!("  param {p:#04x} ({p}) = {} (raw {v:04x})", v >> 8)
+            }
+        })
+        .collect();
+    if locks.is_empty() {
+        s += "\nno p-locks";
+    } else {
+        s += "\np-locks:\n";
+        s += &locks.join("\n");
+    }
+    // Raw per-step bytes, for finding the note: offset in track = byte.
+    let raw: Vec<String> = seq.arrays.iter().map(|(o, a)| format!("@{o}:{:02x}", a.get(k).copied().unwrap_or(0))).collect();
+    if !raw.is_empty() {
+        s += "\nper-step bytes (track offset:value):\n  ";
+        s += &raw.chunks(4).map(|c| c.join("  ")).collect::<Vec<_>>().join("\n  ");
+    }
+    s
+}
+
+fn dots(painter: &egui::Painter, at: egui::Pos2, max_w: f32, seq: &TrackSeq) -> f32 {
+    let n = seq.steps.len();
+    let (pitch, gap) = dot_pitch(n, max_w);
+    let groups = n.div_ceil(16).saturating_sub(1) as f32;
     let r = (pitch * 0.32).clamp(1.2, 2.8);
     let x_of = |k: usize| at.x + k as f32 * pitch + (k / 16) as f32 * gap + pitch / 2.0;
     for (k, s) in seq.steps.iter().enumerate().take(seq.len) {

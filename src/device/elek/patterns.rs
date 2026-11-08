@@ -68,6 +68,11 @@ pub struct PatternInfo {
     pub seq: Vec<TrackSeq>,
     /// Bytes that differ from an empty pattern.
     pub diff: usize,
+    /// Raw bytes after the pattern name (pattern-level settings live around
+    /// here: master length, scale…), and the payload offset of the first.
+    /// For finding offsets by hand.
+    pub tail: Vec<u8>,
+    pub tail_at: usize,
 }
 
 /// What's on one sequencer track, for a thumbnail.
@@ -77,7 +82,27 @@ pub struct TrackSeq {
     pub steps: Vec<Step>,
     /// Track length in steps.
     pub len: usize,
+    /// `len` was read from the track, not guessed from the last used step.
+    pub len_known: bool,
+    /// The last `TAIL` bytes of the track struct (track settings: length,
+    /// scale… [unverified] which is where), for finding offsets by hand.
+    pub tail: Vec<u8>,
+    /// Trig flag word per step.
+    pub flags: Vec<u16>,
+    /// The rest of the track struct after the trig flags, cut into
+    /// one-byte-per-step arrays: `(offset in the track, bytes)`. One of them
+    /// is likely the note [unverified which].
+    pub arrays: Vec<(usize, Vec<u8>)>,
+    /// P-lock rows for this track: `(param id, value per step)`, `None` = no lock.
+    pub locks: Vec<(u8, Vec<Option<u16>>)>,
+    /// The param id of sample locks (value = pool slot).
+    pub sample_param: Option<u8>,
 }
+
+/// How many bytes at the end of each track struct `TrackSeq::tail` keeps.
+pub const TAIL: usize = 32;
+/// How many bytes after the pattern name `PatternInfo::tail` keeps.
+pub const PAT_TAIL: usize = 48;
 
 impl TrackSeq {
     pub fn notes(&self) -> usize {
@@ -115,7 +140,7 @@ fn track_stride(m: Model, v: u32, plocks: usize) -> usize {
 /// trig; 0x0010 = swing (set on every odd step by default, so ignored); any
 /// other bit = something on the step without a note (lock trig) [unverified
 /// for which bit is which]. Byte `stride - 6` is the track length in v10.
-fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize) -> Vec<TrackSeq> {
+fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize, sample_param: Option<u8>) -> Vec<TrackSeq> {
     let steps = model.steps();
     let body = plocks.saturating_sub(4);
     let stride = track_stride(model, pv, plocks);
@@ -125,6 +150,32 @@ fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize) -> Vec<TrackSeq> {
     (0..SEQ_TRACKS)
         .map(|t| {
             let at = 4 + t * stride;
+            let flags: Vec<u16> = (0..steps).map(|k| be16(d, at + k * 2).unwrap_or(0)).collect();
+            let n_steps = steps;
+            let arrays = (0..(stride - n_steps * 2) / n_steps)
+                .map(|a| {
+                    let o = n_steps * 2 + a * n_steps;
+                    (o, d.get(at + o..at + o + n_steps).map(<[u8]>::to_vec).unwrap_or_default())
+                })
+                .collect();
+            let row = 2 + n_steps * 2;
+            let locks = (0..PLOCK_ROWS)
+                .filter_map(|r| {
+                    let ra = plocks + r * row;
+                    let h = d.get(ra..ra + row)?;
+                    if h[1] as usize != t {
+                        return None;
+                    }
+                    let vals: Vec<Option<u16>> = (0..n_steps)
+                        .map(|k| {
+                            let v = u16::from_be_bytes([h[2 + k * 2], h[3 + k * 2]]);
+                            let none = if model == DT2 { v == 0xFFFF } else { v & 0xFF00 == 0xFF00 };
+                            (!none).then_some(v)
+                        })
+                        .collect();
+                    vals.iter().any(Option::is_some).then_some((h[0], vals))
+                })
+                .collect();
             let steps: Vec<Step> = (0..steps)
                 .map(|k| match be16(d, at + k * 2).unwrap_or(0) {
                     w if w & 1 != 0 => Step::Note,
@@ -133,12 +184,13 @@ fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize) -> Vec<TrackSeq> {
                 })
                 .collect();
             let byte = if model == DT && pv >= 9 { d.get(at + stride - 6).map(|&b| b as usize) } else { None };
-            let len = match byte {
-                Some(n) if (1..=steps.len()).contains(&n) => n,
+            let (len, len_known) = match byte {
+                Some(n) if (1..=steps.len()).contains(&n) => (n, true),
                 // Unknown layout: up to the last used step, in whole pages.
-                _ => (steps.iter().rposition(|s| *s != Step::None).map_or(0, |p| p + 1).div_ceil(16) * 16).max(16),
+                _ => ((steps.iter().rposition(|s| *s != Step::None).map_or(0, |p| p + 1).div_ceil(16) * 16).max(16), false),
             };
-            TrackSeq { steps, len }
+            let tail = d.get(at + stride - TAIL.min(stride)..at + stride).map(<[u8]>::to_vec).unwrap_or_default();
+            TrackSeq { steps, len, len_known, tail, flags, arrays, locks, sample_param }
         })
         .collect()
 }
@@ -170,6 +222,7 @@ struct Geo {
     sounds: Option<usize>,
     ssize: Option<usize>,
     sslot: Option<usize>,
+    sample_param: Option<u8>,
 }
 
 pub struct Patterns {
@@ -239,10 +292,12 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
             .collect(),
         _ => Vec::new(),
     };
-    let seq = pattern_plocks(g.model, g.pv).map_or_else(Vec::new, |pl| parse_seq(g.model, g.pv, d, pl));
+    let seq = pattern_plocks(g.model, g.pv).map_or_else(Vec::new, |pl| parse_seq(g.model, g.pv, d, pl, g.sample_param));
     let kit_name = text_at(d, kit_name_at);
     let name = if !pf.is_empty() && printable(d, pattern_name_at) { pf.clone() } else { kit_name.clone() };
-    PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff }
+    let tail_at = pattern_name_at + 16;
+    let tail = d.get(tail_at..(tail_at + PAT_TAIL).min(d.len())).map(<[u8]>::to_vec).unwrap_or_default();
+    PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff, tail, tail_at }
 }
 
 impl Patterns {
@@ -344,7 +399,8 @@ impl Patterns {
             None
         };
 
-        let geo = Geo { model, pv, len, kit, sounds, ssize, sslot };
+        let sample_param = sv.and_then(|v| super::sample_param(model, v));
+        let geo = Geo { model, pv, len, kit, sounds, ssize, sslot, sample_param };
         let mut odd_kit = Vec::new();
         let mut pattern_fields = Vec::new();
         let mut bad_sound = Vec::new();

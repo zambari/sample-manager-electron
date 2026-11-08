@@ -343,6 +343,53 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
     }
 }
 
+/// One tab in a device-styled tab strip: uppercase pixel-font text, dim when
+/// off, bright with an accent underline when it's the selected tab.
+pub fn device_tab(label: &str, selected: bool) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        // 2pt bigger on screen than the Show toggles (12, before scaling).
+        let size = 12.0 + 2.0 / OLED_SIZE_SCALE;
+        let color = if selected {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let text = egui::RichText::new(label.to_uppercase()).font(oled_font(size)).color(color);
+        let resp = ui.add(egui::Button::new(text).frame(false));
+        if selected {
+            let r = resp.rect;
+            ui.painter().hline(r.x_range().shrink(4.0), r.bottom(), Stroke::new(2.0, ACCENT));
+        }
+        resp
+    }
+}
+
+/// A row of [`device_tab`]s with side margins. `tabs` is (value, label,
+/// hover text); `selected` is the tab shown, or `None` when none is (e.g. a
+/// shortcut into another view). Returns the value of the tab clicked.
+pub fn device_tab_strip<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    tabs: &[(T, &str, &str)],
+    selected: Option<T>,
+) -> Option<T> {
+    const MARGIN: f32 = 10.0;
+    const GAP: f32 = 8.0;
+    let mut picked = None;
+    ui.add_space(MARGIN);
+    for (i, &(value, label, tip)) in tabs.iter().enumerate() {
+        if i > 0 {
+            ui.add_space(GAP);
+        }
+        let resp = ui.add(device_tab(label, selected == Some(value)));
+        let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
+        if resp.clicked() {
+            picked = Some(value);
+        }
+    }
+    ui.add_space(MARGIN);
+    picked
+}
+
 /// Font family for device-screen text (Dogica Pixel font).
 pub const OLED_FAMILY: &str = "oled";
 
