@@ -74,7 +74,7 @@ fn region(l: &Layout, tracks: usize, at: usize) -> String {
 }
 
 /// `YYYY-MM-DD_HHMMSS` in UTC.
-fn stamp() -> String {
+pub(super) fn stamp() -> String {
     let s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -105,7 +105,7 @@ impl ElkProject {
         let bins = dir.join("decoded");
         std::fs::create_dir_all(&bins)?;
 
-        let syx: Vec<u8> = self.msgs.iter().flat_map(|m| m.raw.iter().copied()).collect();
+        let syx: Vec<u8> = self.msgs[..self.base].iter().flat_map(|m| m.raw.iter().copied()).collect();
         std::fs::write(dir.join("project.syx"), &syx)?;
 
         let tracks = self.model.kit_tracks();
@@ -116,9 +116,9 @@ impl ElkProject {
             "{} · {} · {} messages\n",
             self.model.name(),
             self.versions,
-            self.msgs.len()
+            self.base
         );
-        for m in &self.msgs {
+        for m in &self.msgs[..self.base] {
             let file = file_name(m);
             std::fs::write(bins.join(&file), &m.data)?;
             let lay = (m.kind == PATTERN_KIT).then(|| layout(self.model, &m.data)).flatten();

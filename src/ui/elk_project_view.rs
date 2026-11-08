@@ -57,6 +57,8 @@ pub struct ProjEd {
     rows: Vec<(usize, Rect)>,
     list_rect: Option<Rect>,
     scroll_to: Option<usize>,
+    /// Asked for from the list, for the app (file dialogs).
+    want: Vec<ElkIntent>,
 }
 
 impl ProjEd {
@@ -65,6 +67,16 @@ impl ProjEd {
         *self = Self { used_only, banks, ..Self::default() };
         if p.patterns.is_ok() {
             self.cells = (0..PATTERNS).map(Cell::as_read).collect();
+        }
+    }
+
+    /// Put pattern `src` (one loaded from a file) into `slot`, as an
+    /// undoable edit.
+    pub fn place_import(&mut self, slot: usize, src: u8) {
+        if slot < self.cells.len() {
+            self.edit(|c| c[slot] = Cell { src: Some(src), name: None });
+            self.select_only(slot);
+            self.scroll_to = Some(slot);
         }
     }
 
@@ -312,6 +324,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
             .small(),
     );
     list(ui, st, busy);
+    out.append(&mut st.proj.want);
     elk_view::finish(ui, st, &mut out);
     out
 }
@@ -785,6 +798,32 @@ fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
                     }
                     if ui.add_enabled(editable, egui::Button::new("Pack bank (used patterns first)")).clicked() {
                         status = Some(pack(ed, p));
+                        ui.close();
+                    }
+                    ui.separator();
+                    let one = ed.targets().len() == 1;
+                    if ui
+                        .add_enabled(one, egui::Button::new("Save pattern…"))
+                        .on_hover_text("This pattern and its kit as you see it here, as a JSON file, with the +Drive files its samples point at")
+                        .clicked()
+                    {
+                        ed.want.push(ElkIntent::SavePattern(i, view(p, &ed.cells[i]).1, false));
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(one, egui::Button::new("Save pattern with samples…"))
+                        .on_hover_text("A folder: the pattern file plus the WAVs of the samples it uses, from local copies or fetched from the device, to carry into other projects")
+                        .clicked()
+                    {
+                        ed.want.push(ElkIntent::SavePattern(i, view(p, &ed.cells[i]).1, true));
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(editable && one, egui::Button::new("Load pattern here…"))
+                        .on_hover_text("Replace this slot with a saved pattern (or the .json inside a bundle folder). Its samples are matched to this pool by +Drive hash; others go into empty slots, found on the device or uploaded from the bundle. Push to send.")
+                        .clicked()
+                    {
+                        ed.want.push(ElkIntent::LoadPattern(i));
                         ui.close();
                     }
                 });

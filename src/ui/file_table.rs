@@ -9,6 +9,7 @@ use crate::fs_model::{self, SortKey};
 use crate::preview::Preview;
 use crate::sizes::{Size, SizeCache};
 use crate::tab::DirTab;
+use crate::ui::dnd::ResponseDnd;
 use crate::ui::theme::{oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
 use egui::{Align, Key, Sense, Stroke, StrokeKind, Ui};
 use std::path::PathBuf;
@@ -359,7 +360,7 @@ fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
             ui.painter()
                 .rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
         }
-        if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
+        if let Some(p) = resp.release_payload::<DragPayload>() {
             intents.push(Intent::DroppedOn {
                 dir: parent,
                 payload: (*p).clone(),
@@ -563,7 +564,7 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
             ui.painter()
                 .rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
         }
-        if let Some(p) = resp.dnd_release_payload::<DragPayload>() {
+        if let Some(p) = resp.release_payload::<DragPayload>() {
             if let Some(dir) = target.filter(|_| !onto_self(&p)) {
                 intents.push(Intent::DroppedOn {
                     dir,

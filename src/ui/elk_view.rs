@@ -4,6 +4,7 @@
 //! device pages share.
 
 use crate::device::{ElkProject, PoolEntry, SavedProject};
+use crate::ui::dnd::ResponseDnd;
 use crate::ui::theme;
 use egui::{Color32, RichText, Sense, Stroke};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -21,6 +22,8 @@ pub struct ElkState {
     pub project: Option<Box<ElkProject>>,
     /// `order[slot] = slot it came from` in the project as read.
     pub order: Vec<u16>,
+    /// A slot drag is under way (until the button comes up).
+    slot_drag: bool,
     /// +Drive paths by `(hash, length)`.
     pub names: HashMap<(u32, u32), String>,
     /// Pool files we have a local copy of (uploaded from it, or fetched to
@@ -118,6 +121,14 @@ pub enum ElkIntent {
     AddFiles(Vec<(u16, std::path::PathBuf)>),
     /// Write the dump as read to disk, for format research.
     SaveDump,
+    /// Save the project as edited to a file / open one (asks where).
+    /// `true`: a bundle, the samples' WAVs saved alongside.
+    SaveProject(bool),
+    LoadProject,
+    /// Save the pattern in this slot (with its shown name; bundle as for
+    /// `SaveProject`) / load one into it.
+    SavePattern(usize, String, bool),
+    LoadPattern(usize),
 }
 
 impl ElkState {
@@ -142,7 +153,7 @@ impl ElkState {
     }
 
     /// Entry `old` holds nothing and nothing is on its way into it.
-    fn free(&self, old: u16) -> bool {
+    pub(crate) fn free(&self, old: u16) -> bool {
         self.entry(old as usize).is_empty() && !self.filling.contains_key(&old)
     }
 
@@ -600,6 +611,11 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<El
     ui.separator();
     if let Some(p) = &st.project {
         ui.label(RichText::new(format!("{} · {}", p.model.name(), p.versions)).weak().small());
+        if let Some(f) = &p.from_file {
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            ui.label(RichText::new(format!("from file: {name}")).color(theme::ACCENT_BRIGHT).small())
+                .on_hover_text(format!("{}\nNot on the device yet: Push sends the whole project into the device's memory.", f.display()));
+        }
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         if ui
@@ -758,6 +774,9 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<Elk
             }
         }
         projects_menu(ui, st, out, wide);
+        if !busy {
+            file_menu(ui, st, out, wide);
+        }
         return;
     }
     if ui.add_enabled(!busy, egui::Button::new(if wide { "⬇ Reload" } else { "⬇" })).on_hover_text("Read the project open on the device again (from its memory). Unpushed changes here are dropped.").clicked() {
@@ -765,12 +784,15 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<Elk
     }
     let changed = st.changed();
     let waiting = st.filling.len();
-    let can_push = !busy && changed > 0 && waiting == 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
+    let from_file = st.project.as_ref().is_some_and(|p| p.from_file.is_some());
+    let can_push = !busy && (changed > 0 || from_file) && waiting == 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
     let label = if wide { format!("⬆ Push to device ({changed})") } else { format!("⬆ {changed}") };
     let push = ui
         .add_enabled(can_push, egui::Button::new(RichText::new(label).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
         .on_hover_text(if waiting > 0 {
-            format!("Waiting for {waiting} dropped file(s) to reach the +Drive")
+            format!("Waiting for {waiting} file(s) to reach or be found on the +Drive")
+        } else if from_file {
+            "Write the whole project from the file into the device's memory, replacing the project loaded there (the saved copy on +Drive is not touched)".to_owned()
         } else {
             format!(
                 "Write {} pool and {} pattern change(s) into the project loaded on the device (its memory, not the saved copy on +Drive)",
@@ -782,14 +804,7 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<Elk
         st.confirm_push = true;
     }
     projects_menu(ui, st, out, wide);
-    let can_save = !busy && st.project.as_ref().is_some_and(|p| !p.partial);
-    if ui
-        .add_enabled(can_save, egui::Button::new("💾"))
-        .on_hover_text("Save dump: the project as read (raw .syx, decoded structs, names and strings) to ~/Documents/sample_manager/project_dumps, for format research")
-        .clicked()
-    {
-        out.push(ElkIntent::SaveDump);
-    }
+    file_menu(ui, st, out, wide);
     let close = theme::close_button(None, false);
     if ui.add_enabled(!busy, close).on_hover_text("Close this project here (the device keeps it)").clicked() {
         if st.changed() > 0 {
@@ -798,6 +813,48 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<Elk
             st.close_project();
         }
     }
+}
+
+/// Save / load project files, and the research dump.
+fn file_menu(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
+    let busy = st.busy.is_some();
+    let can_save = !busy && st.project.as_ref().is_some_and(|p| !p.partial);
+    ui.menu_button(if wide { "💾 File" } else { "💾" }, |ui| {
+        if ui
+            .add_enabled(can_save, egui::Button::new("Save project…"))
+            .on_hover_text("The project as you see it here, unpushed changes included, as a JSON file. Samples are noted by their +Drive hash, not included.")
+            .clicked()
+        {
+            out.push(ElkIntent::SaveProject(false));
+            ui.close();
+        }
+        if ui
+            .add_enabled(can_save, egui::Button::new("Save project with samples…"))
+            .on_hover_text("A folder: the project file plus a samples/ folder with every pool sample's WAV, from local copies or fetched from the device. Loading it elsewhere uploads only the samples that device lacks (to /imported/<name>).")
+            .clicked()
+        {
+            out.push(ElkIntent::SaveProject(true));
+            ui.close();
+        }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Load project…"))
+            .on_hover_text("Open a saved project file (or the .json inside a bundle folder) here. Its samples are checked on the device; bundled ones it lacks are uploaded. Nothing else goes to the device until you push.")
+            .clicked()
+        {
+            out.push(ElkIntent::LoadProject);
+            ui.close();
+        }
+        ui.separator();
+        let can_dump = can_save && st.project.as_ref().is_some_and(|p| p.from_file.is_none());
+        if ui
+            .add_enabled(can_dump, egui::Button::new("Save debug dump"))
+            .on_hover_text("The project as read (raw .syx, decoded structs, names and strings) to ~/Documents/sample_manager/project_dumps, for format research")
+            .clicked()
+        {
+            out.push(ElkIntent::SaveDump);
+            ui.close();
+        }
+    });
 }
 
 /// The projects saved on the +Drive, as a dropdown. They can't be opened
@@ -921,6 +978,10 @@ pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<El
             }
             ui.add_space(6.0);
             ui.label(RichText::new("Reads whatever project is open on the device now.\nTo work on another one, load it on the device first (PROJECT › LOAD).").weak());
+            ui.add_space(10.0);
+            if ui.button("📂  Open a project file…").on_hover_text("A project saved from here earlier. Nothing goes to the device until you push.").clicked() {
+                out.push(ElkIntent::LoadProject);
+            }
             if !st.status.is_empty() {
                 ui.add_space(6.0);
                 ui.colored_label(Color32::from_rgb(230, 120, 90), &st.status);
@@ -957,7 +1018,8 @@ pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkInte
         }
     }
     if st.confirm_push {
-        if let Some(yes) = confirm_push(ui.ctx(), st.pool_changed(), st.proj.changed()) {
+        let whole = st.project.as_ref().is_some_and(|p| p.from_file.is_some());
+        if let Some(yes) = confirm_push(ui.ctx(), st.pool_changed(), st.proj.changed(), whole) {
             st.confirm_push = false;
             if yes {
                 out.push(ElkIntent::Push { force: false });
@@ -1015,6 +1077,11 @@ fn confirm_stale(ctx: &egui::Context) -> Option<Stale> {
 }
 
 fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
+    // A slot drag ends with the button release (handled the frame it
+    // happens) or Escape.
+    if ui.input(|i| (!i.pointer.any_down() && !i.pointer.any_released()) || i.key_pressed(egui::Key::Escape)) {
+        st.slot_drag = false;
+    }
     let Some(p) = &st.project else { return };
     let n = p.pool.len();
     let banks = n.div_ceil(BANK);
@@ -1150,6 +1217,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
                 }
             }
             RowAct::DragStart(s) => {
+                st.slot_drag = true;
                 st.active = side;
                 if !st.sel.contains(&s) {
                     st.click(s, egui::Modifiers::NONE);
@@ -1358,10 +1426,13 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
         let c = if ok { theme::ACCENT_BRIGHT } else { Color32::from_rgb(230, 120, 90) };
         ui.painter().rect_stroke(r, 0.0, Stroke::new(2.0, c), egui::StrokeKind::Inside);
     }
-    if let Some(d) = resp.dnd_release_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
+    if let Some(d) = resp.release_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
         acts.push(RowAct::DropFiles(slot, d.paths.clone()));
     }
-    if resp.dnd_release_payload::<SlotDrag>().is_some() {
+    // Our own drag flag too: if anything else cleared egui's payload this
+    // frame, the drop still lands.
+    let released = resp.contains_pointer() && ui.input(|i| i.pointer.any_released());
+    if resp.release_payload::<SlotDrag>().is_some() || (released && st.slot_drag) {
         acts.push(if shift_mode {
             RowAct::DropBefore(before(pointer))
         } else {
@@ -1501,23 +1572,38 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     }
 }
 
-fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize) -> Option<bool> {
+fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize, whole: bool) -> Option<bool> {
     let mut answer = None;
     egui::Modal::new(egui::Id::unique("elk_push_modal")).show(ctx, |ui| {
         ui.set_width(440.0);
         let what = match (pool, patterns) {
+            _ if whole => "the whole project from the file".to_owned(),
             (0, n) => format!("{n} pattern slot(s)"),
             (n, 0) => format!("new sample order, {n} slot(s)"),
             (a, b) => format!("{a} sample slot(s) and {b} pattern slot(s)"),
         };
         ui.heading(format!("Push {what}?"));
         ui.add_space(6.0);
-        ui.label(
-            "This rewrites the project currently loaded on the device: only the patterns, kits and pool sounds \
-             that change are sent, plus the sample pool if it changed. Everything else on the device is left as is. \
-             The saved copy on +Drive is not touched.",
-        );
-        if patterns > 0 {
+        if whole {
+            ui.label(
+                "This replaces the project loaded on the device (its memory) with the one from the file: every pattern, \
+                 kit, pool sound and the sample pool. Whatever is in the device's memory now is overwritten, saved or not. \
+                 The saved copies on +Drive are not touched.",
+            );
+            ui.add_space(4.0);
+            ui.colored_label(
+                Color32::from_rgb(230, 120, 90),
+                "Samples are not sent: the pool points at +Drive files by their hash. Any the device doesn't have will play nothing. \
+                 Experimental: if the device was holding something you want, save it there (PROJECT › SAVE) before pushing.",
+            );
+        } else {
+            ui.label(
+                "This rewrites the project currently loaded on the device: only the patterns, kits and pool sounds \
+                 that change are sent, plus the sample pool if it changed. Everything else on the device is left as is. \
+                 The saved copy on +Drive is not touched.",
+            );
+        }
+        if patterns > 0 && !whole {
             ui.add_space(4.0);
             ui.colored_label(
                 Color32::from_rgb(230, 120, 90),

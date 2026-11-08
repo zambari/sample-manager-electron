@@ -145,7 +145,21 @@ impl Cell {
     }
 }
 
+/// Where things sit in this project's pattern payloads (all share one layout).
+#[derive(Clone)]
+struct Geo {
+    model: Model,
+    pv: u32,
+    len: usize,
+    kit: usize,
+    /// Track sounds: start (from the kit), stride, and slot byte offset.
+    sounds: Option<usize>,
+    ssize: Option<usize>,
+    sslot: Option<usize>,
+}
+
 pub struct Patterns {
+    /// Slots 0..128 as read, then patterns loaded from files (see `add`).
     pub info: Vec<PatternInfo>,
     /// Message index of each slot's `0x50`.
     msg: Vec<usize>,
@@ -158,6 +172,7 @@ pub struct Patterns {
     pattern_name_at: usize,
     /// Why moves / renames aren't allowed, if they aren't (names still show).
     pub read_only: Option<String>,
+    geo: Geo,
 }
 
 fn log(s: String) {
@@ -195,6 +210,24 @@ pub fn clean_name(s: &str) -> String {
         .filter(|c| (' '..='~').contains(c))
         .take(NAME_MAX)
         .collect()
+}
+
+/// Names, tracks and steps of one pattern payload.
+fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatState, diff: usize, d: &[u8]) -> PatternInfo {
+    let pf = text_at(d, pattern_name_at);
+    let tracks = match (g.sounds, g.ssize, g.sslot) {
+        (Some(s0), Some(sz), Some(sl)) => (0..g.model.kit_tracks())
+            .map(|t| {
+                let s = g.kit + s0 + t * sz;
+                TrackInfo { name: text_at(d, s + 12), slot: d.get(s + sl).copied().unwrap_or(0) as usize }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let seq = pattern_plocks(g.model, g.pv).map_or_else(Vec::new, |pl| parse_seq(g.model, g.pv, d, pl));
+    let kit_name = text_at(d, kit_name_at);
+    let name = if !pf.is_empty() && printable(d, pattern_name_at) { pf.clone() } else { kit_name.clone() };
+    PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff }
 }
 
 impl Patterns {
@@ -297,6 +330,7 @@ impl Patterns {
             None
         };
 
+        let geo = Geo { model, pv, len, kit, sounds, ssize, sslot };
         let mut odd_kit = Vec::new();
         let mut pattern_fields = Vec::new();
         let mut bad_sound = Vec::new();
@@ -316,25 +350,16 @@ impl Patterns {
                 if !pf.is_empty() {
                     pattern_fields.push(format!("{}:{:02x?}", label(i), &d[pattern_name_at..pattern_name_at + 16]));
                 }
-                let tracks = match (sounds, ssize, sslot) {
-                    (Some(s0), Some(sz), Some(sl)) => (0..model.kit_tracks())
-                        .map(|t| {
-                            let s = kit + s0 + t * sz;
-                            if be32(&d, s) != Some(MAGIC) {
-                                bad_sound.push(format!("{} t{}", label(i), t + 1));
-                            }
-                            TrackInfo { name: text_at(&d, s + 12), slot: d.get(s + sl).copied().unwrap_or(0) as usize }
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                if i == 0 && tracks.is_empty() {
+                if let (Some(s0), Some(sz)) = (sounds, ssize) {
+                    for t in 0..model.kit_tracks() {
+                        if be32(&d, kit + s0 + t * sz) != Some(MAGIC) {
+                            bad_sound.push(format!("{} t{}", label(i), t + 1));
+                        }
+                    }
+                } else if i == 0 {
                     log(format!("no track sound layout for kit v{kv}"));
                 }
-                let seq = pattern_plocks(model, pv).map_or_else(Vec::new, |pl| parse_seq(model, pv, &d, pl));
-                let kit_name = text_at(&d, kit_name_at);
-                let name = if !pf.is_empty() && printable(&d, pattern_name_at) { pf.clone() } else { kit_name.clone() };
-                PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff }
+                make_info(&geo, kit_name_at, pattern_name_at, state, diff, &d)
             })
             .collect::<Vec<_>>();
         if !odd_kit.is_empty() {
@@ -372,7 +397,38 @@ impl Patterns {
             kit_name_at,
             pattern_name_at,
             read_only: (!problems.is_empty()).then(|| problems.join("; ")),
+            geo,
         })
+    }
+
+    /// Take in a pattern payload loaded from a file, already in this
+    /// project's sample numbering, as message `mi`. Returns its source index
+    /// for a `Cell`. It must have the same struct version and length as the
+    /// project's own patterns: nothing is converted.
+    pub(super) fn add(&mut self, mi: usize, d: &[u8]) -> Result<u8, String> {
+        let g = &self.geo;
+        let pv = be32(d, 0).ok_or("pattern payload too short")?;
+        if pv != g.pv || d.len() != g.len {
+            return Err(format!(
+                "this pattern is v{pv} ({} bytes); the project's patterns are v{} ({} bytes). Converting between versions isn't supported yet",
+                d.len(),
+                g.pv,
+                g.len
+            ));
+        }
+        let idx = u8::try_from(self.info.len()).map_err(|_| "too many patterns loaded from files; reload the project first".to_owned())?;
+        let mut n = d.to_vec();
+        n[self.slot_at] = 0;
+        let diff = self.blank.as_ref().map_or(usize::MAX, |b| n.iter().zip(b).filter(|(x, y)| x != y).count());
+        let state = match diff {
+            0 => PatState::Blank,
+            k if k <= PHANTOM_BYTES => PatState::Phantom,
+            _ => PatState::Used,
+        };
+        let info = make_info(&self.geo, self.kit_name_at, self.pattern_name_at, state, diff, &n);
+        self.info.push(info);
+        self.msg.push(mi);
+        Ok(idx)
     }
 
     pub fn can_clear(&self) -> bool {

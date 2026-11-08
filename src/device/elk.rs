@@ -8,6 +8,7 @@
 use super::*;
 
 mod dump;
+pub mod file;
 pub mod patterns;
 
 pub use patterns::{Cell, PatState, Patterns};
@@ -510,7 +511,14 @@ impl Scan {
 }
 pub struct ElkProject {
     pub model: Model,
+    /// The project's own messages, then patterns loaded from files
+    /// (`import_pattern`), which are only ever sent placed into a slot.
     msgs: Vec<DumpMsg>,
+    /// How many of `msgs` are the project's own.
+    base: usize,
+    /// Loaded from this file rather than read from the device: a push sends
+    /// every message, not just the changed ones.
+    pub from_file: Option<std::path::PathBuf>,
     settings_msg: usize,
     pool_at: usize,
     pub pool: Vec<PoolEntry>,
@@ -628,6 +636,8 @@ impl ElkProject {
         }
         Ok(Self {
             model,
+            base: msgs.len(),
+            from_file: None,
             msgs,
             settings_msg,
             pool_at,
@@ -648,6 +658,8 @@ impl ElkProject {
         let n = pool.len();
         Ok(Self {
             model,
+            base: 1,
+            from_file: None,
             msgs: vec![settings],
             settings_msg: 0,
             pool_at,
@@ -662,7 +674,7 @@ impl ElkProject {
     }
 
     pub fn msg_count(&self) -> usize {
-        self.msgs.len()
+        self.base
     }
 
     /// The project settings struct as read, to check the device still has it.
@@ -677,11 +689,16 @@ impl ElkProject {
     /// the device, so edits made there since the read survive.
     /// `fills` are new files put into slots that were empty, by old slot.
     pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Vec<u8>> {
+        let all = self.from_file.is_some();
         self.new_data(order, fills, cells)
             .into_iter()
+            .take(self.base)
             .enumerate()
             .filter_map(|(i, d)| {
                 let m = &self.msgs[i];
+                if all {
+                    return Some(build_dump(self.model, m.kind, m.index, d.as_ref().unwrap_or(&m.data)));
+                }
                 let d = d.filter(|d| *d != m.data)?;
                 Some(build_dump(self.model, m.kind, m.index, &d))
             })
@@ -699,6 +716,67 @@ impl ElkProject {
                 data[mi].clone().unwrap_or_else(|| self.msgs[mi].data.clone())
             })
             .collect()
+    }
+
+    /// Every one of the project's own messages as it would be after a push:
+    /// `(kind, index, payload)`, in dump order.
+    pub fn edited_msgs(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<(u8, u8, Vec<u8>)> {
+        self.new_data(order, fills, cells)
+            .into_iter()
+            .take(self.base)
+            .zip(&self.msgs)
+            .map(|(d, m)| (m.kind, m.index, d.unwrap_or_else(|| m.data.clone())))
+            .collect()
+    }
+
+    /// A project from payloads saved earlier (see `file`).
+    pub(super) fn from_payloads(model: Model, msgs: Vec<(u8, u8, Vec<u8>)>) -> Result<Self, String> {
+        let msgs = msgs
+            .into_iter()
+            .map(|(kind, index, data)| DumpMsg { kind, index, raw: build_dump(model, kind, index, &data), data })
+            .collect();
+        Self::parse(model, msgs)
+    }
+
+    /// Pool slots a pattern payload points at (slot 0, "off", left out).
+    pub fn payload_slots(&self, data: &[u8]) -> Result<std::collections::BTreeSet<usize>, String> {
+        let refs = self.payload_refs(0, data)?;
+        Ok(refs.iter().filter_map(|r| r.get(data)).filter(|&s| s > 0).collect())
+    }
+
+    fn payload_refs(&self, mi: usize, data: &[u8]) -> Result<Vec<SlotRef>, String> {
+        let m = DumpMsg { kind: PATTERN_KIT, index: 0, raw: Vec::new(), data: data.to_vec() };
+        let mut scan = Scan::default();
+        scan.msg(self.model, mi, &m);
+        if let Some(u) = scan.unknown.iter().next() {
+            return Err(format!("unknown struct version ({u})"));
+        }
+        if let Some(p) = scan.problems.first() {
+            return Err(p.clone());
+        }
+        Ok(scan.refs)
+    }
+
+    /// Take in a pattern payload from a file, with its sample slots moved by
+    /// `map` (slot in the file → slot as read here; unmapped ones become 0,
+    /// "off"). Returns the source index to put in a `Cell`.
+    pub fn import_pattern(&mut self, mut data: Vec<u8>, map: &std::collections::HashMap<usize, usize>) -> Result<u8, String> {
+        if self.partial {
+            return Err("the project is still being read".into());
+        }
+        let mi = self.msgs.len();
+        let refs = self.payload_refs(mi, &data)?;
+        let orig = data.clone();
+        for r in &refs {
+            if let Some(s) = r.get(&orig).filter(|&s| s > 0) {
+                r.set(&mut data, map.get(&s).copied().unwrap_or(0));
+            }
+        }
+        let pats = self.patterns.as_mut().map_err(|e| e.clone())?;
+        let idx = pats.add(mi, &data)?;
+        self.msgs.push(DumpMsg { kind: PATTERN_KIT, index: u8::MAX, raw: Vec::new(), data });
+        self.refs.extend(refs);
+        Ok(idx)
     }
 
     /// The pattern payloads as read, by slot (empty if not parsed).
@@ -789,6 +867,8 @@ pub enum ElkCmd {
         msgs: Vec<Vec<u8>>,
         settings: Vec<u8>,
         force: bool,
+        /// The model the messages were built for.
+        model: Model,
     },
 }
 
@@ -982,9 +1062,13 @@ impl Conn {
         msgs: &[Vec<u8>],
         settings: &[u8],
         force: bool,
+        want: Model,
         on_sent: &mut dyn FnMut(usize),
     ) -> R<bool> {
         let m = self.model()?;
+        if m != want {
+            return refused(format!("this project is for the {}, but the device is a {}", want.name(), m.name()));
+        }
         if !force && self.read_settings(m)? != settings {
             return Ok(false);
         }
@@ -1080,11 +1164,11 @@ impl Worker {
                 crate::log::line(format!("elk: resolve {hash:08x} lens {lens:?} -> {found:?}"));
                 self.em.send(Ev::Elk(ElkEv::Resolved { slot, hash, found }));
             }
-            ElkCmd::Push { msgs, settings, force } => {
+            ElkCmd::Push { msgs, settings, force, model } => {
                 let total = msgs.len();
                 prog("Checking project", 0, total);
                 let r = self.with_conn(|c| {
-                    c.push_project(&msgs, &settings, force, &mut |n| {
+                    c.push_project(&msgs, &settings, force, model, &mut |n| {
                         prog("Sending to device", n, total)
                     })
                 });

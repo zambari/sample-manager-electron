@@ -544,9 +544,9 @@ impl Worker {
                     );
                     let res = match dir {
                         Dir::Move => self.move_item(&src, &dst_dir, policy, cancel),
-                        Dir::Upload => {
+                        Dir::Upload => self.ensure_dev_dir(&dst_dir).and_then(|()| {
                             self.upload(&src, &dst_dir, policy, mono, cancel, &mut errors)
-                        }
+                        }),
                         Dir::Download => self.download(&src, &dst_dir, policy, cancel, &mut errors),
                         Dir::Copy => self.copy(&src, &dst_dir, policy, cancel, &mut errors),
                     };

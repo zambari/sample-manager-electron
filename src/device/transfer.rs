@@ -207,6 +207,18 @@ impl Worker {
         Ok(())
     }
 
+    /// Make +Drive folder `p` and any missing parents (the pool's bundle
+    /// uploads go to a folder that may not be there yet).
+    pub(super) fn ensure_dev_dir(&mut self, p: &Path) -> Result<(), String> {
+        if self.with_conn(|c| c.list(p)).is_ok() {
+            return Ok(());
+        }
+        if let Some(up) = p.parent().filter(|u| *u != p && !u.as_os_str().is_empty()) {
+            self.ensure_dev_dir(up)?;
+        }
+        self.with_conn(|c| c.mkdir(p))
+    }
+
     pub(super) fn upload(
         &mut self,
         src: &Path,

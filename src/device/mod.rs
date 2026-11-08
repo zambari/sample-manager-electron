@@ -13,7 +13,7 @@
 
 mod conn;
 mod elk;
-pub use elk::{patterns, Cell, ElkCmd, ElkEv, ElkProject, PatState, PoolEntry, SavedProject};
+pub use elk::{file, patterns, Cell, ElkCmd, ElkEv, ElkProject, PatState, PoolEntry, SavedProject};
 mod proto;
 mod sample;
 mod transfer;
