@@ -294,7 +294,46 @@ impl App {
     }
 
     /// Connection state of the device, shown in a device tab's header.
+    /// React to the device being plugged in or out (see
+    /// [`crate::device::presence`]): mark it offline at once, and on the way
+    /// back re-list device tabs so they reconnect without a manual Refresh.
+    pub(super) fn track_presence(&mut self) {
+        use crate::device::Presence;
+        let now = crate::device::presence();
+        if now == self.last_presence {
+            return;
+        }
+        let before = std::mem::replace(&mut self.last_presence, now.clone());
+        match now {
+            Presence::Absent => {
+                self.device_status = Some(Err("Disconnected: no Elektron device on USB MIDI".into()));
+            }
+            Presence::One(_) if matches!(before, Presence::Absent | Presence::Many(_)) => {
+                self.device_status = None;
+                for role in [Role::Source, Role::Dest] {
+                    for i in 0..self.pane(role).tabs.len() {
+                        if self.pane(role).tabs[i].device {
+                            self.reload(role, i);
+                        }
+                    }
+                }
+                if self.elek.asked_projects {
+                    self.elek.projects = None;
+                    self.device.elek(crate::device::ElekCmd::ListProjects);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn device_badge(&mut self, ui: &mut egui::Ui) {
+        if let Some(tip) = crate::device::presence().problem() {
+            let many = matches!(crate::device::presence(), crate::device::Presence::Many(_));
+            let text = if many { "⚠ several devices" } else { "● disconnected" };
+            ui.label(egui::RichText::new(text).color(ui.visuals().error_fg_color).small())
+                .on_hover_text(tip);
+            return;
+        }
         let (text, color, tip) = match &self.device_status {
             Some(Ok(name)) => (
                 format!("● {name}"),
@@ -388,17 +427,19 @@ impl App {
         }
 
         // One row: tabs scroll sideways when they outgrow the pane, while the
-        // +/🎹/× buttons stay pinned on the right.
+        // + / device / × buttons stay pinned on the right.
         let n_tabs = self.pane(role).tabs.len();
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if n_tabs > 1 && ui.add(crate::ui::theme::close_button(None, true)).on_hover_text("Close tab").clicked() {
                     close = Some(self.pane(role).active);
                 }
-                if ui
-                    .small_button("🎹")
-                    .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)")
-                    .clicked()
+                let mut dev_btn = theme::device_dimmed(ui, |ui| ui.small_button(theme::DEVICE_ICON))
+                    .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)");
+                if let Some(why) = crate::device::presence().problem() {
+                    dev_btn = dev_btn.on_hover_text(why);
+                }
+                if dev_btn.clicked()
                 {
                     new_device_tab = true;
                 }
@@ -444,16 +485,16 @@ impl App {
                         ui.set_style(tab_style.clone());
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Max), |ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            let titles: Vec<(usize, String, bool)> = self
+                            let titles: Vec<(usize, String, bool, bool)> = self
                                 .pane(role)
                                 .tabs
                                 .iter()
                                 .enumerate()
-                                .map(|(i, t)| (i, t.title(), t.loading))
+                                .map(|(i, t)| (i, t.title(), t.loading, t.device))
                                 .collect();
 
                             let mut tab_h = ui.spacing().interact_size.y;
-                            for (i, title, loading) in titles {
+                            for (i, title, loading, is_dev) in titles {
                                 let label = if loading {
                                     format!("{title} …")
                                 } else {
@@ -461,7 +502,11 @@ impl App {
                                 };
                                 let (inner, payload) = ui
                                     .dnd_drop_zone::<DragPayload, _>(egui::Frame::NONE, |ui| {
-                                        ui.add(theme::pane_tab(&label, i == active))
+                                        if is_dev {
+                                            theme::device_dimmed(ui, |ui| ui.add(theme::pane_tab(&label, i == active)))
+                                        } else {
+                                            ui.add(theme::pane_tab(&label, i == active))
+                                        }
                                     });
                                 let resp = inner.inner;
                                 tab_h = resp.rect.height();

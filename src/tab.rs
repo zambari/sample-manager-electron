@@ -118,7 +118,7 @@ impl DirTab {
                 .cwd
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned());
-            return format!("🎹 {}", name.as_deref().unwrap_or("+Drive"));
+            return crate::ui::theme::device_label(name.as_deref().unwrap_or("+Drive"));
         }
         self.cwd
             .file_name()

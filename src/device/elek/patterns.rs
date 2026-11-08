@@ -1,4 +1,4 @@
-//! The 128 patterns of a Digitakt (1) project: what each slot holds, and
+//! The 128 patterns of a Digitakt / Digitakt II project: what each slot holds, and
 //! moving / copying / clearing / renaming whole patterns.
 //!
 //! On the Digitakt each pattern carries its own copy of its kit, and nothing
@@ -31,6 +31,8 @@ fn pattern_slot_byte(m: Model, v: u32) -> Option<usize> {
         (DT, 3..=6) => 24976,
         (DT, 7 | 8) => 24992,
         (DT, 9 | 10) => 25008,
+        (DT2, 0) => 55984,
+        (DT2, 3 | 4) => 88768,
         _ => return None,
     })
 }
@@ -94,8 +96,19 @@ pub enum Step {
     Note,
 }
 
-/// Sequencer tracks in a pattern: audio, then MIDI.
+/// Sequencer tracks in a pattern: audio, then MIDI (DT1); 16 kit tracks (DT2).
 const SEQ_TRACKS: usize = 16;
+
+/// `trackStorage_sizeof` for the tracks in pattern `v` (elk-herd). On the
+/// DT1 the tracks fill the space before the p-locks exactly, so that's used
+/// instead; on DT2 v3/v4 there's a gap after them.
+fn track_stride(m: Model, v: u32, plocks: usize) -> usize {
+    match (m, v) {
+        (DT2, 0) => 2207,
+        (DT2, 3 | 4) => 1184,
+        _ => plocks.saturating_sub(4) / SEQ_TRACKS,
+    }
+}
 
 /// Each track starts with one big-endian u16 of trig flags per step, right
 /// after the pattern's 4-byte version. From DT1 v10 dumps: bit 0 = note
@@ -105,10 +118,10 @@ const SEQ_TRACKS: usize = 16;
 fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize) -> Vec<TrackSeq> {
     let steps = model.steps();
     let body = plocks.saturating_sub(4);
-    if body % SEQ_TRACKS != 0 || body / SEQ_TRACKS < steps * 2 {
+    let stride = track_stride(model, pv, plocks);
+    if (model == DT && body % SEQ_TRACKS != 0) || stride < steps * 2 || stride * SEQ_TRACKS > body {
         return Vec::new();
     }
-    let stride = body / SEQ_TRACKS;
     (0..SEQ_TRACKS)
         .map(|t| {
             let at = 4 + t * stride;
@@ -152,7 +165,8 @@ struct Geo {
     pv: u32,
     len: usize,
     kit: usize,
-    /// Track sounds: start (from the kit), stride, and slot byte offset.
+    /// Track sounds: start (from the kit), stride, and slot offset (a u16
+    /// on the DT2).
     sounds: Option<usize>,
     ssize: Option<usize>,
     sslot: Option<usize>,
@@ -219,7 +233,8 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
         (Some(s0), Some(sz), Some(sl)) => (0..g.model.kit_tracks())
             .map(|t| {
                 let s = g.kit + s0 + t * sz;
-                TrackInfo { name: text_at(d, s + 12), slot: d.get(s + sl).copied().unwrap_or(0) as usize }
+                let slot = if g.model == DT2 { be16(d, s + sl).map(usize::from) } else { d.get(s + sl).map(|&b| b as usize) };
+                TrackInfo { name: text_at(d, s + 12), slot: slot.unwrap_or(0) }
             })
             .collect(),
         _ => Vec::new(),
@@ -232,9 +247,6 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
 
 impl Patterns {
     pub(super) fn parse(model: Model, msgs: &[DumpMsg]) -> Result<Self, String> {
-        if model != DT {
-            return Err("the project editor is Digitakt (1) only for now".into());
-        }
         let mut msg = vec![usize::MAX; PATTERNS];
         for (mi, m) in msgs.iter().enumerate().filter(|(_, m)| m.kind == PATTERN_KIT) {
             let i = m.index as usize;
@@ -269,8 +281,10 @@ impl Patterns {
             format!("unknown pattern version v{pv}")
         })?;
         let kit = pattern_sizeof(model, pv).ok_or(format!("unknown pattern version v{pv}"))?;
-        let kv = be32(data(0), kit).unwrap_or(u32::MAX);
-        let kit_name_at = kit + 4;
+        // DT2 kits start with the beefbace magic, then the version and name.
+        let kv_at = if model == DT2 && be32(data(0), kit) == Some(MAGIC) { kit + 4 } else { kit };
+        let kv = be32(data(0), kv_at).unwrap_or(u32::MAX);
+        let kit_name_at = kv_at + 4;
         let pattern_name_at = pattern_plocks(model, pv).unwrap_or(0) + PLOCK_ROWS * (2 + model.steps() * 2);
         let sounds = kit_sounds(model, kv);
         let sv = kit_sound_version(model, kv);

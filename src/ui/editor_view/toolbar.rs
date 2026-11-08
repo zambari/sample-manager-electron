@@ -8,8 +8,7 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
             out.push(EdIntent::TookFocus);
         }
         ui.add_space(14.0);
-        if ui
-            .add(crate::ui::theme::pane_title("Device", false))
+        if crate::ui::theme::device_switch(ui, false, false)
             .on_hover_text("The project loaded on the Digitakt (Samples / Patterns), in place of the editor. Its ⇥ Dock button puts the sample pool in the right column instead.")
             .clicked()
         {

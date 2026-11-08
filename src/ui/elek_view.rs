@@ -607,7 +607,7 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
         out.push(ElekIntent::BackToEditor);
     }
     ui.add_space(14.0);
-    ui.add(theme::pane_title("Device", true));
+    theme::device_switch(ui, true, true);
     ui.separator();
     if let Some(p) = &st.project {
         ui.label(RichText::new(format!("{} · {}", p.model.name(), p.versions)).weak().small());
@@ -654,7 +654,7 @@ pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekInten
         }
         ui.add_space(14.0);
         let pat = theme::mode_title("Patterns", st.page == ElekPage::Project, false);
-        if ui.add(pat).on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt 1 only)").clicked() {
+        if ui.add(pat).on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)").clicked() {
             st.page = ElekPage::Project;
         }
         ui.add_space(6.0);

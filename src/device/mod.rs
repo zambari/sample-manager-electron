@@ -14,6 +14,8 @@
 mod conn;
 mod elek;
 pub use elek::{file, patterns, Cell, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, SavedProject};
+mod presence;
+pub use presence::{Presence, presence, start as watch_presence};
 mod proto;
 mod sample;
 mod transfer;

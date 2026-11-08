@@ -1,4 +1,4 @@
-//! The Elek Project Editor (experimental, Digitakt 1 only): the loaded
+//! The Elek Project Editor (experimental; DT1 and DT2, DT2 less tested): the loaded
 //! project's 128 patterns as one long list, filtered by bank. Each row folds
 //! out into a dot view of its tracks' steps. Move, copy, clear and rename
 //! whole patterns; the result goes to the device with the same push as the
@@ -319,7 +319,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     keys(ui.ctx(), st);
     action_bar(ui, st, busy);
     ui.label(
-        RichText::new("Click / ⇧click / ⌘click to select · drag to move (swaps with what's there) · ⌥ while dropping copies · ⌘C / ⌘V · ⌫ clears · ⏎ or double-click renames · ←/→ fold · Digitakt 1 patterns have no name of their own: the name is the kit's")
+        RichText::new("Click / ⇧click / ⌘click to select · drag to move (swaps with what's there) · ⌥ while dropping copies · ⌘C / ⌘V · ⌫ clears · ⏎ or double-click renames · ←/→ fold · renaming sets the pattern name and the kit name · patterns in songs aren't updated when moved")
             .weak()
             .small(),
     );

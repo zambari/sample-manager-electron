@@ -127,6 +127,49 @@ pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget
     }
 }
 
+/// The icon for anything that is the Elektron device: +Drive tabs, the
+/// "open +Drive" button, the Device mode switch. Change it here only.
+pub const DEVICE_ICON: &str = "🎹";
+
+/// `text` with the device icon in front.
+pub fn device_label(text: &str) -> String {
+    format!("{DEVICE_ICON} {text}")
+}
+
+/// How much to fade device UI while no device is plugged in.
+pub const DEVICE_ABSENT_OPACITY: f32 = 0.35;
+
+/// Draw `add` faded while no Elektron device is plugged in, and add the
+/// reason to its hover text. Still clickable: a project from a file, or
+/// tabs already listed, are worth looking at offline.
+pub fn device_dimmed<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let presence = crate::device::presence();
+    ui.scope(|ui| {
+        if !presence.available() {
+            ui.multiply_opacity(DEVICE_ABSENT_OPACITY);
+        }
+        add(ui)
+    })
+    .inner
+}
+
+/// The "🎹 DEVICE" mode switch, shared by the editor's header and the
+/// Device view's own. Faded while no device is plugged in; with more than
+/// one plugged in, shows a warning mark in the error colour.
+pub fn device_switch(ui: &mut egui::Ui, active: bool, focused: bool) -> egui::Response {
+    let presence = crate::device::presence();
+    let label = device_label("Device");
+    let mut resp = device_dimmed(ui, |ui| ui.add(mode_title(&label, active, focused)));
+    if matches!(presence, crate::device::Presence::Many(_)) {
+        let err = ui.visuals().error_fg_color;
+        resp |= ui.label(egui::RichText::new("⚠").color(err).strong());
+    }
+    if let Some(why) = presence.problem() {
+        resp = resp.on_hover_text(why);
+    }
+    resp
+}
+
 /// The glyph every close button uses. Plain "×" (U+00D7) is in the bundled
 /// fonts; "✕" and friends are not and render as a missing-glyph box.
 pub const CLOSE_GLYPH: &str = "×";

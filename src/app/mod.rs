@@ -123,6 +123,8 @@ pub struct App {
     device: Device,
     /// Last connection news from the device worker.
     device_status: Option<Result<String, String>>,
+    /// The device presence seen last frame, to act when the cable goes in or out.
+    last_presence: crate::device::Presence,
     staged_upload: Option<StagedUpload>,
     keymap: Keymap,
     sizes: SizeCache,
@@ -376,12 +378,14 @@ impl App {
             errors.push(format!("audio output: {e}"));
         }
 
+        crate::device::watch_presence(ctx.clone());
         let jobs = Jobs::new(ctx);
         let device = Device::new(jobs.emitter());
         let mut app = Self {
             os_dnd: Default::default(),
             device,
             device_status: None,
+            last_presence: Default::default(),
             staged_upload: None,
             engine,
             editor,
@@ -609,6 +613,7 @@ impl eframe::App for App {
         if !events.is_empty() {
             self.absorb(events);
         }
+        self.track_presence();
 
         // Back from another app: files may have changed under us.
         let focused = ctx.input(|i| i.focused);
