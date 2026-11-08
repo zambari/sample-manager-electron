@@ -6,7 +6,7 @@ Elektron Digitakt.
 - **File browser** with list and tree views, an audio-only filter,
   favourites, cut/copy/paste, duplicate removal and reveal in Finder.
 - **Sample editor** with playback, in/out points, looping, trim, gain,
-  normalise and export.
+  normalise, loudness and spectrum stats, and export.
 - **Digitakt +Drive access over USB MIDI**: browse, create folders, rename,
   move, delete (to `/trash`, so mistakes can be undone), and transfer
   samples both ways.
@@ -32,22 +32,37 @@ Selecting a file loads it into the editor (and plays it, with *Auto-play*
 on), so you can step through hundreds of samples with the arrow keys.
 
 **Sample editor (centre).** Trim the loaded sample down to the part you
-want. The *Show* row toggles panels on and off:
+want. The main waveform is always shown: the green and red markers are
+the in and out points, and the shaded part between them is the selection.
+The *Show* row toggles the other panels on and off:
 
 - **Transport**: play/stop, loop, follow playhead, snap to zero crossings,
   auto-load and auto-play.
+- **Gain**: gain and normalise (**N**). In a kit it changes only the
+  selected audio. Gain above 0 dB goes through a soft limiter that bends
+  peaks over instead of chopping them; the wave and stats show what was
+  limited and what still clips.
 - **Tools**: undo/redo, cut/copy/paste, save, crop/uncrop to the selection,
   halve or double the loop, and the channel mode: keep *Stereo*, *Mix* to
-  mono, or keep only *L* or *R*.
-- **Wave**: the main waveform. The green and red markers are the in and
-  out points; the shaded part between them is the selection.
+  mono, or keep only *L* or *R*. Mono applies to playback, stats, save
+  and export alike (**M** toggles it).
+- **Nums**: in, out, length and playhead readout under the wave.
 - **Scalpel**: a 40 ms close-up around the playhead for precise cuts.
 - **Map**: the whole file at a glance; click to jump.
-- **Gain**: gain and normalise.
-- **Stats**: file statistics and a phase meter.
+- **Stats**: levels, DC offset, mono-fold check, a phase meter, loudness
+  (EBU R128: integrated, short-term, momentary, range, true peak) and a
+  spectrum analyser.
+- **Trim** (kits only): see below.
+- **Help**: the keyboard shortcut list.
+
+The **pitch fader** in the top bar speeds playback up or down (pitch and
+tempo together, ±50 %) for previewing. Shift-drag for fine moves,
+double-click to recentre. It never changes the file, and resets on each
+new sample.
 
 *Export → Destination* writes the selection, with the chosen channel mode,
-into the folder open on the right.
+into the folder open on the right. If the name is taken you can pick
+another or overwrite.
 
 **Destination (right).** The target folder, with the same tabs and
 browsing tools as the source. It can be a local folder or the +Drive of a
@@ -82,7 +97,16 @@ single file (handy for chains of drum hits).
   **G** inserts 100 ms of silence before the playhead.
 - Several kits can be open at once. The kit tab picks the one **K** adds
   to, its **×** closes it, and right-click a file → *Load as kit* opens
-  another.
+  another. *Export and close* writes a kit and closes it in one step.
+- **⌘Z** while browsing takes back the last slice **K** added (if nothing
+  happened since); **⇧⌘Z** puts it back.
+
+**Trim.** Turn on the *Trim* panel to free up sample memory: it cuts each
+slice's tail where the sound drops below a threshold and fades out slices
+that stop while still sounding. What will go is shaded on the wave and the
+panel shows the time saved before you apply it; **⌘Z** undoes. All fades
+share one length and curve: drag the fade handle on the wave (↔ length,
+↕ curve), **⌥-drag** to shape just one, double-click to reset.
 
 **Grid kits.** The Digitakt 1 can only slice a file into equal parts, so a
 kit can be laid out on 4, 8 or 16 equal slots: each slice starts its own
@@ -120,6 +144,12 @@ dropping to insert and shift the following slots instead of swapping.
 The `×N` column shows how many times the project uses each sample (kit
 tracks, sample locks and sounds).
 
+Click a slot, or move onto it with ↑/↓, to hear it. A sample without a
+local copy is fetched into a preview cache first; *Cache …* fetches the
+whole pool in the background. Drop audio files onto empty slots to add
+them to the project: they're uploaded into the +Drive folder open in a
+file tab (files already on the +Drive are just linked).
+
 ![Elk Sample Order: two bank panes of a Digitakt II project](docs/elk_sample_order.png)
 
 > **Use at your own risk.** Push to memory rewrites the project that is
@@ -148,6 +178,13 @@ tracks, sample locks and sounds).
   and opens rename straight away.
 - When a transfer hits an existing folder, *Merge* adds new files and skips
   identical ones.
+- The app remembers which local file each device file was uploaded from
+  or downloaded to, and follows it through renames and moves on the
+  device. While the local file is unchanged, the device file opens and
+  plays straight from it. Right-click for *Open local copy in editor*,
+  *Show local copy in other pane* or *Show on device*.
+- **Send to device as…** uploads an edited sample as a new file next to
+  the device file it came from, never over it.
 - Transfers to and from the Digitakt run in a queue. Creating and renaming
   folders jumps ahead of queued file transfers, so the folder is ready
   before the files arrive.
