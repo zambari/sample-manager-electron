@@ -79,7 +79,10 @@ pub struct ElekState {
     pub proj: crate::ui::elek_project_view::ProjEd,
     /// After a push with pattern edits: every pattern payload, by slot, the
     /// device should now hold.
-    pub expect_patterns: Option<Vec<Vec<u8>>>,
+    /// (`None`: a slot that wasn't loaded.)
+    pub expect_patterns: Option<Vec<Option<Vec<u8>>>>,
+    /// While a read runs: which banks to read first, and its stop flag.
+    pub reading: Option<std::sync::Arc<crate::device::ReadCtl>>,
     /// Pool files queued or on their way into the preview cache.
     pub fetching: HashSet<(u32, u32)>,
     /// Background fetch run: `(done, total)`.
@@ -171,14 +174,32 @@ impl ElekState {
         self.fills.insert(old, e);
     }
 
-    pub fn set_project(&mut self, p: Box<ElekProject>) {
-        // The full read landing on the pool shown early: keep the edits made
-        // while it streamed in.
+    /// The read landing on the project shown while it streamed in (pool
+    /// early, patterns one by one): keep the edits made meanwhile.
+    pub fn finish_read(&mut self, p: Box<ElekProject>) {
         if self.project.as_ref().is_some_and(|old| old.partial && old.pool == p.pool) && self.order.len() == p.pool.len() {
-            self.proj.reset(&p);
+            // Edits made while it streamed in, on patterns the full read
+            // can't vouch for: dropped.
+            let bad = p.patterns.as_deref().map_or(true, |pats| pats.read_only.is_some());
+            if bad && self.proj.changed() > 0 {
+                self.proj.reset(&p);
+                self.status = "Pattern edits made during the read were dropped: the patterns turned out read-only".into();
+            } else {
+                self.proj.refresh(&p);
+            }
             self.project = Some(p);
             return;
         }
+        self.set_project(p);
+    }
+
+    /// Edits are off: the device is busy with something other than a read
+    /// streaming in.
+    pub fn edit_locked(&self) -> bool {
+        self.busy.is_some() && self.reading.is_none()
+    }
+
+    pub fn set_project(&mut self, p: Box<ElekProject>) {
         self.proj.reset(&p);
         self.order = (0..p.pool.len() as u16).collect();
         self.confirm_clear = None;
@@ -197,6 +218,9 @@ impl ElekState {
         self.project = None;
         self.proj = Default::default();
         self.expect_patterns = None;
+        if let Some(ctl) = &self.reading {
+            ctl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.order.clear();
         self.confirm_clear = None;
         self.fills.clear();
@@ -793,12 +817,16 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<El
     let changed = st.changed();
     let waiting = st.filling.len();
     let from_file = st.project.as_ref().is_some_and(|p| p.from_file.is_some());
-    let can_push = !busy && (changed > 0 || from_file) && waiting == 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
+    // A stopped read: pool changes rewrite every pattern, so they need them all.
+    let pool_blocked = st.project.as_ref().is_some_and(|p| p.partial) && st.pool_changed() > 0;
+    let can_push = !busy && (changed > 0 || from_file) && waiting == 0 && !pool_blocked && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
     let label = if wide { format!("⬆ Push to device ({changed})") } else { format!("⬆ {changed}") };
     let push = ui
         .add_enabled(can_push, egui::Button::new(RichText::new(label).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
         .on_hover_text(if waiting > 0 {
             format!("Waiting for {waiting} file(s) to reach or be found on the +Drive")
+        } else if pool_blocked && !busy {
+            "The read was stopped before every pattern arrived, and sample pool changes rewrite every pattern. Reload to push them, or reset the sample order to push just the pattern changes.".to_owned()
         } else if from_file {
             "Write the whole project from the file into the device's memory, replacing the project loaded there (the saved copy on +Drive is not touched)".to_owned()
         } else {
@@ -915,6 +943,7 @@ pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElekState, wide: bool) {
     if let Some((label, done, total)) = &st.busy {
         let w = if wide { ui.available_width().clamp(160.0, 420.0) } else { ui.available_width().max(120.0) };
         ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
+        stop_read(ui, st);
     } else if !st.status.is_empty() && st.project.is_some() {
         ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
     }
@@ -938,6 +967,11 @@ fn order_tools(ui: &mut egui::Ui, st: &mut ElekState) {
 fn body(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, busy: bool) {
     if st.project.as_ref().is_some_and(|p| p.partial) && busy {
         ui.label(RichText::new("Sample pool loaded; use counts fill in as the patterns arrive. You can start arranging, pushing unlocks when the read finishes.").weak());
+    } else if st.project.as_ref().is_some_and(|p| p.partial) {
+        ui.colored_label(
+            Color32::from_rgb(230, 120, 90),
+            "The read was stopped: use counts are incomplete and sample order changes can't be pushed. Reload to read the whole project.",
+        );
     } else if let Some(why) = st.project.as_ref().and_then(|p| p.read_only.clone()) {
         ui.colored_label(Color32::from_rgb(230, 120, 90), format!("Read-only: {why}"))
             .on_hover_text(
@@ -971,6 +1005,19 @@ fn body(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, busy: 
     }
 }
 
+/// Stop a read under way; the patterns that arrived stay.
+fn stop_read(ui: &mut egui::Ui, st: &ElekState) {
+    let Some(ctl) = &st.reading else { return };
+    let stopping = ctl.stop.load(std::sync::atomic::Ordering::Relaxed);
+    if ui
+        .add_enabled(!stopping, egui::Button::new(if stopping { "Stopping…" } else { "Stop" }).small())
+        .on_hover_text("Stop reading after the pattern on its way. Banks that loaded completely can be edited and their pattern changes pushed; sample order changes need a full read.")
+        .clicked()
+    {
+        ctl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// No project loaded: one big load button.
 pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>) {
     ui.add_space(40.0);
@@ -978,6 +1025,7 @@ pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
         if let Some((label, done, total)) = &st.busy {
             ui.label(RichText::new(format!("{label}…")).font(oled_font(14.0)).color(OLED));
             ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(260.0).text(format!("{done}/{total}")));
+            stop_read(ui, st);
         } else {
             let big = egui::Button::new(RichText::new("⬇  Load current project from device memory").size(15.0).color(theme::ACCENT_BRIGHT))
                 .min_size(egui::vec2(320.0, 36.0));

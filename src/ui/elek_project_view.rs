@@ -61,15 +61,44 @@ pub struct ProjEd {
     scroll_to: Option<usize>,
     /// Asked for from the list, for the app (file dialogs).
     want: Vec<ElekIntent>,
+    /// Banks whose patterns have all arrived: the only ones edits may touch.
+    ready: [bool; BANKS],
+    /// Why the last edit was turned down, for the status line.
+    refused: Option<String>,
 }
 
 impl ProjEd {
     pub fn reset(&mut self, p: &ElekProject) {
         let (used_only, banks, bytes) = (self.used_only, self.banks, self.bytes);
         *self = Self { used_only, banks, bytes, ..Self::default() };
-        if p.patterns.is_ok() {
-            self.cells = (0..PATTERNS).map(Cell::as_read).collect();
+        self.refresh(p);
+    }
+
+    /// The project's patterns changed under the same slots (another one
+    /// arrived, or the read finished): keep the edits, update what's loaded.
+    pub fn refresh(&mut self, p: &ElekProject) {
+        match p.patterns.as_deref() {
+            Ok(pats) => {
+                if self.cells.len() != PATTERNS {
+                    self.cells = (0..PATTERNS).map(Cell::as_read).collect();
+                }
+                for (b, r) in self.ready.iter_mut().enumerate() {
+                    *r = pats.bank_loaded(b);
+                }
+            }
+            Err(_) => {
+                self.cells.clear();
+                self.undo.clear();
+                self.sel.clear();
+                self.cursor = None;
+                self.ready = [false; BANKS];
+            }
         }
+    }
+
+    /// Folded-out banks as bits (A = bit 0), for the read to take first.
+    pub fn bank_mask(&self) -> u8 {
+        self.banks.iter().enumerate().filter(|(_, o)| **o).fold(0, |m, (b, _)| m | 1 << b)
     }
 
     /// Put pattern `src` (one loaded from a file) into `slot`, as an
@@ -87,12 +116,31 @@ impl ProjEd {
         self.cells.iter().enumerate().filter(|(i, c)| **c != Cell::as_read(*i)).count()
     }
 
+    /// Runs an edit, keeping it out of banks that haven't fully loaded (as
+    /// the changed slot, or as where a pattern comes from).
     fn edit(&mut self, f: impl FnOnce(&mut Vec<Cell>)) {
         let before = self.cells.clone();
         f(&mut self.cells);
-        if self.cells != before {
-            self.undo.push(before);
+        if self.cells == before {
+            return;
         }
+        let blocked: BTreeSet<usize> = (0..self.cells.len())
+            .filter(|&i| self.cells[i] != before[i])
+            .flat_map(|i| [Some(i), self.cells[i].src.map(usize::from).filter(|&s| s < PATTERNS)])
+            .flatten()
+            .map(|i| i / PER_BANK)
+            .filter(|&b| !self.ready[b])
+            .collect();
+        if !blocked.is_empty() {
+            self.cells = before;
+            let names: Vec<String> = blocked.iter().map(|&b| bank_letter(b).to_string()).collect();
+            self.refused = Some(format!(
+                "Bank {} hasn't fully loaded: only banks that finished loading can be edited",
+                names.join(", ")
+            ));
+            return;
+        }
+        self.undo.push(before);
     }
 
     fn undo(&mut self) {
@@ -128,7 +176,7 @@ impl ProjEd {
         (0..self.cells.len())
             .filter(|&i| self.banks[i / PER_BANK])
             .filter(|&i| {
-                !self.used_only || {
+                !self.used_only || !p.loaded[i] || {
                     let c = &self.cells[i];
                     view(p, c).0 != PatState::Blank || c.name.is_some() || *c != Cell::as_read(i) || self.sel.contains(&i)
                 }
@@ -282,8 +330,11 @@ fn bank_letter(b: usize) -> char {
 
 pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     let mut out = Vec::new();
+    if let Some(ctl) = &st.reading {
+        ctl.open.store(st.proj.bank_mask(), std::sync::atomic::Ordering::Relaxed);
+    }
     elek_view::top(ui, st, &mut out, |ui, st| {
-        let busy = st.busy.is_some();
+        let busy = st.edit_locked() || st.proj.cells.is_empty();
         let ed = &mut st.proj;
         if ui.add_enabled(!busy && !ed.undo.is_empty(), egui::Button::new("↶ Undo")).on_hover_text("Undo the last pattern edit (⌘Z)").clicked() {
             ed.undo();
@@ -298,7 +349,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         elek_view::finish(ui, st, &mut out);
         return out;
     }
-    let busy = st.busy.is_some();
+    let busy = st.edit_locked();
 
     let msg = match st.project.as_ref().map(|p| &p.patterns) {
         Some(Err(e)) if st.project.as_ref().is_some_and(|p| p.partial) => Some(format!("Patterns: {e}…")),
@@ -318,6 +369,15 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     if let Some(why) = &p.read_only {
         ui.colored_label(WARN, format!("Read-only: {why}. Details in the log (lines starting elek-pat:)."));
     }
+    let n = p.loaded_count();
+    if n < PATTERNS {
+        let text = if st.reading.is_some() {
+            format!("Loading patterns: {n} of {PATTERNS}. Folded-out banks load first; a bank can be edited once all of it is here.")
+        } else {
+            format!("The read was stopped with {n} of {PATTERNS} patterns: only banks that loaded completely can be edited and pushed. Reload for the rest.")
+        };
+        ui.label(RichText::new(text).weak());
+    }
     keys(ui.ctx(), st);
     action_bar(ui, st, busy);
     ui.label(
@@ -327,12 +387,15 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     );
     list(ui, st, busy);
     out.append(&mut st.proj.want);
+    if let Some(m) = st.proj.refused.take() {
+        st.status = m;
+    }
     elek_view::finish(ui, st, &mut out);
     out
 }
 
 fn keys(ctx: &egui::Context, st: &mut ElekState) {
-    if ctx.egui_wants_keyboard_input() || st.busy.is_some() {
+    if ctx.egui_wants_keyboard_input() || st.edit_locked() {
         return;
     }
     let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else { return };
@@ -594,7 +657,11 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 let col = if hdr.hovered() || bank_open { OLED } else { OLED_DIM };
                 triangle(ui.painter(), egui::pos2(r.left() + 14.0, r.center().y), bank_open, col);
                 ui.painter().text(egui::pos2(r.left() + 26.0, r.center().y), egui::Align2::LEFT_CENTER, format!("BANK {}", bank_letter(b)), oled_font(13.0), col);
+                let here = (b * PER_BANK..(b + 1) * PER_BANK).filter(|&k| p.loaded[k]).count();
                 let mut note = format!("{used} in use");
+                if here < PER_BANK {
+                    note = if here == 0 { "not loaded".to_owned() } else { format!("{here}/{PER_BANK} loaded · {used} in use") };
+                }
                 if changed > 0 {
                     note.push_str(&format!(" · {changed} changed"));
                 }
@@ -661,7 +728,9 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 }
                 painter.text(egui::pos2(x0 + 34.0 + 12.0, y), egui::Align2::LEFT_CENTER, patterns::label(i), oled_font(12.0), OLED_DIM);
                 let name_rect = Rect::from_min_size(egui::pos2(x0 + NAME_X, head.top() + 2.0), egui::vec2(NAME_W, head.height() - 4.0));
+                let pending = cell.src.is_some_and(|s| (s as usize) < PATTERNS && !p.loaded[s as usize]);
                 let (text, color) = match state {
+                    _ if pending => ("loading…".to_owned(), OLED_DIM),
                     PatState::Used if name.is_empty() => ("(no name)".to_owned(), OLED_DIM),
                     PatState::Used => (name.clone(), OLED),
                     PatState::Phantom => (if name.is_empty() { "≈ nearly empty".to_owned() } else { name.clone() }, OLED_DIM),
@@ -699,7 +768,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     if open {
                         let mut ty = head.bottom() + 4.0;
                         if tracks.is_empty() {
-                            painter.text(egui::pos2(x0 + 26.0, ty + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, "step layout unknown for this version", oled_font(10.0), OLED_DIM);
+                            let why = if pending { "not loaded yet" } else { "step layout unknown for this version" };
+                            painter.text(egui::pos2(x0 + 26.0, ty + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, why, oled_font(10.0), OLED_DIM);
                         }
                         if ed.bytes && !tracks.is_empty() {
                             // Column offsets (from the track end), then the

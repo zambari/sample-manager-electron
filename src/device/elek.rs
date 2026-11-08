@@ -185,6 +185,7 @@ const PLOCK_ROWS: usize = 80;
 pub const PATTERN_KIT: u8 = 0x50;
 pub const SOUND: u8 = 0x53;
 pub const SETTINGS: u8 = 0x54;
+const REQ_PATTERN: u8 = 0x60;
 const REQ_SETTINGS: u8 = 0x64;
 const REQ_PROJECT: u8 = 0x6F;
 
@@ -530,7 +531,9 @@ pub struct ElekProject {
     pub versions: String,
     /// Why pushing is not allowed, if it isn't.
     pub read_only: Option<String>,
-    /// Only the pool so far: the patterns are still coming in.
+    /// Not every pattern is here: still coming in, or the read was stopped.
+    /// Pool edits can't be pushed (they touch every pattern) and use
+    /// counts are short; pattern edits in fully loaded banks can.
     pub partial: bool,
     /// The 128 patterns for the project editor, or why they can't be shown.
     pub patterns: Result<Box<Patterns>, String>,
@@ -558,14 +561,17 @@ fn read_pool(model: Model, sd: &[u8]) -> Result<(u32, usize, Vec<PoolEntry>), St
 }
 
 impl ElekProject {
-    pub(super) fn parse(model: Model, msgs: Vec<DumpMsg>) -> Result<Self, String> {
+    /// `stopped`: a read that was stopped early, so some patterns may be
+    /// missing (the result is `partial`).
+    pub(super) fn parse(model: Model, msgs: Vec<DumpMsg>, stopped: bool) -> Result<Self, String> {
         let patterns = msgs.iter().filter(|m| m.kind == PATTERN_KIT).count();
+        let partial = stopped && patterns < 128;
         let settings_msg = msgs
             .iter()
             .position(|m| m.kind == SETTINGS)
             .ok_or("no project settings in the dump")?;
         let mut problems: Vec<String> = Vec::new();
-        if patterns != 128 {
+        if patterns != 128 && !partial {
             problems.push(format!("got {patterns} patterns, expected 128"));
         }
         // Our encoder must reproduce every message exactly, or edits can't be trusted.
@@ -629,7 +635,7 @@ impl ElekProject {
         let patterns = if read_only.is_some() {
             Err("the dump doesn't match the layouts we know".to_owned())
         } else {
-            Patterns::parse(model, &msgs).map(Box::new)
+            Patterns::parse(model, &msgs, !partial, false).map(Box::new)
         };
         if let Err(e) = &patterns {
             crate::log::line(format!("elek-pat: project editor unavailable: {e}"));
@@ -646,9 +652,21 @@ impl ElekProject {
             uses,
             versions,
             read_only,
-            partial: false,
+            partial,
             patterns,
         })
+    }
+
+    /// A pattern that arrived during the read, and the patterns re-parsed
+    /// with it (by the worker, over the settings then the patterns in
+    /// arrival order: the order they're kept here).
+    pub fn add_streamed(&mut self, msg: DumpMsg, pats: Result<Box<Patterns>, String>) {
+        if !self.partial {
+            return;
+        }
+        self.msgs.push(msg);
+        self.base = self.msgs.len();
+        self.patterns = pats;
     }
 
     /// Just the pool, from a settings message read ahead of the full dump.
@@ -707,13 +725,14 @@ impl ElekProject {
 
     /// Every pattern payload (by slot) the device should hold after the push,
     /// to compare with the read-back.
-    pub fn expected_patterns(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Vec<u8>> {
+    /// `None` for slots whose pattern never arrived (a stopped read).
+    pub fn expected_patterns(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Option<Vec<u8>>> {
         let Ok(pats) = &self.patterns else { return Vec::new() };
         let data = self.new_data(order, fills, cells);
         (0..patterns::PATTERNS)
             .map(|i| {
-                let mi = pats.msg_of(i);
-                data[mi].clone().unwrap_or_else(|| self.msgs[mi].data.clone())
+                let mi = pats.msg_of(i)?;
+                Some(data[mi].clone().unwrap_or_else(|| self.msgs[mi].data.clone()))
             })
             .collect()
     }
@@ -735,7 +754,7 @@ impl ElekProject {
             .into_iter()
             .map(|(kind, index, data)| DumpMsg { kind, index, raw: build_dump(model, kind, index, &data), data })
             .collect();
-        Self::parse(model, msgs)
+        Self::parse(model, msgs, false)
     }
 
     /// Pool slots a pattern payload points at (slot 0, "off", left out).
@@ -762,7 +781,7 @@ impl ElekProject {
     /// "off"). Returns the source index to put in a `Cell`.
     pub fn import_pattern(&mut self, mut data: Vec<u8>, map: &std::collections::HashMap<usize, usize>) -> Result<u8, String> {
         if self.partial {
-            return Err("the project is still being read".into());
+            return Err("not every pattern has been read; load the whole project first".into());
         }
         let mi = self.msgs.len();
         let refs = self.payload_refs(mi, &data)?;
@@ -779,10 +798,11 @@ impl ElekProject {
         Ok(idx)
     }
 
-    /// The pattern payloads as read, by slot (empty if not parsed).
-    pub fn pattern_data(&self) -> Vec<&[u8]> {
+    /// The pattern payloads as read, by slot (empty if not parsed; `None`
+    /// for ones that never arrived).
+    pub fn pattern_data(&self) -> Vec<Option<&[u8]>> {
         let Ok(pats) = &self.patterns else { return Vec::new() };
-        (0..patterns::PATTERNS).map(|i| &self.msgs[pats.msg_of(i)].data[..]).collect()
+        (0..patterns::PATTERNS).map(|i| pats.msg_of(i).map(|mi| &self.msgs[mi].data[..])).collect()
     }
 
     /// New payload per message (`None` = untouched).
@@ -821,15 +841,18 @@ impl ElekProject {
         // Patterns: built from the pool-remapped payloads, then placed.
         if let Ok(pats) = &self.patterns {
             if cells.len() == patterns::PATTERNS {
+                // Only slots (and sources) that arrived: the view keeps
+                // edits out of banks that didn't load.
                 let src = |s: usize| {
-                    let mi = pats.msg_of(s);
+                    let mi = pats.msg_of(s).expect("source pattern loaded");
                     data[mi].clone().unwrap_or_else(|| self.msgs[mi].data.clone())
                 };
                 let placed: Vec<(usize, Vec<u8>)> = cells
                     .iter()
                     .enumerate()
                     .filter(|(i, c)| **c != Cell::as_read(*i))
-                    .filter_map(|(i, c)| Some((pats.msg_of(i), pats.build(i, c, src)?)))
+                    .filter(|(_, c)| c.src.is_none_or(|s| pats.loaded[s as usize]))
+                    .filter_map(|(i, c)| Some((pats.msg_of(i)?, pats.build(i, c, src)?)))
                     .collect();
                 for (mi, d) in placed {
                     data[mi] = Some(d);
@@ -850,9 +873,11 @@ pub struct SavedProject {
 
 pub enum ElekCmd {
     ListProjects,
-    /// Read the project; `known` names needn't be looked up again.
+    /// Read the project; `known` names needn't be looked up again. `ctl`
+    /// steers it while it runs (which banks first, stop).
     Read {
         known: std::collections::HashSet<(u32, u32)>,
+        ctl: std::sync::Arc<ReadCtl>,
     },
     /// Which of `lens` the +Drive knows file `hash` by (asked in order),
     /// for filling pool slot `slot` (old numbering).
@@ -872,6 +897,21 @@ pub enum ElekCmd {
     },
 }
 
+/// Shared with the view while a read runs.
+#[derive(Default)]
+pub struct ReadCtl {
+    /// Banks folded out in the pattern view (bit 0 = A): read first.
+    pub open: std::sync::atomic::AtomicU8,
+    /// Stop after the pattern on its way; what arrived stays usable.
+    pub stop: std::sync::atomic::AtomicBool,
+}
+
+impl ReadCtl {
+    fn stopped(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 pub enum ElekEv {
     Projects(Result<Vec<SavedProject>, String>),
     Progress {
@@ -883,6 +923,11 @@ pub enum ElekEv {
     Partial(Box<ElekProject>),
     /// Use counts so far, as patterns arrive.
     Uses(Vec<u32>),
+    /// One more pattern for the early project, and the patterns parsed so far.
+    Pattern {
+        msg: DumpMsg,
+        pats: Result<Box<Patterns>, String>,
+    },
     Loaded(Result<Box<ElekProject>, String>),
     /// `(hash, length) → +Drive path` for pool entries.
     Names(Vec<((u32, u32), String)>),
@@ -926,7 +971,7 @@ impl Conn {
         &mut self,
         m: Model,
         last: u8,
-        on_msg: &mut dyn FnMut(usize, &DumpMsg),
+        on_msg: &mut dyn FnMut(usize, &DumpMsg) -> bool,
     ) -> R<Vec<DumpMsg>> {
         let mut out = Vec::new();
         let mut wait = FIRST_WAIT;
@@ -964,9 +1009,11 @@ impl Conn {
                 continue;
             }
             let kind = msg.kind;
-            on_msg(out.len(), &msg);
+            let more = on_msg(out.len(), &msg);
             out.push(msg);
-            if kind == last {
+            // Stopped: the device sends the rest anyway; later requests
+            // empty the input first.
+            if kind == last || !more {
                 return Ok(out);
             }
         }
@@ -974,7 +1021,7 @@ impl Conn {
 
     pub(super) fn read_project(
         &mut self,
-        on_msg: &mut dyn FnMut(usize, &DumpMsg),
+        on_msg: &mut dyn FnMut(usize, &DumpMsg) -> bool,
     ) -> R<(Model, Vec<DumpMsg>)> {
         let m = self.model()?;
         while self.rx.try_recv().is_ok() {}
@@ -999,8 +1046,28 @@ impl Conn {
     pub(super) fn read_settings_msg(&mut self, m: Model) -> R<DumpMsg> {
         while self.rx.try_recv().is_ok() {}
         self.send_sysex(&build_dump(m, REQ_SETTINGS, 0, &[]))?;
-        let msgs = self.collect_dump(m, SETTINGS, &mut |_, _| {})?;
+        let msgs = self.collect_dump(m, SETTINGS, &mut |_, _| true)?;
         msgs.into_iter().last().map_or_else(|| refused("no project settings came back"), Ok)
+    }
+
+    /// Pattern `i` (with its kit) on its own. `Ok(None)`: nothing within `wait`.
+    pub(super) fn read_pattern(&mut self, m: Model, i: u8, wait: Duration) -> R<Option<DumpMsg>> {
+        while self.rx.try_recv().is_ok() {}
+        self.send_sysex(&build_dump(m, REQ_PATTERN, i, &[]))?;
+        let until = Instant::now() + wait;
+        loop {
+            let Ok(raw) = self.rx.recv_timeout(until.saturating_duration_since(Instant::now())) else {
+                return Ok(None);
+            };
+            match parse_dump(m, &raw) {
+                Ok(Some(msg)) if msg.kind == PATTERN_KIT && msg.index == i => return Ok(Some(msg)),
+                Ok(_) => {}
+                Err(e) => {
+                    crate::log::line(format!("elek: {e}"));
+                    return refused(e);
+                }
+            }
+        }
     }
 
     fn read_settings(&mut self, m: Model) -> R<Vec<u8>> {
@@ -1098,7 +1165,7 @@ impl Worker {
                 let r = self.with_conn(|c| c.list_projects());
                 self.em.send(Ev::Elek(ElekEv::Projects(r)));
             }
-            ElekCmd::Read { known } => {
+            ElekCmd::Read { known, ctl } => {
                 let mut asked = known;
                 prog("Reading sample pool", 0, 129);
                 // The pool comes last in the dump, so ask for it on its own
@@ -1107,39 +1174,44 @@ impl Worker {
                     let m = c.model()?;
                     Ok((m, c.read_settings_msg(m)?))
                 });
-                let mut live = match early.map(|(m, s)| (m, ElekProject::partial(m, s))) {
-                    Ok((m, Ok(p))) => {
-                        let uses = vec![0u32; p.pool.len()];
+                let mut st = match early.map(|(m, s)| (m, ElekProject::partial(m, s.clone()), s)) {
+                    Ok((m, Ok(p), s)) => {
                         let keys = pool_keys(&p.pool, &asked);
+                        let uses = vec![0u32; p.pool.len()];
                         em.send(Ev::Elek(ElekEv::Partial(Box::new(p))));
-                        // Names before the dump: a quick request each, where
-                        // the dump takes half a minute.
+                        // Names before the patterns: a quick request each,
+                        // where the patterns take half a minute.
                         self.look_up_names(&keys, &mut asked, true);
-                        Some((m, Scan::default(), uses))
+                        Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses }
                     }
-                    Ok((_, Err(e))) | Err(e) => {
+                    Ok((_, Err(e), _)) | Err(e) => {
                         crate::log::line(format!("elek: early pool read skipped: {e}"));
-                        None
+                        Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new() }
                     }
                 };
-                let r = self.with_conn(|c| {
-                    c.read_project(&mut |i, msg| {
-                        if let Some((m, scan, uses)) = &mut live {
-                            let before: u32 = uses.iter().sum();
-                            scan.count(*m, i, msg, uses);
-                            if uses.iter().sum::<u32>() != before {
-                                em.send(Ev::Elek(ElekEv::Uses(uses.clone())));
-                            }
-                        }
-                        prog("Reading project", i + 1, 129.max(i + 2))
-                    })
+                let started = Instant::now();
+                let r = self.read_patterns(&mut st, &ctl);
+                let stopped = ctl.stopped();
+                // Without the early settings (or a whole dump), ask for them now.
+                let r = r.and_then(|()| {
+                    if st.settings().is_none() {
+                        let s = self.with_conn(|c| {
+                            let m = c.model()?;
+                            Ok((m, c.read_settings_msg(m)?))
+                        })?;
+                        st.m = Some(s.0);
+                        st.msgs.push(s.1);
+                    }
+                    st.finish()
                 });
-                let r = r.and_then(|(m, msgs)| ElekProject::parse(m, msgs).map(Box::new));
+                let r = r.and_then(|(m, msgs)| ElekProject::parse(m, msgs, stopped).map(Box::new));
                 match &r {
                     Ok(p) => crate::log::line(format!(
-                        "elek: parsed {}, {} references{}",
+                        "elek: parsed {}, {} references in {:.1}s{}{}",
                         p.versions,
                         p.uses.iter().sum::<u32>(),
+                        started.elapsed().as_secs_f32(),
+                        if p.partial { ", STOPPED early" } else { "" },
                         p.read_only
                             .as_ref()
                             .map(|w| format!(", READ-ONLY: {w}"))
@@ -1188,6 +1260,126 @@ impl Worker {
                 self.em.send(Ev::Elek(ElekEv::Pushed(r.map(|_| total))));
             }
         }
+    }
+}
+
+/// The patterns of a read as they arrive. With the early settings (`live`),
+/// each one goes to the view straight away, with use counts and the
+/// patterns re-parsed so far.
+struct Stream {
+    m: Option<Model>,
+    /// The early settings first when `live`, then patterns in arrival order:
+    /// the order the view's early project keeps them in.
+    msgs: Vec<DumpMsg>,
+    live: bool,
+    scan: Scan,
+    uses: Vec<u32>,
+}
+
+impl Stream {
+    fn have(&self, i: usize) -> bool {
+        self.msgs.iter().any(|m| m.kind == PATTERN_KIT && m.index as usize == i)
+    }
+
+    fn settings(&self) -> Option<&DumpMsg> {
+        self.msgs.iter().rev().find(|m| m.kind == SETTINGS)
+    }
+
+    fn add(&mut self, em: &Emitter, msg: DumpMsg) {
+        if msg.kind != PATTERN_KIT {
+            // The whole dump's own settings, at its end.
+            self.msgs.push(msg);
+            return;
+        }
+        if self.have(msg.index as usize) {
+            return;
+        }
+        let mi = self.msgs.len();
+        self.msgs.push(msg);
+        let (true, Some(m)) = (self.live, self.m) else { return };
+        let before: u32 = self.uses.iter().sum();
+        self.scan.count(m, mi, &self.msgs[mi], &mut self.uses);
+        if self.uses.iter().sum::<u32>() != before {
+            em.send(Ev::Elek(ElekEv::Uses(self.uses.clone())));
+        }
+        let pats = Patterns::parse(m, &self.msgs, false, true).map(Box::new);
+        em.send(Ev::Elek(ElekEv::Pattern { msg: self.msgs[mi].clone(), pats }));
+    }
+
+    /// Everything read, in dump order: patterns by slot, settings last.
+    fn finish(self) -> Result<(Model, Vec<DumpMsg>), String> {
+        let m = self.m.ok_or("no device model")?;
+        let settings = self.settings().cloned().ok_or("no project settings came back")?;
+        let mut msgs: Vec<DumpMsg> = self.msgs.into_iter().filter(|m| m.kind == PATTERN_KIT).collect();
+        msgs.sort_by_key(|m| m.index);
+        msgs.push(settings);
+        Ok((m, msgs))
+    }
+}
+
+/// How long the first single-pattern request may take before falling back
+/// to the whole-project dump.
+const FIRST_PATTERN_WAIT: Duration = Duration::from_secs(4);
+
+impl Worker {
+    /// The 128 patterns one at a time, banks folded out in the view first,
+    /// until done or stopped. Falls back to the whole-project dump (slot
+    /// order) if the device doesn't answer single-pattern requests.
+    fn read_patterns(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
+        let em = self.em.clone();
+        let m = match st.m {
+            Some(m) => m,
+            None => {
+                let m = self.with_conn(|c| c.model())?;
+                st.m = Some(m);
+                m
+            }
+        };
+        let prog = |done: usize| {
+            em.send(Ev::Elek(ElekEv::Progress { label: "Reading patterns".into(), done, total: patterns::PATTERNS }));
+        };
+        let mut done = 0;
+        prog(0);
+        while !ctl.stopped() {
+            let open = ctl.open.load(std::sync::atomic::Ordering::Relaxed);
+            let Some(i) = (0..patterns::PATTERNS).filter(|&i| !st.have(i)).min_by_key(|&i| (open & (1 << (i / 16)) == 0, i)) else {
+                return Ok(());
+            };
+            let wait = if done == 0 { FIRST_PATTERN_WAIT } else { GAP_WAIT };
+            let mut got = self.with_conn(|c| c.read_pattern(m, i as u8, wait))?;
+            if got.is_none() && done > 0 {
+                crate::log::line(format!("elek: pattern {} didn't arrive, asking again", patterns::label(i)));
+                got = self.with_conn(|c| c.read_pattern(m, i as u8, GAP_WAIT))?;
+            }
+            let Some(msg) = got else {
+                if done > 0 {
+                    return Err(format!("pattern {} didn't arrive", patterns::label(i)));
+                }
+                crate::log::line("elek: no answer to a single-pattern request; reading the whole project instead");
+                return self.read_whole(st, ctl);
+            };
+            st.add(&em, msg);
+            done += 1;
+            prog(done);
+            // Previews clicked meanwhile go between patterns.
+            self.serve_pending();
+        }
+        crate::log::line(format!("elek: read stopped after {done} of {} patterns", patterns::PATTERNS));
+        Ok(())
+    }
+
+    /// The whole-project dump, streamed in slot order.
+    fn read_whole(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
+        let em = self.em.clone();
+        let (m, _) = self.with_conn(|c| {
+            c.read_project(&mut |i, msg| {
+                st.add(&em, msg.clone());
+                em.send(Ev::Elek(ElekEv::Progress { label: "Reading project".into(), done: i + 1, total: 129.max(i + 2) }));
+                !ctl.stopped()
+            })
+        })?;
+        st.m = Some(m);
+        Ok(())
     }
 }
 

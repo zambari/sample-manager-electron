@@ -998,7 +998,10 @@ impl App {
     fn elek_read(&mut self) {
         self.elek.busy = Some(("Reading project".into(), 0, 129));
         let known = self.elek.names.keys().copied().collect();
-        self.device.elek(ElekCmd::Read { known });
+        let ctl = std::sync::Arc::new(crate::device::ReadCtl::default());
+        ctl.open.store(self.elek.proj.bank_mask(), std::sync::atomic::Ordering::Relaxed);
+        self.elek.reading = Some(ctl.clone());
+        self.device.elek(ElekCmd::Read { known, ctl });
     }
 
     pub(super) fn elek_event(&mut self, e: ElekEv) {
@@ -1009,6 +1012,15 @@ impl App {
                 st.set_project(p);
                 self.refresh_elek_links();
             }
+            ElekEv::Pattern { msg, pats } => {
+                if st.reading.is_none() {
+                    return;
+                }
+                if let Some(p) = st.project.as_mut().filter(|p| p.partial) {
+                    p.add_streamed(msg, pats);
+                    st.proj.refresh(p);
+                }
+            }
             ElekEv::Uses(v) => {
                 if let Some(p) = st.project.as_mut().filter(|p| p.partial && p.uses.len() == v.len()) {
                     p.uses = v;
@@ -1017,6 +1029,7 @@ impl App {
             ElekEv::Progress { label, done, total } => st.busy = Some((label, done, total)),
             ElekEv::Loaded(r) => {
                 st.busy = None;
+                let streamed = st.reading.take().is_some();
                 match r {
                     Ok(p) => {
                         let used = p.pool.iter().skip(1).filter(|e| !e.is_empty()).count();
@@ -1053,12 +1066,16 @@ impl App {
                             let Ok(pats) = &p.patterns else {
                                 return Err("patterns couldn't be parsed after the push".to_owned());
                             };
-                            let off: Vec<usize> = (0..want.len()).filter(|&i| got.get(i).is_none_or(|g| *g != &want[i][..])).collect();
-                            for &i in off.iter().take(8) {
+                            // Slots not loaded on either side (a stopped read) aren't compared.
+                            let pairs: Vec<(usize, &[u8], &[u8])> = (0..want.len())
+                                .filter_map(|i| Some((i, want[i].as_deref()?, got.get(i).copied().flatten()?)))
+                                .collect();
+                            let off: Vec<usize> = pairs.iter().filter(|(_, w, g)| w != g).map(|(i, _, _)| *i).collect();
+                            for (i, w, g) in pairs.iter().filter(|(_, w, g)| w != g).take(8) {
                                 crate::log::line(format!(
                                     "elek-pat: read back {} differs from what was sent: {}",
-                                    crate::device::patterns::label(i),
-                                    got.get(i).map_or("missing".into(), |g| pats.describe_diff(&want[i], g))
+                                    crate::device::patterns::label(*i),
+                                    pats.describe_diff(w, g)
                                 ));
                             }
                             if off.is_empty() { Ok(()) } else { Err(format!("{} pattern(s) read back different from what was sent", off.len())) }
@@ -1087,7 +1104,25 @@ impl App {
                             }
                             None => {}
                         }
-                        st.set_project(p);
+                        if p.partial {
+                            let (n, banks) = match &p.patterns {
+                                Ok(pats) => (
+                                    pats.loaded_count(),
+                                    (0..8).filter(|&b| pats.bank_loaded(b)).map(|b| ((b'A' + b as u8) as char).to_string()).collect::<Vec<_>>(),
+                                ),
+                                Err(_) => (0, Vec::new()),
+                            };
+                            st.status = if banks.is_empty() {
+                                format!("Read stopped after {n} of 128 patterns: no bank loaded completely, so nothing can be pushed. Reload to read the rest.")
+                            } else {
+                                format!("Read stopped after {n} of 128 patterns. Bank {} can be edited and pushed; reload to read the rest.", banks.join(", "))
+                            };
+                        }
+                        if streamed {
+                            st.finish_read(p);
+                        } else {
+                            st.set_project(p);
+                        }
                         self.refresh_elek_links();
                     }
                     Err(e) => {

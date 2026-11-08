@@ -230,7 +230,7 @@ impl ElekProject {
             return Err("the project is still being read".into());
         }
         let labels: HashMap<usize, String> = match &self.patterns {
-            Ok(p) => (0..patterns::PATTERNS).map(|i| (p.msg_of(i), patterns::label(i))).collect(),
+            Ok(p) => (0..patterns::PATTERNS).filter_map(|i| Some((p.msg_of(i)?, patterns::label(i)))).collect(),
             Err(_) => HashMap::new(),
         };
         let messages = self
@@ -290,7 +290,8 @@ impl ElekProject {
             .expected_patterns(order, fills, cells)
             .into_iter()
             .nth(slot)
-            .ok_or("patterns aren't available")?;
+            .flatten()
+            .ok_or("this pattern isn't loaded")?;
         let slots = self.payload_slots(&data)?;
         let pv = be32(&data, 0).unwrap_or(0);
         let f = PatternFile {

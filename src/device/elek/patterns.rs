@@ -75,6 +75,23 @@ pub struct PatternInfo {
     pub tail_at: usize,
 }
 
+impl PatternInfo {
+    /// A slot whose pattern hasn't arrived.
+    fn not_loaded() -> Self {
+        Self {
+            state: PatState::Blank,
+            name: String::new(),
+            kit_name: String::new(),
+            pattern_field: String::new(),
+            tracks: Vec::new(),
+            seq: Vec::new(),
+            diff: 0,
+            tail: Vec::new(),
+            tail_at: 0,
+        }
+    }
+}
+
 /// What's on one sequencer track, for a thumbnail.
 #[derive(Clone, Debug)]
 pub struct TrackSeq {
@@ -228,7 +245,10 @@ struct Geo {
 pub struct Patterns {
     /// Slots 0..128 as read, then patterns loaded from files (see `add`).
     pub info: Vec<PatternInfo>,
-    /// Message index of each slot's `0x50`.
+    /// Which of `info` hold a pattern that has arrived (all of them once a
+    /// read finishes; a stopped read leaves some out).
+    pub loaded: Vec<bool>,
+    /// Message index of each slot's `0x50` (`usize::MAX`: not loaded).
     msg: Vec<usize>,
     /// An empty pattern, slot byte 0. `None`: couldn't tell which one.
     blank: Option<Vec<u8>>,
@@ -301,7 +321,16 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
 }
 
 impl Patterns {
-    pub(super) fn parse(model: Model, msgs: &[DumpMsg]) -> Result<Self, String> {
+    /// The patterns in `msgs`. With `all`, every slot must be there;
+    /// without, missing slots show as not loaded yet (a read in progress or
+    /// stopped) and the checks run on the ones that are. `quiet`: no log
+    /// lines (re-parsed after every pattern while a read streams in).
+    pub(super) fn parse(model: Model, msgs: &[DumpMsg], all: bool, quiet: bool) -> Result<Self, String> {
+        let log = |s: String| {
+            if !quiet {
+                log(s)
+            }
+        };
         let mut msg = vec![usize::MAX; PATTERNS];
         for (mi, m) in msgs.iter().enumerate().filter(|(_, m)| m.kind == PATTERN_KIT) {
             let i = m.index as usize;
@@ -311,21 +340,26 @@ impl Patterns {
             }
             msg[i] = mi;
         }
-        if let Some(i) = msg.iter().position(|&m| m == usize::MAX) {
+        if let Some(i) = msg.iter().position(|&m| m == usize::MAX).filter(|_| all) {
             log(format!("no pattern message for slot {}", label(i)));
             return Err(format!("no pattern for {}", label(i)));
         }
+        let loaded: Vec<bool> = msg.iter().map(|&m| m != usize::MAX).collect();
+        let have: Vec<usize> = (0..PATTERNS).filter(|&i| loaded[i]).collect();
+        let Some(&f) = have.first() else {
+            return Err("no patterns loaded".into());
+        };
         let data = |i: usize| &msgs[msg[i]].data;
 
         // Every pattern should share one struct version and length, or a
         // pattern moved to another slot might not fit there.
-        let pv = be32(data(0), 0).ok_or("pattern A01 too short")?;
-        let len = data(0).len();
+        let pv = be32(data(f), 0).ok_or_else(|| format!("pattern {} too short", label(f)))?;
+        let len = data(f).len();
         let mut problems: Vec<String> = Vec::new();
-        for i in 1..PATTERNS {
+        for &i in &have[1..] {
             let (v, l) = (be32(data(i), 0), data(i).len());
             if v != Some(pv) || l != len {
-                log(format!("{}: version {v:?} length {l}, A01 has v{pv} length {len}", label(i)));
+                log(format!("{}: version {v:?} length {l}, {} has v{pv} length {len}", label(i), label(f)));
                 problems.push("patterns differ in version or length".into());
                 break;
             }
@@ -337,8 +371,8 @@ impl Patterns {
         })?;
         let kit = pattern_sizeof(model, pv).ok_or(format!("unknown pattern version v{pv}"))?;
         // DT2 kits start with the beefbace magic, then the version and name.
-        let kv_at = if model == DT2 && be32(data(0), kit) == Some(MAGIC) { kit + 4 } else { kit };
-        let kv = be32(data(0), kv_at).unwrap_or(u32::MAX);
+        let kv_at = if model == DT2 && be32(data(f), kit) == Some(MAGIC) { kit + 4 } else { kit };
+        let kv = be32(data(f), kv_at).unwrap_or(u32::MAX);
         let kit_name_at = kv_at + 4;
         let pattern_name_at = pattern_plocks(model, pv).unwrap_or(0) + PLOCK_ROWS * (2 + model.steps() * 2);
         let sounds = kit_sounds(model, kv);
@@ -352,14 +386,15 @@ impl Patterns {
 
         // The slot byte either holds each pattern's own slot (seen on an older
         // DT1 project) or the same value in every pattern (0 on a fresh one).
-        let off: Vec<String> = (0..PATTERNS)
-            .filter(|&i| data(i)[slot_at] as usize != i)
-            .map(|i| format!("{}={}", label(i), data(i)[slot_at]))
+        let off: Vec<String> = have
+            .iter()
+            .filter(|&&i| data(i)[slot_at] as usize != i)
+            .map(|&i| format!("{}={}", label(i), data(i)[slot_at]))
             .collect();
-        let first = data(0)[slot_at];
+        let first = data(f)[slot_at];
         let slot_value = if off.is_empty() {
             None
-        } else if (0..PATTERNS).all(|i| data(i)[slot_at] == first) {
+        } else if have.iter().all(|&i| data(i)[slot_at] == first) {
             log(format!("slot byte at {slot_at} is {first} in every pattern: keeping it at {first} on moves"));
             Some(first)
         } else {
@@ -379,23 +414,32 @@ impl Patterns {
             d
         };
         let mut counts: HashMap<Vec<u8>, usize> = HashMap::new();
-        for i in 0..PATTERNS {
+        for &i in &have {
             *counts.entry(norm(i)).or_default() += 1;
         }
         let (blank, n_blank) = counts.into_iter().max_by_key(|(_, n)| *n).unwrap_or_default();
         let blank = if n_blank >= 2 && text_at(&blank, kit_name_at).is_empty() {
-            log(format!("empty pattern template: {n_blank} of {PATTERNS} slots identical apart from the slot byte"));
+            log(format!("empty pattern template: {n_blank} of {} slots identical apart from the slot byte", have.len()));
             Some(blank)
         } else {
-            // Show where two likely-empty patterns differ, to find the next
-            // per-slot field.
-            let (a, b) = (data(PATTERNS - 2), data(PATTERNS - 1));
-            let diffs: Vec<String> = a.iter().zip(b).enumerate().filter(|(_, (x, y))| x != y).take(16).map(|(o, (x, y))| format!("{o}:{x:02x}/{y:02x}")).collect();
-            log(format!(
-                "no empty-pattern template (largest identical group {n_blank}); G15 vs H16 differ at {}",
-                diffs.join(" ")
-            ));
-            problems.push("couldn't find an empty pattern to clear slots with".into());
+            if have.len() >= 2 {
+                // Show where two likely-empty patterns differ, to find the
+                // next per-slot field.
+                let (ia, ib) = (have[have.len() - 2], have[have.len() - 1]);
+                let (a, b) = (data(ia), data(ib));
+                let diffs: Vec<String> = a.iter().zip(b).enumerate().filter(|(_, (x, y))| x != y).take(16).map(|(o, (x, y))| format!("{o}:{x:02x}/{y:02x}")).collect();
+                log(format!(
+                    "no empty-pattern template (largest identical group {n_blank}); {} vs {} differ at {}",
+                    label(ia),
+                    label(ib),
+                    diffs.join(" ")
+                ));
+            }
+            // With only some banks loaded there may just not be two empty
+            // ones yet: clearing is off then (`can_clear`), editing isn't.
+            if all {
+                problems.push("couldn't find an empty pattern to clear slots with".into());
+            }
             None
         };
 
@@ -406,6 +450,9 @@ impl Patterns {
         let mut bad_sound = Vec::new();
         let info = (0..PATTERNS)
             .map(|i| {
+                if !loaded[i] {
+                    return PatternInfo::not_loaded();
+                }
                 let d = norm(i);
                 let diff = blank.as_ref().map_or(usize::MAX, |b| d.iter().zip(b).filter(|(x, y)| x != y).count());
                 let state = match diff {
@@ -426,7 +473,7 @@ impl Patterns {
                             bad_sound.push(format!("{} t{}", label(i), t + 1));
                         }
                     }
-                } else if i == 0 {
+                } else if i == f {
                     log(format!("no track sound layout for kit v{kv}"));
                 }
                 make_info(&geo, kit_name_at, pattern_name_at, state, diff, &d)
@@ -448,9 +495,12 @@ impl Patterns {
         }
         let used = info.iter().filter(|p| p.state == PatState::Used).count();
         let ph = info.iter().filter(|p| p.state == PatState::Phantom).count();
-        log(format!("pattern v{pv} kit v{kv}: {used} used, {ph} nearly empty, slot byte {slot_at}, kit name {kit_name_at}"));
+        log(format!(
+            "pattern v{pv} kit v{kv}: {} of {PATTERNS} loaded, {used} used, {ph} nearly empty, slot byte {slot_at}, kit name {kit_name_at}",
+            have.len()
+        ));
         for (i, p) in info.iter().enumerate().filter(|(_, p)| p.state == PatState::Phantom) {
-            if let Some(b) = &blank {
+            if let Some(b) = blank.as_ref().filter(|_| !quiet) {
                 let d = norm(i);
                 let at: Vec<String> = d.iter().zip(b).enumerate().filter(|(_, (x, y))| x != y).map(|(o, _)| format!("kit+{}", o as isize - kit as isize)).collect();
                 log(format!("{} nearly empty ({} bytes): {}", label(i), p.diff, at.join(" ")));
@@ -460,6 +510,7 @@ impl Patterns {
         problems.dedup();
         Ok(Self {
             info,
+            loaded,
             msg,
             blank,
             slot_at,
@@ -497,16 +548,28 @@ impl Patterns {
         };
         let info = make_info(&self.geo, self.kit_name_at, self.pattern_name_at, state, diff, &n);
         self.info.push(info);
+        self.loaded.push(true);
         self.msg.push(mi);
         Ok(idx)
+    }
+
+    /// Every pattern of bank `b` (0 = A) has arrived.
+    pub fn bank_loaded(&self, b: usize) -> bool {
+        self.loaded[b * 16..(b + 1) * 16].iter().all(|&l| l)
+    }
+
+    /// Patterns of the project's own 128 that have arrived.
+    pub fn loaded_count(&self) -> usize {
+        self.loaded[..PATTERNS].iter().filter(|&&l| l).count()
     }
 
     pub fn can_clear(&self) -> bool {
         self.blank.is_some()
     }
 
-    pub(super) fn msg_of(&self, slot: usize) -> usize {
-        self.msg[slot]
+    /// Message index of slot `slot`'s pattern, if it has arrived.
+    pub(super) fn msg_of(&self, slot: usize) -> Option<usize> {
+        self.loaded[slot].then(|| self.msg[slot])
     }
 
     /// The payload for slot `i` holding `cell`, from `src_data(slot as read)`
