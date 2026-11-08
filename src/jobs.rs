@@ -159,9 +159,9 @@ impl Jobs {
             .spawn(move || f(em));
     }
 
-    pub fn list(&self, path: PathBuf, generation: u64, show_hidden: bool) {
+    pub fn list(&self, path: PathBuf, generation: u64) {
         self.spawn("list", move |em| {
-            let result = fs_model::list_dir(&path, show_hidden).map_err(|e| e.to_string());
+            let result = fs_model::list_dir(&path).map_err(|e| e.to_string());
             em.send(Ev::Listed {
                 device: false,
                 generation,

@@ -1,21 +1,31 @@
 //! The Elk Project Editor (experimental, Digitakt 1 only): the loaded
-//! project's 128 patterns as an 8 × 16 grid. Move, copy, clear and rename
+//! project's 128 patterns as one long list, filtered by bank. Each row folds
+//! out into a dot view of its tracks' steps. Move, copy, clear and rename
 //! whole patterns; the result goes to the device with the same push as the
 //! sample order, so both pages edit one loaded project.
 
-use crate::device::patterns::{self, Patterns, NAME_MAX, PATTERNS};
+use crate::device::patterns::{self, Patterns, Step, TrackSeq, NAME_MAX, PATTERNS};
 use crate::device::{Cell, ElkProject, PatState};
 use crate::ui::elk_view::{self, ElkIntent, ElkState};
 use crate::ui::theme::{self, oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
-use egui::{Color32, RichText, Sense, Stroke};
+use egui::{Color32, Rect, RichText, Sense, Stroke};
 use std::collections::BTreeSet;
 
 const BANKS: usize = 8;
 const PER_BANK: usize = 16;
-const CELL_H: f32 = 46.0;
-const INSPECTOR_W: f32 = 300.0;
+const ROW_H: f32 = 26.0;
+const TRACK_H: f32 = 15.0;
+const BANK_H: f32 = 20.0;
+/// Where the name column starts, and its width.
+const NAME_X: f32 = 84.0;
+const NAME_W: f32 = 170.0;
+/// Where the step dots start, in folded-out rows.
+const DOTS_X: f32 = 370.0;
 const WARN: Color32 = Color32::from_rgb(230, 120, 90);
 const SEL_FILL: Color32 = Color32::from_rgb(70, 38, 14);
+const ROW_FILL: Color32 = Color32::from_rgb(18, 21, 21);
+const DOT_OFF: Color32 = Color32::from_rgb(38, 45, 44);
+const DOT_BEAT: Color32 = Color32::from_rgb(62, 72, 70);
 
 #[derive(Default)]
 pub struct ProjEd {
@@ -26,17 +36,33 @@ pub struct ProjEd {
     sel: BTreeSet<usize>,
     cursor: Option<usize>,
     clip: Vec<Cell>,
-    /// Cell a drag started on.
+    /// Row a drag started on.
     drag: Option<usize>,
-    /// Name typed for the selected slot(s), and the selection it was filled for.
+    /// Name typed for several selected slots, and the selection it was filled for.
     name_edit: String,
     name_for: Vec<usize>,
     focus_name: bool,
+    /// Row being renamed in place, its text, and whether to focus it.
+    inline: Option<usize>,
+    inline_text: String,
+    inline_focus: bool,
+    /// Folded-out banks (the app remembers them).
+    pub banks: [bool; BANKS],
+    /// Hide empty slots.
+    used_only: bool,
+    /// Folded-out rows.
+    open: BTreeSet<usize>,
+    /// Each row's rect last frame, and the list's visible area, to find the
+    /// row under a drag.
+    rows: Vec<(usize, Rect)>,
+    list_rect: Option<Rect>,
+    scroll_to: Option<usize>,
 }
 
 impl ProjEd {
     pub fn reset(&mut self, p: &ElkProject) {
-        *self = Self::default();
+        let (used_only, banks) = (self.used_only, self.banks);
+        *self = Self { used_only, banks, ..Self::default() };
         if p.patterns.is_ok() {
             self.cells = (0..PATTERNS).map(Cell::as_read).collect();
         }
@@ -75,6 +101,26 @@ impl ProjEd {
         self.sel.insert(i);
         self.cursor = Some(i);
     }
+
+    fn start_inline(&mut self, p: &Patterns, i: usize) {
+        self.select_only(i);
+        self.inline = Some(i);
+        self.inline_text = view(p, &self.cells[i]).1;
+        self.inline_focus = true;
+    }
+
+    /// Rows shown, in slot order.
+    fn visible(&self, p: &Patterns) -> Vec<usize> {
+        (0..self.cells.len())
+            .filter(|&i| self.banks[i / PER_BANK])
+            .filter(|&i| {
+                !self.used_only || {
+                    let c = &self.cells[i];
+                    view(p, c).0 != PatState::Blank || c.name.is_some() || *c != Cell::as_read(i) || self.sel.contains(&i)
+                }
+            })
+            .collect()
+    }
 }
 
 /// What a slot shows: its state and name, with edits applied.
@@ -82,13 +128,13 @@ fn view(p: &Patterns, c: &Cell) -> (PatState, String) {
     match c.src {
         Some(s) => {
             let info = &p.info[s as usize];
-            (info.state, c.name.clone().unwrap_or_else(|| info.kit_name.clone()))
+            (info.state, c.name.clone().unwrap_or_else(|| info.name.clone()))
         }
         None => (PatState::Blank, c.name.clone().unwrap_or_default()),
     }
 }
 
-/// Move (swap) or copy the selection so the grabbed cell `from` lands on `to`.
+/// Move (swap) or copy the selection so the grabbed row `from` lands on `to`.
 fn drop_sel(ed: &mut ProjEd, from: usize, to: usize, copy: bool) -> Result<String, String> {
     let src: Vec<usize> = ed.sel.iter().copied().collect();
     let off = to as isize - from as isize;
@@ -113,6 +159,15 @@ fn drop_sel(ed: &mut ProjEd, from: usize, to: usize, copy: bool) -> Result<Strin
             }
         }
     });
+    // Fold state follows the patterns.
+    let was: BTreeSet<usize> = ed.open.clone();
+    for (s, d) in src.iter().zip(&dst) {
+        if was.contains(s) {
+            ed.open.insert(*d);
+        } else {
+            ed.open.remove(d);
+        }
+    }
     ed.sel = dst.iter().copied().collect();
     ed.cursor = Some(to);
     let n = src.len();
@@ -173,29 +228,27 @@ fn pack(ed: &mut ProjEd, p: &Patterns) -> String {
             }
         }
     });
-    let names: Vec<String> = banks.iter().map(|b| ((b'A' + *b as u8) as char).to_string()).collect();
+    let names: Vec<String> = banks.iter().map(|b| bank_letter(*b).to_string()).collect();
     format!("Packed bank {}", names.join(", "))
 }
 
-/// Apply a name (single slot) or a template (several): `{n}` counts from 1,
-/// `{slot}` is A01…, `{name}` the current name.
-fn rename(ed: &mut ProjEd, p: &Patterns, text: &str) -> String {
-    let t = ed.targets();
+/// Apply a name to `t`: as typed for one slot; for several, a template
+/// where `{n}` counts from 1, `{slot}` is A01…, `{name}` the current name.
+fn rename(ed: &mut ProjEd, p: &Patterns, t: &[usize], text: &str) -> String {
     if t.is_empty() {
         return String::new();
     }
-    let template = t.len() > 1 && text.contains('{');
     let mut empty = 0;
     ed.edit(|cells| {
         for (k, &i) in t.iter().enumerate() {
             let cur = view(p, &cells[i]).1;
-            let raw = if template || t.len() > 1 {
+            let raw = if t.len() > 1 {
                 text.replace("{n}", &(k + 1).to_string()).replace("{slot}", &patterns::label(i)).replace("{name}", &cur)
             } else {
                 text.to_owned()
             };
             let name = patterns::clean_name(&raw);
-            let read = cells[i].src.map(|s| p.info[s as usize].kit_name.clone()).unwrap_or_default();
+            let read = cells[i].src.map(|s| p.info[s as usize].name.clone()).unwrap_or_default();
             if cells[i].src.is_none() {
                 empty += 1;
             }
@@ -209,17 +262,14 @@ fn rename(ed: &mut ProjEd, p: &Patterns, text: &str) -> String {
     s
 }
 
+fn bank_letter(b: usize) -> char {
+    (b'A' + b as u8) as char
+}
+
 pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     let mut out = Vec::new();
-    ui.horizontal(|ui| elk_view::mode_header(ui, st, &mut out));
-    if st.project.is_none() {
-        elk_view::load_screen(ui, st, &mut out);
-        elk_view::finish(ui, st, &mut out);
-        return out;
-    }
-    let busy = st.busy.is_some();
-    ui.horizontal_wrapped(|ui| {
-        elk_view::session_tools(ui, st, &mut out, true);
+    elk_view::top(ui, st, &mut out, |ui, st| {
+        let busy = st.busy.is_some();
         let ed = &mut st.proj;
         if ui.add_enabled(!busy && !ed.undo.is_empty(), egui::Button::new("↶ Undo")).on_hover_text("Undo the last pattern edit (⌘Z)").clicked() {
             ed.undo();
@@ -228,8 +278,13 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
         if ui.add_enabled(!busy && changed > 0, egui::Button::new("↺ Reset")).on_hover_text("Back to the patterns as read from the device").clicked() {
             ed.edit(|c| *c = (0..PATTERNS).map(Cell::as_read).collect());
         }
-        elk_view::status_line(ui, st, true);
     });
+    if st.project.is_none() {
+        elk_view::load_screen(ui, st, &mut out);
+        elk_view::finish(ui, st, &mut out);
+        return out;
+    }
+    let busy = st.busy.is_some();
 
     let msg = match st.project.as_ref().map(|p| &p.patterns) {
         Some(Err(e)) if st.project.as_ref().is_some_and(|p| p.partial) => Some(format!("Patterns: {e}…")),
@@ -242,27 +297,21 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
         elk_view::finish(ui, st, &mut out);
         return out;
     }
-    if let Some(why) = st.project.as_ref().and_then(|p| p.patterns.as_ref().ok()).and_then(|p| p.read_only.clone()) {
+    let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else {
+        elk_view::finish(ui, st, &mut out);
+        return out;
+    };
+    if let Some(why) = &p.read_only {
         ui.colored_label(WARN, format!("Read-only: {why}. Details in the log (lines starting elk-pat:)."));
     }
     keys(ui.ctx(), st);
+    action_bar(ui, st, busy);
     ui.label(
-        RichText::new("Experimental · Click / ⇧click / ⌘click to select · drag to move (swaps with what's there) · ⌥ while dropping copies · ⌘C / ⌘V · ⌫ clears · ⏎ renames · arrows move")
+        RichText::new("Click / ⇧click / ⌘click to select · drag to move (swaps with what's there) · ⌥ while dropping copies · ⌘C / ⌘V · ⌫ clears · ⏎ or double-click renames · ←/→ fold · Digitakt 1 patterns have no name of their own: the name is the kit's")
             .weak()
             .small(),
     );
-
-    let avail = ui.available_size();
-    let grid_w = (avail.x - INSPECTOR_W - 12.0).max(400.0);
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(egui::vec2(grid_w, avail.y), egui::Layout::top_down(egui::Align::Min), |ui| {
-            grid(ui, st, busy);
-        });
-        ui.separator();
-        ui.allocate_ui_with_layout(egui::vec2(INSPECTOR_W, avail.y), egui::Layout::top_down(egui::Align::Min), |ui| {
-            egui::ScrollArea::vertical().id_salt("proj_inspector").auto_shrink([false, false]).show(ui, |ui| inspector(ui, st, busy));
-        });
-    });
+    list(ui, st, busy);
     elk_view::finish(ui, st, &mut out);
     out
 }
@@ -295,11 +344,12 @@ fn keys(ctx: &egui::Context, st: &mut ElkState) {
         )
     });
     let mut status = None;
+    let vis = ed.visible(p);
     if m.command && z {
         ed.undo();
     }
     if m.command && a {
-        ed.sel = (0..PATTERNS).collect();
+        ed.sel = vis.iter().copied().collect();
     }
     if esc {
         ed.sel.clear();
@@ -313,13 +363,27 @@ fn keys(ctx: &egui::Context, st: &mut ElkState) {
     if ev_paste || (m.command && v) {
         status = Some(paste(ed));
     }
-    if enter && !ed.targets().is_empty() {
-        ed.focus_name = true;
+    if enter {
+        match ed.targets().as_slice() {
+            [i] => ed.start_inline(p, *i),
+            [] => {}
+            _ => ed.focus_name = true,
+        }
     }
-    let step: isize = if l { -1 } else if r { 1 } else if u { -(PER_BANK as isize) } else if d { PER_BANK as isize } else { 0 };
-    if step != 0 && !m.command {
-        let cur = ed.cursor.unwrap_or(0) as isize;
-        let next = (cur + step).clamp(0, PATTERNS as isize - 1) as usize;
+    if l || r {
+        for i in ed.targets() {
+            if r {
+                ed.open.insert(i);
+            } else {
+                ed.open.remove(&i);
+            }
+        }
+    }
+    let step: isize = if u { -1 } else if d { 1 } else { 0 };
+    if step != 0 && !m.command && !vis.is_empty() {
+        let pos = ed.cursor.and_then(|c| vis.iter().position(|&v| v >= c)).unwrap_or(0) as isize;
+        let pos = if ed.cursor.is_some() { pos + step } else { 0 };
+        let next = vis[pos.clamp(0, vis.len() as isize - 1) as usize];
         if m.shift {
             let anchor = ed.cursor.unwrap_or(next);
             ed.sel.insert(anchor);
@@ -328,41 +392,123 @@ fn keys(ctx: &egui::Context, st: &mut ElkState) {
         } else {
             ed.select_only(next);
         }
+        ed.scroll_to = Some(next);
     }
     if let Some(s) = status {
         st.status = s;
     }
 }
 
-fn grid(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
+/// View options, beside the Samples / Patterns tabs.
+pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElkState) {
+    let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else { return };
+    let ed = &mut st.proj;
+    ui.toggle_value(&mut ed.used_only, "Hide empty").on_hover_text("Hide empty slots (selected and changed ones stay)");
+    if ui.small_button("Open all banks").clicked() {
+        ed.banks = [true; BANKS];
+    }
+    if ui.small_button("Fold all banks").clicked() {
+        ed.banks = [false; BANKS];
+    }
+    if ui.small_button("Show steps").on_hover_text("Fold out every pattern in the open banks").clicked() {
+        let vis = ed.visible(p);
+        ed.open.extend(vis);
+    }
+    if ui.small_button("Hide steps").clicked() {
+        ed.open.clear();
+    }
+}
+
+/// What to do with the selection: copy / paste / clear / pack / rename.
+fn action_bar(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
     let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else { return };
     let editable = p.read_only.is_none() && !busy;
     let ed = &mut st.proj;
-    let label_w = 22.0;
-    let w = ui.available_width();
-    let cell_w = ((w - label_w) / PER_BANK as f32).floor();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 16.0 + BANKS as f32 * CELL_H), Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, OLED_BG);
-    for c in 0..PER_BANK {
-        let x = rect.left() + label_w + (c as f32 + 0.5) * cell_w;
-        painter.text(egui::pos2(x, rect.top() + 8.0), egui::Align2::CENTER_CENTER, format!("{}", c + 1), oled_font(11.0), OLED_DIM);
+    let t = ed.targets();
+    // Refill the template field when the selection changes.
+    if ed.name_for != t {
+        ed.name_for = t.clone();
+        ed.name_edit = if t.len() > 1 { "{name}".into() } else { String::new() };
     }
-    let cell_rect = |i: usize| {
-        let (b, c) = (i / PER_BANK, i % PER_BANK);
-        egui::Rect::from_min_size(
-            egui::pos2(rect.left() + label_w + c as f32 * cell_w, rect.top() + 16.0 + b as f32 * CELL_H),
-            egui::vec2(cell_w, CELL_H),
-        )
-        .shrink(1.5)
-    };
-    for b in 0..BANKS {
-        let y = rect.top() + 16.0 + (b as f32 + 0.5) * CELL_H;
-        painter.text(egui::pos2(rect.left() + label_w / 2.0, y), egui::Align2::CENTER_CENTER, ((b'A' + b as u8) as char).to_string(), oled_font(14.0), OLED_DIM);
+    let mut status = None;
+    ui.horizontal_wrapped(|ui| {
+        let what = match t.as_slice() {
+            [] => "Nothing selected".to_owned(),
+            [i] => format!("{} selected", patterns::label(*i)),
+            _ => format!("{} selected", t.len()),
+        };
+        ui.label(RichText::new(what).strong());
+        let any = !t.is_empty();
+        if ui.add_enabled(any, egui::Button::new("Copy")).clicked() {
+            status = Some(copy(ed));
+        }
+        if ui.add_enabled(editable && !ed.clip.is_empty(), egui::Button::new(format!("Paste ({})", ed.clip.len()))).clicked() {
+            status = Some(paste(ed));
+        }
+        if ui.add_enabled(editable && any && p.can_clear(), egui::Button::new("Clear")).clicked() {
+            status = Some(clear(ed, p));
+        }
+        if ui.add_enabled(editable && any, egui::Button::new("Pack bank")).on_hover_text("Move the used patterns of the selected bank(s) to the front, in order").clicked() {
+            status = Some(pack(ed, p));
+        }
+        match t.as_slice() {
+            [i] => {
+                if ui.add_enabled(editable, egui::Button::new("Rename ⏎")).on_hover_text(format!("Rename the kit (up to {NAME_MAX} characters, upper case)")).clicked() {
+                    ed.start_inline(p, *i);
+                }
+            }
+            [] => {}
+            _ => {
+                ui.separator();
+                ui.label("Rename all");
+                let preview: Vec<String> = t
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(k, &i)| patterns::clean_name(&ed.name_edit.replace("{n}", &(k + 1).to_string()).replace("{slot}", &patterns::label(i)).replace("{name}", &view(p, &ed.cells[i]).1)))
+                    .collect();
+                let te = egui::TextEdit::singleline(&mut ed.name_edit).char_limit(64).font(oled_font(13.0)).desired_width(140.0);
+                let r = ui
+                    .add_enabled(editable, te)
+                    .on_hover_text(format!("{{n}} = 1, 2, 3…   {{slot}} = A01…   {{name}} = current name\n→ {}{}", preview.join(", "), if t.len() > 3 { ", …" } else { "" }));
+                if ed.focus_name {
+                    ed.focus_name = false;
+                    r.request_focus();
+                }
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.add_enabled(editable, egui::Button::new("Apply")).clicked() || (enter && editable) {
+                    let text = ed.name_edit.clone();
+                    status = Some(rename(ed, p, &t, &text));
+                    ed.name_for.clear();
+                }
+            }
+        }
+    });
+    if let Some(s) = status {
+        st.status = s;
     }
+}
+
+/// Tracks a folded-out row shows: the audio tracks, then MIDI tracks that
+/// have something on them. `(label, index into seq)`.
+fn shown_tracks(seq: &[TrackSeq], audio: usize) -> Vec<(String, usize)> {
+    let mut v: Vec<(String, usize)> = (0..audio.min(seq.len())).map(|t| (format!("TRACK {}", t + 1), t)).collect();
+    v.extend((audio..seq.len()).filter(|&t| !seq[t].is_empty()).map(|t| (format!("MIDI {}", t - audio + 1), t)));
+    v
+}
+
+fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
+    let Some(proj) = st.project.as_ref() else { return };
+    let Ok(p) = proj.patterns.as_deref() else { return };
+    let editable = p.read_only.is_none() && !busy;
+    let audio = p.info.first().map_or(8, |i| i.tracks.len().max(8));
+    let ed = &mut st.proj;
+    let names = &st.names;
+    let vis = ed.visible(p);
 
     let pointer = ui.input(|i| i.pointer.interact_pos());
-    let under = pointer.and_then(|pt| (0..PATTERNS).find(|&i| cell_rect(i).contains(pt)));
+    let in_list = |pt: egui::Pos2| ed.list_rect.is_some_and(|r| r.contains(pt));
+    let under = pointer.filter(|pt| in_list(*pt)).and_then(|pt| ed.rows.iter().find(|(_, r)| r.contains(pt)).map(|(i, _)| *i));
     let mods = ui.input(|i| i.modifiers);
     // Where a drag would put the selection.
     let landing: BTreeSet<usize> = match (ed.drag, under) {
@@ -372,119 +518,301 @@ fn grid(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
         }
         _ => BTreeSet::new(),
     };
-    let mut status = None;
     let mut src_count = [0usize; PATTERNS];
     for c in &ed.cells {
         if let Some(s) = c.src {
             src_count[s as usize] += 1;
         }
     }
+    // Pool slot → short file name, for the track lines.
+    let sample_name = |slot: usize| -> String {
+        if slot == 0 {
+            return "—".into();
+        }
+        proj
+            .pool
+            .get(slot)
+            .filter(|e| !e.is_empty())
+            .and_then(|e| names.get(&e.key()))
+            .map(|n| {
+                let f = n.rsplit('/').next().unwrap_or(n);
+                f.rsplit_once('.').map_or(f, |(stem, _)| stem).to_owned()
+            })
+            .unwrap_or_else(|| "?".into())
+    };
 
-    for i in 0..PATTERNS {
-        let r = cell_rect(i);
-        let resp = ui.interact(r, ui.scope_id().with(("pcell", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
-        let cell = &ed.cells[i];
-        let (state, name) = view(p, cell);
-        let selected = ed.sel.contains(&i);
-        let fill = if selected {
-            SEL_FILL
-        } else if resp.hovered() {
-            OLED_HOVER
-        } else {
-            Color32::from_rgb(18, 21, 21)
-        };
-        painter.rect_filled(r, 2.0, fill);
-        let changed = *cell != Cell::as_read(i);
-        let border = if landing.contains(&i) {
-            Stroke::new(2.0, theme::ACCENT_BRIGHT)
-        } else if ed.cursor == Some(i) {
-            Stroke::new(1.0, OLED_DIM)
-        } else if changed {
-            Stroke::new(1.0, theme::ACCENT)
-        } else {
-            Stroke::new(1.0, Color32::from_rgb(34, 40, 40))
-        };
-        painter.rect_stroke(r, 2.0, border, egui::StrokeKind::Inside);
-        let p2 = painter.with_clip_rect(r);
-        p2.text(r.left_top() + egui::vec2(4.0, 3.0), egui::Align2::LEFT_TOP, patterns::label(i), oled_font(10.0), OLED_DIM);
-        // Where it came from, when it's not what was read here.
-        let badge = match cell.src {
-            None if changed => Some("∅".to_owned()),
-            Some(s) if s as usize != i => Some(format!("{}{}", if src_count[s as usize] > 1 { "⧉" } else { "←" }, patterns::label(s as usize))),
-            _ => None,
-        };
-        if let Some(b) = badge {
-            p2.text(r.right_top() + egui::vec2(-4.0, 3.0), egui::Align2::RIGHT_TOP, b, oled_font(10.0), theme::ACCENT_BRIGHT);
-        }
-        let (text, color) = match state {
-            PatState::Used if name.is_empty() => ("(no name)".to_owned(), OLED),
-            PatState::Used => (name.clone(), OLED),
-            PatState::Phantom => (if name.is_empty() { "≈".to_owned() } else { name.clone() }, OLED_DIM),
-            PatState::Blank => (if name.is_empty() { "—".to_owned() } else { name.clone() }, Color32::from_rgb(70, 80, 78)),
-        };
-        let italic = state == PatState::Used && name.is_empty();
-        p2.text(
-            r.left_bottom() + egui::vec2(4.0, -5.0),
-            egui::Align2::LEFT_BOTTOM,
-            text,
-            oled_font(if italic { 11.0 } else { 13.0 }),
-            if italic { OLED_DIM } else { color },
-        );
-        if cell.name.is_some() {
-            p2.text(r.right_bottom() + egui::vec2(-3.0, -4.0), egui::Align2::RIGHT_BOTTOM, "✎", oled_font(10.0), theme::ACCENT_BRIGHT);
-        }
+    let mut status = None;
+    let mut rows = Vec::new();
+    let mut toggles = Vec::new();
+    let mut bank_toggles = Vec::new();
+    let mut inline_done: Option<(usize, Option<String>)> = None;
 
-        if resp.drag_started() {
-            if !ed.sel.contains(&i) {
-                ed.select_only(i);
-            }
-            ed.drag = Some(i);
-        }
-        if resp.double_clicked() {
-            ed.select_only(i);
-            ed.focus_name = true;
-        } else if resp.clicked() {
-            if mods.shift {
-                let a = ed.cursor.unwrap_or(i);
-                let (lo, hi) = (a.min(i), a.max(i));
-                ed.sel.extend(lo..=hi);
-                ed.cursor = Some(i);
-            } else if mods.command {
-                if !ed.sel.remove(&i) {
-                    ed.sel.insert(i);
+    let frame = egui::Frame::new().fill(OLED_BG).corner_radius(2.0).inner_margin(4.0);
+    frame.show(ui, |ui| {
+        ui.set_min_size(ui.available_size());
+        let sa = egui::ScrollArea::vertical().id_salt("proj_list").auto_shrink([false, false]).show(ui, |ui| {
+            let clip = ui.clip_rect();
+            // Scroll while dragging near the top or bottom edge.
+            if ed.drag.is_some() {
+                if let Some(pt) = pointer {
+                    let edge = 36.0;
+                    let dy = if pt.y < clip.top() + edge { 10.0 } else if pt.y > clip.bottom() - edge { -10.0 } else { 0.0 };
+                    if dy != 0.0 {
+                        ui.scroll_with_delta(egui::vec2(0.0, dy));
+                        ui.ctx().request_repaint();
+                    }
                 }
-                ed.cursor = Some(i);
-            } else {
-                ed.select_only(i);
             }
-        }
-        resp.context_menu(|ui| {
-            if !ed.sel.contains(&i) {
-                ed.select_only(i);
-            }
-            if ui.button("Rename…  ⏎").clicked() {
-                ed.focus_name = true;
-                ui.close();
-            }
-            if ui.button("Copy  ⌘C").clicked() {
-                status = Some(copy(ed));
-                ui.close();
-            }
-            if ui.add_enabled(editable && !ed.clip.is_empty(), egui::Button::new("Paste here  ⌘V")).clicked() {
-                status = Some(paste(ed));
-                ui.close();
-            }
-            if ui.add_enabled(editable && p.can_clear(), egui::Button::new("Clear  ⌫")).clicked() {
-                status = Some(clear(ed, p));
-                ui.close();
-            }
-            if ui.add_enabled(editable, egui::Button::new("Pack bank (used patterns first)")).clicked() {
-                status = Some(pack(ed, p));
-                ui.close();
+            let w = ui.available_width();
+            for b in 0..BANKS {
+                // The bank header folds its patterns in and out; dragging
+                // over a folded one opens it.
+                let (r, hdr) = ui.allocate_exact_size(egui::vec2(w, BANK_H), Sense::click());
+                let bank_open = ed.banks[b];
+                let used = (b * PER_BANK..(b + 1) * PER_BANK).filter(|&k| view(p, &ed.cells[k]).0 == PatState::Used).count();
+                let changed = (b * PER_BANK..(b + 1) * PER_BANK).filter(|&k| ed.cells[k] != Cell::as_read(k)).count();
+                if hdr.hovered() {
+                    ui.painter().rect_filled(r, 2.0, OLED_HOVER);
+                }
+                let col = if hdr.hovered() || bank_open { OLED } else { OLED_DIM };
+                triangle(ui.painter(), egui::pos2(r.left() + 14.0, r.center().y), bank_open, col);
+                ui.painter().text(egui::pos2(r.left() + 26.0, r.center().y), egui::Align2::LEFT_CENTER, format!("BANK {}", bank_letter(b)), oled_font(13.0), col);
+                let mut note = format!("{used} in use");
+                if changed > 0 {
+                    note.push_str(&format!(" · {changed} changed"));
+                }
+                ui.painter().text(egui::pos2(r.left() + 100.0, r.center().y), egui::Align2::LEFT_CENTER, note, oled_font(10.0), if changed > 0 { theme::ACCENT_BRIGHT } else { OLED_DIM });
+                if hdr.clicked() {
+                    bank_toggles.push(b);
+                }
+                if ed.drag.is_some() && !bank_open && pointer.is_some_and(|pt| r.contains(pt)) {
+                    bank_toggles.push(b);
+                }
+                if !bank_open {
+                    continue;
+                }
+                for &i in vis.iter().filter(|&&i| i / PER_BANK == b) {
+
+                let cell = &ed.cells[i];
+                let (state, name) = view(p, cell);
+                let info = cell.src.map(|s| &p.info[s as usize]);
+                let open = ed.open.contains(&i);
+                let tracks = info.map(|n| shown_tracks(&n.seq, audio)).unwrap_or_default();
+                let extra = if open { 4.0 + tracks.len().max(1) as f32 * TRACK_H + 4.0 } else { 0.0 };
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H + extra), Sense::hover());
+                let rect = rect.shrink2(egui::vec2(0.0, 1.0));
+                rows.push((i, rect));
+                if ed.scroll_to == Some(i) {
+                    ui.scroll_to_rect(rect, None);
+                    ed.scroll_to = None;
+                }
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let resp = ui.interact(rect, ui.scope_id().with(("prow", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
+                let selected = ed.sel.contains(&i);
+                let fill = if selected {
+                    SEL_FILL
+                } else if resp.hovered() {
+                    OLED_HOVER
+                } else {
+                    ROW_FILL
+                };
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 2.0, fill);
+                let changed = *cell != Cell::as_read(i);
+                if landing.contains(&i) {
+                    painter.rect_stroke(rect, 2.0, Stroke::new(2.0, theme::ACCENT_BRIGHT), egui::StrokeKind::Inside);
+                } else if ed.cursor == Some(i) {
+                    painter.rect_stroke(rect, 2.0, Stroke::new(1.0, OLED_DIM), egui::StrokeKind::Inside);
+                }
+                if changed {
+                    painter.rect_filled(Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height())), 1.0, theme::ACCENT);
+                }
+
+                let head = Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), ROW_H - 2.0));
+                let y = head.center().y;
+                let x0 = rect.left();
+                // Fold-out arrow, its own click target.
+                let chev = Rect::from_center_size(egui::pos2(x0 + 14.0, y), egui::vec2(44.0, ROW_H - 4.0));
+                let chev_resp = ui.interact(chev, ui.scope_id().with(("pchev", i)), Sense::click());
+                triangle(&painter, chev.center() + egui::vec2(12.0, 0.0), open, if chev_resp.hovered() { OLED } else { OLED_DIM });
+                if chev_resp.clicked() {
+                    toggles.push(i);
+                }
+                painter.text(egui::pos2(x0 + 34.0 + 12.0, y), egui::Align2::LEFT_CENTER, patterns::label(i), oled_font(12.0), OLED_DIM);
+                let name_rect = Rect::from_min_size(egui::pos2(x0 + NAME_X, head.top() + 2.0), egui::vec2(NAME_W, head.height() - 4.0));
+                let (text, color) = match state {
+                    PatState::Used if name.is_empty() => ("(no name)".to_owned(), OLED_DIM),
+                    PatState::Used => (name.clone(), OLED),
+                    PatState::Phantom => (if name.is_empty() { "≈ nearly empty".to_owned() } else { name.clone() }, OLED_DIM),
+                    PatState::Blank => (if name.is_empty() { "—".to_owned() } else { name.clone() }, Color32::from_rgb(70, 80, 78)),
+                };
+                if ed.inline != Some(i) {
+                    painter.with_clip_rect(name_rect).text(name_rect.left_center(), egui::Align2::LEFT_CENTER, text, oled_font(14.0), color);
+                }
+                // Where it came from, when it's not what was read here.
+                let mut bx = x0 + NAME_X + NAME_W + 6.0;
+                let badge = match cell.src {
+                    None if changed => Some("∅ cleared".to_owned()),
+                    Some(s) if s as usize != i => Some(format!("{}{}", if src_count[s as usize] > 1 { "⧉" } else { "←" }, patterns::label(s as usize))),
+                    _ => None,
+                };
+                for bt in badge.into_iter().chain(cell.name.is_some().then(|| "✎".to_owned())) {
+                    let r = painter.text(egui::pos2(bx, y), egui::Align2::LEFT_CENTER, bt, oled_font(11.0), theme::ACCENT_BRIGHT);
+                    bx = r.right() + 6.0;
+                }
+
+                // Folded: a tiny picture of the audio tracks. Folded out: one
+                // dot line per track.
+                if let Some(n) = info {
+                    let dots_x = x0 + DOTS_X;
+                    if !open && state != PatState::Blank {
+                        let tr: Vec<&TrackSeq> = n.seq.iter().take(audio).collect();
+                        mini(&painter, egui::pos2(dots_x, head.top() + 3.0), head.height() - 6.0, &tr);
+                        let longest = tr.iter().map(|t| t.len).max().unwrap_or(0);
+                        let notes: usize = tr.iter().map(|t| t.notes()).sum();
+                        if !tr.is_empty() {
+                            let right = dots_x + n.seq[0].steps.len() as f32 * 2.0 + 10.0;
+                            painter.text(egui::pos2(right, y), egui::Align2::LEFT_CENTER, format!("{longest} steps · {notes} trigs"), oled_font(10.0), OLED_DIM);
+                        }
+                    }
+                    if open {
+                        let mut ty = head.bottom() + 4.0;
+                        if tracks.is_empty() {
+                            painter.text(egui::pos2(x0 + 26.0, ty + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, "step layout unknown for this version", oled_font(10.0), OLED_DIM);
+                        }
+                        for (label, t) in &tracks {
+                            let cy = ty + TRACK_H / 2.0;
+                            painter.text(egui::pos2(x0 + 46.0, cy), egui::Align2::LEFT_CENTER, label, oled_font(11.0), OLED_DIM);
+                            if let Some(ti) = n.tracks.get(*t) {
+                                // The sample, then the sound's own name when it isn't the default.
+                                let mut text = sample_name(ti.slot);
+                                if ti.name != format!("SOUND {}", t + 1) && !ti.name.is_empty() {
+                                    text = format!("{text}  ·  {}", ti.name);
+                                }
+                                let sr = Rect::from_min_size(egui::pos2(x0 + NAME_X + 30.0, ty), egui::vec2(DOTS_X - NAME_X - 74.0, TRACK_H));
+                                painter.with_clip_rect(sr).text(sr.left_center(), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.0), OLED);
+                                if ti.slot != 0 {
+                                    painter.text(egui::pos2(x0 + DOTS_X - 10.0, cy), egui::Align2::RIGHT_CENTER, format!("{:03}", ti.slot), oled_font(10.0), OLED_DIM);
+                                }
+                            }
+                            let seq = &n.seq[*t];
+                            let end = dots(&painter, egui::pos2(dots_x, cy), (rect.right() - dots_x - 50.0).max(120.0), seq);
+                            painter.text(egui::pos2(end + 8.0, cy), egui::Align2::LEFT_CENTER, format!("{}", seq.len), oled_font(10.0), OLED_DIM);
+                            ty += TRACK_H;
+                        }
+                    }
+                } else if open {
+                    painter.text(egui::pos2(x0 + 26.0, head.bottom() + 4.0 + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, "empty pattern", oled_font(10.0), OLED_DIM);
+                }
+
+                // Rename in place.
+                if ed.inline == Some(i) {
+                    let te = egui::TextEdit::singleline(&mut ed.inline_text).char_limit(NAME_MAX).font(oled_font(14.0)).desired_width(NAME_W);
+                    let r = ui.put(name_rect, te);
+                    if ed.inline_focus {
+                        ed.inline_focus = false;
+                        r.request_focus();
+                    }
+                    if r.lost_focus() {
+                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        inline_done = Some((i, (!esc).then(|| ed.inline_text.clone())));
+                    }
+                }
+
+                let hover = match (state, info) {
+                    (PatState::Used, Some(n)) if !n.kit_name.is_empty() && n.kit_name != n.name => format!(
+                        "{}: {} bytes differ from an empty pattern\nkit name: \"{}\"",
+                        patterns::label(i),
+                        n.diff,
+                        n.kit_name
+                    ),
+                    (PatState::Used, Some(n)) => format!("{}: {} bytes differ from an empty pattern", patterns::label(i), n.diff),
+                    (PatState::Phantom, Some(n)) => format!("{}: nearly empty ({} bytes differ from an empty pattern: kit tweaks, no trigs)", patterns::label(i), n.diff),
+                    _ => format!("{}: empty", patterns::label(i)),
+                };
+                let resp = resp.on_hover_text_at_pointer(hover);
+                if resp.drag_started() {
+                    if !ed.sel.contains(&i) {
+                        ed.select_only(i);
+                    }
+                    ed.drag = Some(i);
+                }
+                if resp.double_clicked() && editable {
+                    ed.start_inline(p, i);
+                } else if resp.clicked() {
+                    if mods.shift {
+                        let a = ed.cursor.unwrap_or(i);
+                        let (lo, hi) = (a.min(i), a.max(i));
+                        // Only what's shown: hidden banks stay out of it.
+                        ed.sel.extend(vis.iter().copied().filter(|v| (lo..=hi).contains(v)));
+                        ed.cursor = Some(i);
+                    } else if mods.command {
+                        if !ed.sel.remove(&i) {
+                            ed.sel.insert(i);
+                        }
+                        ed.cursor = Some(i);
+                    } else {
+                        ed.select_only(i);
+                    }
+                }
+                resp.context_menu(|ui| {
+                    if !ed.sel.contains(&i) {
+                        ed.select_only(i);
+                    }
+                    if ui.add_enabled(editable, egui::Button::new("Rename…  ⏎")).clicked() {
+                        if ed.targets().len() > 1 {
+                            ed.focus_name = true;
+                        } else {
+                            ed.start_inline(p, i);
+                        }
+                        ui.close();
+                    }
+                    if ui.button(if open { "Fold  ←" } else { "Fold out  →" }).clicked() {
+                        toggles.push(i);
+                        ui.close();
+                    }
+                    if ui.button("Copy  ⌘C").clicked() {
+                        status = Some(copy(ed));
+                        ui.close();
+                    }
+                    if ui.add_enabled(editable && !ed.clip.is_empty(), egui::Button::new("Paste here  ⌘V")).clicked() {
+                        status = Some(paste(ed));
+                        ui.close();
+                    }
+                    if ui.add_enabled(editable && p.can_clear(), egui::Button::new("Clear  ⌫")).clicked() {
+                        status = Some(clear(ed, p));
+                        ui.close();
+                    }
+                    if ui.add_enabled(editable, egui::Button::new("Pack bank (used patterns first)")).clicked() {
+                        status = Some(pack(ed, p));
+                        ui.close();
+                    }
+                });
+                }
             }
         });
-    }
+        ed.list_rect = Some(sa.inner_rect);
+    });
+    ed.rows = rows;
 
+    for b in bank_toggles {
+        ed.banks[b] = !ed.banks[b];
+    }
+    for i in toggles {
+        if !ed.open.remove(&i) {
+            ed.open.insert(i);
+        }
+    }
+    if let Some((i, text)) = inline_done {
+        ed.inline = None;
+        if let Some(t) = text {
+            if t != view(p, &ed.cells[i]).1 {
+                status = Some(rename(ed, p, &[i], &t));
+            }
+        }
+    }
     if let Some(from) = ed.drag {
         if ui.input(|i| i.pointer.any_released()) {
             ed.drag = None;
@@ -493,7 +821,7 @@ fn grid(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
             }
         } else if let Some(pt) = pointer {
             let n = ed.sel.len();
-            let tip = format!("{} {n}", if mods.alt { "⧉ copy" } else { "move" });
+            let tip = format!("{} {n}{}", if mods.alt { "⧉ copy" } else { "move" }, under.map(|u| format!(" → {}", patterns::label(u))).unwrap_or_default());
             ui.painter().text(pt + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, tip, oled_font(12.0), theme::ACCENT_BRIGHT);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
@@ -503,135 +831,63 @@ fn grid(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
     }
 }
 
-fn inspector(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
-    let Some(proj) = st.project.as_ref() else { return };
-    let Ok(p) = proj.patterns.as_deref() else { return };
-    let editable = p.read_only.is_none() && !busy;
-    let ed = &mut st.proj;
-    let t = ed.targets();
-    // Refill the name field when the selection changes.
-    if ed.name_for != t {
-        ed.name_for = t.clone();
-        ed.name_edit = match t.as_slice() {
-            [i] => view(p, &ed.cells[*i]).1,
-            [] => String::new(),
-            _ => "{name}".into(),
-        };
-    }
-    let mut status = None;
-
-    if t.is_empty() {
-        ui.label(RichText::new("Select a pattern slot").strong());
-        ui.add_space(4.0);
-        let used = p.info.iter().filter(|i| i.state == PatState::Used).count();
-        let ph = p.info.iter().filter(|i| i.state == PatState::Phantom).count();
-        ui.label(format!("{used} used, {ph} nearly empty, {} empty", PATTERNS - used - ph));
-        ui.add_space(8.0);
-        ui.label(RichText::new("Each Digitakt pattern holds its own copy of its kit; the name shown is the kit name. Nothing points at a pattern number, so moving a pattern keeps its sounds and samples.").weak().small());
-        ui.add_space(4.0);
-        ui.label(RichText::new("←D02 moved from D02 · ⧉D02 copy of D02 · ∅ cleared · ✎ renamed · ≈ nearly empty (kit tweaks, no other content)").weak().small());
-        return;
-    }
-
-    if let [i] = t.as_slice() {
-        let i = *i;
-        let c = ed.cells[i].clone();
-        let (state, name) = view(p, &c);
-        ui.label(RichText::new(format!("{}  {}", patterns::label(i), if name.is_empty() { "(no name)" } else { &name })).font(oled_font(16.0)).color(OLED));
-        match c.src {
-            Some(s) if s as usize != i => ui.label(RichText::new(format!("from {} as read", patterns::label(s as usize))).color(theme::ACCENT_BRIGHT)),
-            None => ui.label(RichText::new("cleared (empty pattern)").color(theme::ACCENT_BRIGHT)),
-            _ => ui.label(RichText::new("as read").weak()),
-        };
-        let info = c.src.map(|s| &p.info[s as usize]);
-        ui.label(match (state, info) {
-            (PatState::Used, Some(n)) => format!("used: {} bytes differ from an empty pattern", n.diff),
-            (PatState::Phantom, Some(n)) => format!("nearly empty: {} bytes differ from an empty pattern", n.diff),
-            _ => "empty".to_owned(),
-        });
-        ui.add_space(6.0);
-        name_field(ui, ed, p, editable, "Kit name", &mut status);
-        if let Some(n) = info {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Tracks").strong());
-            for (k, tr) in n.tracks.iter().enumerate() {
-                let sample = if tr.slot == 0 {
-                    "—".to_owned()
-                } else {
-                    let file = proj
-                        .pool
-                        .get(tr.slot)
-                        .filter(|e| !e.is_empty())
-                        .and_then(|e| st.names.get(&e.key()))
-                        .map(|n| n.rsplit('/').next().unwrap_or(n).to_owned())
-                        .unwrap_or_else(|| "?".into());
-                    format!("{:03} {file}", tr.slot)
-                };
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{}", k + 1)).font(oled_font(12.0)).color(OLED_DIM));
-                    ui.label(RichText::new(&tr.name).font(oled_font(12.0)).color(OLED));
-                    ui.label(RichText::new(sample).small().weak());
-                });
+/// One track's steps as dots, from `at` (left, vertical centre), groups of
+/// 16 slightly apart. Steps past the track's length aren't drawn. Returns
+/// the right edge.
+fn dots(painter: &egui::Painter, at: egui::Pos2, max_w: f32, seq: &TrackSeq) -> f32 {
+    let n = seq.steps.len();
+    let gap = 5.0;
+    let groups = n.div_ceil(16).saturating_sub(1) as f32;
+    let pitch = ((max_w - groups * gap) / n as f32).clamp(3.0, 9.0);
+    let r = (pitch * 0.32).clamp(1.2, 2.8);
+    let x_of = |k: usize| at.x + k as f32 * pitch + (k / 16) as f32 * gap + pitch / 2.0;
+    for (k, s) in seq.steps.iter().enumerate().take(seq.len) {
+        let c = egui::pos2(x_of(k), at.y);
+        match s {
+            Step::Note => {
+                painter.circle_filled(c, r, OLED);
             }
-            ui.label(RichText::new("Sample slots as read (before any Sample Order changes)").weak().small());
-            if !n.pattern_field.is_empty() {
-                ui.add_space(6.0);
-                ui.label(RichText::new(format!("elk-herd's pattern-name field holds \"{}\" (not used, not written)", n.pattern_field)).weak().small());
+            Step::Lock => {
+                painter.circle_stroke(c, r - 0.3, Stroke::new(1.0, OLED_DIM));
+            }
+            Step::None => {
+                painter.circle_filled(c, 1.0, if k % 4 == 0 { DOT_BEAT } else { DOT_OFF });
             }
         }
-    } else {
-        ui.label(RichText::new(format!("{} slots selected", t.len())).strong());
-        ui.add_space(6.0);
-        name_field(ui, ed, p, editable, "Rename all", &mut status);
-        ui.label(RichText::new("{n} = 1, 2, 3…   {slot} = A01…   {name} = current name").weak().small());
-        let preview: Vec<String> = t
-            .iter()
-            .take(3)
-            .enumerate()
-            .map(|(k, &i)| patterns::clean_name(&ed.name_edit.replace("{n}", &(k + 1).to_string()).replace("{slot}", &patterns::label(i)).replace("{name}", &view(p, &ed.cells[i]).1)))
-            .collect();
-        ui.label(RichText::new(format!("→ {}{}", preview.join(", "), if t.len() > 3 { ", …" } else { "" })).weak().small());
     }
+    at.x + n as f32 * pitch + groups * gap
+}
 
-    ui.add_space(10.0);
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("Copy").clicked() {
-            status = Some(copy(ed));
+/// The audio tracks squeezed into a small picture: 2 px per step, one thin
+/// line per track.
+fn mini(painter: &egui::Painter, at: egui::Pos2, h: f32, tracks: &[&TrackSeq]) {
+    let Some(first) = tracks.first() else { return };
+    let n = first.steps.len();
+    let line = h / tracks.len().max(1) as f32;
+    let bg = Rect::from_min_size(at, egui::vec2(n as f32 * 2.0, h));
+    painter.rect_filled(bg.expand(1.0), 1.0, Color32::from_rgb(10, 12, 12));
+    for (t, seq) in tracks.iter().enumerate() {
+        let y = at.y + t as f32 * line;
+        // The track's length, faintly.
+        let lr = Rect::from_min_size(egui::pos2(at.x, y + line * 0.35), egui::vec2(seq.len as f32 * 2.0, (line * 0.3).max(0.5)));
+        painter.rect_filled(lr, 0.0, Color32::from_rgb(26, 31, 30));
+        for (k, s) in seq.steps.iter().enumerate().take(seq.len) {
+            let c = match s {
+                Step::Note => OLED,
+                Step::Lock => OLED_DIM,
+                Step::None => continue,
+            };
+            painter.rect_filled(Rect::from_min_size(egui::pos2(at.x + k as f32 * 2.0, y + 0.3), egui::vec2(1.6, (line - 0.6).max(1.0))), 0.0, c);
         }
-        if ui.add_enabled(editable && !ed.clip.is_empty(), egui::Button::new(format!("Paste ({})", ed.clip.len()))).clicked() {
-            status = Some(paste(ed));
-        }
-        if ui.add_enabled(editable && p.can_clear(), egui::Button::new("Clear")).clicked() {
-            status = Some(clear(ed, p));
-        }
-        if ui.add_enabled(editable, egui::Button::new("Pack bank")).on_hover_text("Move the used patterns of the selected bank(s) to the front, in order").clicked() {
-            status = Some(pack(ed, p));
-        }
-    });
-    if let Some(s) = status {
-        st.status = s;
     }
 }
 
-fn name_field(ui: &mut egui::Ui, ed: &mut ProjEd, p: &Patterns, editable: bool, label: &str, status: &mut Option<String>) {
-    let multi = ed.targets().len() > 1;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        let te = egui::TextEdit::singleline(&mut ed.name_edit)
-            .char_limit(if multi { 64 } else { NAME_MAX })
-            .font(oled_font(14.0))
-            .desired_width(150.0);
-        let r = ui.add_enabled(editable, te);
-        if ed.focus_name {
-            ed.focus_name = false;
-            r.request_focus();
-        }
-        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if ui.add_enabled(editable, egui::Button::new("Apply")).clicked() || (enter && editable) {
-            let text = ed.name_edit.clone();
-            *status = Some(rename(ed, p, &text));
-            ed.name_for.clear();
-        }
-    });
-    ui.label(RichText::new(format!("Upper case, up to {NAME_MAX} characters [unverified: the device's own limit]")).weak().small());
+/// A fold arrow centred on `c`: pointing down when open.
+fn triangle(painter: &egui::Painter, c: egui::Pos2, open: bool, color: Color32) {
+    let pts = if open {
+        vec![c + egui::vec2(-4.0, -2.5), c + egui::vec2(4.0, -2.5), c + egui::vec2(0.0, 3.5)]
+    } else {
+        vec![c + egui::vec2(-2.5, -4.0), c + egui::vec2(3.5, 0.0), c + egui::vec2(-2.5, 4.0)]
+    };
+    painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }

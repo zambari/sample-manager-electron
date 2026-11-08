@@ -1,5 +1,5 @@
-//! What survives a restart: open tabs per pane, their sort, focus, the
-//! hidden-files toggle, editor toggles and the output device. eframe stores
+//! What survives a restart: open tabs per pane, their sort, focus, editor
+//! toggles and the output device. eframe stores
 //! it (with window size/position) in its per-app storage file and calls
 //! [`crate::app::App`]'s `save` on exit and every [`SAVE_INTERVAL`].
 //!
@@ -48,8 +48,6 @@ pub struct AppState {
     #[serde(default = "default_focus")]
     pub focused: Role,
     #[serde(default)]
-    pub show_hidden: bool,
-    #[serde(default)]
     pub editor: crate::editor::Prefs,
     /// cpal device id; `None` means the system default.
     #[serde(default)]
@@ -78,6 +76,16 @@ pub struct AppState {
     /// saves from before Auto was the default start on Auto.
     #[serde(rename = "new_kit_grid", default = "default_kit_grid")]
     pub kit_grid: Option<usize>,
+    /// The full-window device pages hide the file panes.
+    #[serde(default)]
+    pub device_hides_files: bool,
+    /// Pattern banks folded out in the Device view (A to H).
+    #[serde(default = "default_open_banks")]
+    pub device_open_banks: [bool; 8],
+}
+
+fn default_open_banks() -> [bool; 8] {
+    [true, false, false, false, false, false, false, false]
 }
 
 fn default_kit_grid() -> Option<usize> {

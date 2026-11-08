@@ -131,7 +131,6 @@ pub struct App {
     dest: Pane,
     focused: Role,
     next_tab_id: u64,
-    show_hidden: bool,
     pending: Option<PendingPlan>,
     /// A local job that made "Keep both" copies: once it finishes, select
     /// them and (for just one) open the inline rename on it.
@@ -292,6 +291,8 @@ impl App {
         theme::install_fonts(&ctx);
         let home = dirs_home();
         let saved = state::load(storage);
+        let hide_files = saved.as_ref().is_some_and(|s| s.device_hides_files);
+        let open_banks = saved.as_ref().map_or([true, false, false, false, false, false, false, false], |s| s.device_open_banks);
         let mut next_tab_id = 0;
         let mut mk = |p: PathBuf, device: bool| {
             next_tab_id += 1;
@@ -455,7 +456,6 @@ impl App {
             dest,
             focused: saved.as_ref().map_or(Role::Source, |s| s.focused),
             next_tab_id,
-            show_hidden: saved.as_ref().is_some_and(|s| s.show_hidden),
             pending: None,
             delete_pending: None,
             clipboard: None,
@@ -476,6 +476,8 @@ impl App {
             errors_logged: 0,
             last_state: None,
         };
+        app.elk.hide_files = hide_files;
+        app.elk.proj.banks = open_banks;
         // The active kit's file went missing: bring in a parked one.
         if !app.has_kit() && !app.parked.is_empty() {
             app.unpark_first();
@@ -507,7 +509,6 @@ impl App {
             source: pane(&self.source),
             dest: pane(&self.dest),
             focused: self.focused,
-            show_hidden: self.show_hidden,
             editor: {
                 let mut p = self.editor.prefs.clone();
                 p.stash_mono(self.showing_kit);
@@ -533,6 +534,8 @@ impl App {
             kit_session: self.kit().session(),
             parked_kits: self.parked.iter().filter_map(Editor::session).collect(),
             kit_grid: self.kit_grid,
+            device_hides_files: self.elk.hide_files,
+            device_open_banks: self.elk.proj.banks,
         }
     }
 
@@ -672,7 +675,7 @@ impl eframe::App for App {
 
         // Elk Sample Order mode takes the whole window: the file panes have
         // nothing to do with it.
-        if self.elk_mode {
+        if self.elk_mode && self.elk.hide_files {
             egui::CentralPanel::default().show(ui, |ui| self.show_elk(ui));
         } else {
             let left = egui::Panel::left("source_col")
@@ -686,7 +689,8 @@ impl eframe::App for App {
                 .default_size(default_w)
                 .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
                 .show(ui, |ui| {
-                    if self.elk_docked {
+                    // A full-window page in the middle: no second pool here.
+                    if self.elk_docked && !self.elk_mode {
                         self.show_dock_col(ui);
                     } else {
                         self.show_pane(ui, Role::Dest);
@@ -700,7 +704,11 @@ impl eframe::App for App {
                 right.response.rect.y_range(),
             );
 
-            egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
+            if self.elk_mode {
+                egui::CentralPanel::default().show(ui, |ui| self.show_elk(ui));
+            } else {
+                egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
+            }
 
             // A click anywhere decides whether the docked pool keeps the keyboard.
             let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());

@@ -28,7 +28,6 @@ impl App {
     // ---- requests ---------------------------------------------------------
 
     pub(super) fn reload(&mut self, role: Role, tab_idx: usize) {
-        let show_hidden = self.show_hidden;
         let pane = self.pane_mut(role);
         if let Some(tab) = pane.tabs.get_mut(tab_idx) {
             // Folder deleted or renamed behind our back: fall back to the
@@ -47,27 +46,26 @@ impl App {
                 requests.push((dir, g));
             }
             for (dir, g) in requests {
-                self.list(device, dir, g, show_hidden);
+                self.list(device, dir, g);
             }
         }
     }
 
-    pub(super) fn list(&self, device: bool, dir: PathBuf, generation: u64, show_hidden: bool) {
+    pub(super) fn list(&self, device: bool, dir: PathBuf, generation: u64) {
         if device {
             self.device.list(dir, generation);
         } else {
-            self.jobs.list(dir, generation, show_hidden);
+            self.jobs.list(dir, generation);
         }
     }
 
     /// Expand a folder in the active tab's tree and fetch its contents.
     pub(super) fn expand(&mut self, role: Role, dir: PathBuf) {
-        let show_hidden = self.show_hidden;
         let tab = self.pane_mut(role).active_tab_mut();
         if tab.expand(&dir) {
             let g = tab.begin_child_load(&dir);
             let device = tab.device;
-            self.list(device, dir, g, show_hidden);
+            self.list(device, dir, g);
         }
     }
 

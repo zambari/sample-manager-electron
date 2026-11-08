@@ -146,11 +146,12 @@ fn dir_is_empty(path: &Path) -> bool {
 
 /// Read one directory level. Unreadable children are skipped rather than
 /// failing the whole listing; only an unreadable *parent* is an error.
-pub fn list_dir(path: &Path, show_hidden: bool) -> std::io::Result<Vec<Entry>> {
+pub fn list_dir(path: &Path) -> std::io::Result<Vec<Entry>> {
     let mut out = Vec::new();
     for de in std::fs::read_dir(path)? {
         let Ok(de) = de else { continue };
-        if !show_hidden && de.file_name().to_string_lossy().starts_with('.') {
+        // Dotfiles never hold samples; skip them (and macOS "._" sidecars).
+        if de.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
         if let Some(e) = Entry::from_dir_entry(&de) {

@@ -340,11 +340,6 @@ impl App {
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("SAMPLE MANAGER").size(13.0).strong().color(theme::ACCENT_BRIGHT));
-            ui.separator();
-
-            if ui.checkbox(&mut self.show_hidden, "Hidden").changed() {
-                self.reload_all();
-            }
 
             if self.build_watch.ready() {
                 ui.separator();

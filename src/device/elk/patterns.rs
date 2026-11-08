@@ -54,13 +54,80 @@ pub struct TrackInfo {
 #[derive(Clone, Debug)]
 pub struct PatternInfo {
     pub state: PatState,
+    /// What the device shows: the pattern name when it's plain text, else
+    /// the kit name (patterns from before the DT1 had pattern names).
+    pub name: String,
     pub kit_name: String,
-    /// What sits where elk-herd puts the pattern name, as text (· for
-    /// non-printable). On the DT1 dumps seen so far it isn't text.
+    /// The pattern-name field as text (· for non-printable).
     pub pattern_field: String,
     pub tracks: Vec<TrackInfo>,
+    /// Sequencer tracks: the audio tracks, then the MIDI tracks. Empty when
+    /// the layout isn't known.
+    pub seq: Vec<TrackSeq>,
     /// Bytes that differ from an empty pattern.
     pub diff: usize,
+}
+
+/// What's on one sequencer track, for a thumbnail.
+#[derive(Clone, Debug)]
+pub struct TrackSeq {
+    /// Per step: `Step::None`, `Lock` (trig flags but no note) or `Note`.
+    pub steps: Vec<Step>,
+    /// Track length in steps.
+    pub len: usize,
+}
+
+impl TrackSeq {
+    pub fn notes(&self) -> usize {
+        self.steps.iter().take(self.len).filter(|s| **s == Step::Note).count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.steps.iter().all(|s| *s == Step::None)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Step {
+    None,
+    Lock,
+    Note,
+}
+
+/// Sequencer tracks in a pattern: audio, then MIDI.
+const SEQ_TRACKS: usize = 16;
+
+/// Each track starts with one big-endian u16 of trig flags per step, right
+/// after the pattern's 4-byte version. From DT1 v10 dumps: bit 0 = note
+/// trig; 0x0010 = swing (set on every odd step by default, so ignored); any
+/// other bit = something on the step without a note (lock trig) [unverified
+/// for which bit is which]. Byte `stride - 6` is the track length in v10.
+fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize) -> Vec<TrackSeq> {
+    let steps = model.steps();
+    let body = plocks.saturating_sub(4);
+    if body % SEQ_TRACKS != 0 || body / SEQ_TRACKS < steps * 2 {
+        return Vec::new();
+    }
+    let stride = body / SEQ_TRACKS;
+    (0..SEQ_TRACKS)
+        .map(|t| {
+            let at = 4 + t * stride;
+            let steps: Vec<Step> = (0..steps)
+                .map(|k| match be16(d, at + k * 2).unwrap_or(0) {
+                    w if w & 1 != 0 => Step::Note,
+                    w if w & !0x10 != 0 => Step::Lock,
+                    _ => Step::None,
+                })
+                .collect();
+            let byte = if model == DT && pv >= 9 { d.get(at + stride - 6).map(|&b| b as usize) } else { None };
+            let len = match byte {
+                Some(n) if (1..=steps.len()).contains(&n) => n,
+                // Unknown layout: up to the last used step, in whole pages.
+                _ => (steps.iter().rposition(|s| *s != Step::None).map_or(0, |p| p + 1).div_ceil(16) * 16).max(16),
+            };
+            TrackSeq { steps, len }
+        })
+        .collect()
 }
 
 /// One slot of the edited layout.
@@ -85,7 +152,10 @@ pub struct Patterns {
     /// An empty pattern, slot byte 0. `None`: couldn't tell which one.
     blank: Option<Vec<u8>>,
     slot_at: usize,
+    /// What every pattern's slot byte holds; `None`: its own slot.
+    slot_value: Option<u8>,
     kit_name_at: usize,
+    pattern_name_at: usize,
     /// Why moves / renames aren't allowed, if they aren't (names still show).
     pub read_only: Option<String>,
 }
@@ -178,19 +248,27 @@ impl Patterns {
             return Err("pattern payload shorter than expected".into());
         }
 
-        // Assumption: the slot byte holds the pattern's own slot.
+        // The slot byte either holds each pattern's own slot (seen on an older
+        // DT1 project) or the same value in every pattern (0 on a fresh one).
         let off: Vec<String> = (0..PATTERNS)
             .filter(|&i| data(i)[slot_at] as usize != i)
             .map(|i| format!("{}={}", label(i), data(i)[slot_at]))
             .collect();
-        if !off.is_empty() {
+        let first = data(0)[slot_at];
+        let slot_value = if off.is_empty() {
+            None
+        } else if (0..PATTERNS).all(|i| data(i)[slot_at] == first) {
+            log(format!("slot byte at {slot_at} is {first} in every pattern: keeping it at {first} on moves"));
+            Some(first)
+        } else {
             log(format!(
-                "slot byte at {slot_at} doesn't match the slot in {} patterns: {}",
+                "slot byte at {slot_at} is neither the own slot nor the same everywhere; {} differ from the slot: {}",
                 off.len(),
                 off.iter().take(16).cloned().collect::<Vec<_>>().join(", ")
             ));
             problems.push(format!("slot byte at {slot_at} doesn't match {} pattern(s)", off.len()));
-        }
+            None
+        };
 
         // The empty pattern: the most common payload with the slot byte zeroed.
         let norm = |i: usize| {
@@ -253,7 +331,10 @@ impl Patterns {
                 if i == 0 && tracks.is_empty() {
                     log(format!("no track sound layout for kit v{kv}"));
                 }
-                PatternInfo { state, kit_name: text_at(&d, kit_name_at), pattern_field: pf, tracks, diff }
+                let seq = pattern_plocks(model, pv).map_or_else(Vec::new, |pl| parse_seq(model, pv, &d, pl));
+                let kit_name = text_at(&d, kit_name_at);
+                let name = if !pf.is_empty() && printable(&d, pattern_name_at) { pf.clone() } else { kit_name.clone() };
+                PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff }
             })
             .collect::<Vec<_>>();
         if !odd_kit.is_empty() {
@@ -261,9 +342,8 @@ impl Patterns {
             problems.push("some kit names aren't plain text".into());
         }
         if !pattern_fields.is_empty() {
-            // Not used for anything: logged to learn whether DT1 has pattern names.
             log(format!(
-                "elk-herd's pattern-name field at {pattern_name_at} is non-empty in {} pattern(s) (not written by us): {}",
+                "pattern-name field at {pattern_name_at} is non-empty in {} pattern(s) {}",
                 pattern_fields.len(),
                 pattern_fields.iter().take(8).cloned().collect::<Vec<_>>().join("  ")
             ));
@@ -288,7 +368,9 @@ impl Patterns {
             msg,
             blank,
             slot_at,
+            slot_value,
             kit_name_at,
+            pattern_name_at,
             read_only: (!problems.is_empty()).then(|| problems.join("; ")),
         })
     }
@@ -309,12 +391,16 @@ impl Patterns {
             Some(s) => src_data(s as usize),
             None => self.blank.clone()?,
         };
-        d[self.slot_at] = i as u8;
+        d[self.slot_at] = self.slot_value.unwrap_or(i as u8);
         if let Some(n) = &cell.name {
+            // The device shows the pattern name; the kit name is kept in step
+            // like elk-herd does.
             let n = clean_name(n);
-            let f = &mut d[self.kit_name_at..self.kit_name_at + 16];
-            f.fill(0);
-            f[..n.len()].copy_from_slice(n.as_bytes());
+            for at in [self.pattern_name_at, self.kit_name_at] {
+                let f = &mut d[at..at + 16];
+                f.fill(0);
+                f[..n.len()].copy_from_slice(n.as_bytes());
+            }
         }
         Some(d)
     }

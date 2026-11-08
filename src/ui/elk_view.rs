@@ -1,5 +1,7 @@
-//! The Elk Sample Order view: the device's sample pool in two side-by-side
-//! lists, so a slot can be dragged onto any other (in any bank) to swap them.
+//! The Elk Sample Order view: the device's sample pool, docked as one pane
+//! beside the files, or in two side-by-side lists so a slot can be dragged
+//! onto any other (in any bank) to swap them. Also the device bar both
+//! device pages share.
 
 use crate::device::{ElkProject, PoolEntry, SavedProject};
 use crate::ui::theme;
@@ -68,6 +70,8 @@ pub struct ElkState {
     pub keys_on: bool,
     /// Which full-window page is shown.
     pub page: ElkPage,
+    /// The full-window pages hide the file panes (remembered by the app).
+    pub hide_files: bool,
     /// The project editor's layout and selection.
     pub proj: crate::ui::elk_project_view::ProjEd,
     /// After a push with pattern edits: every pattern payload, by slot, the
@@ -100,6 +104,8 @@ pub enum ElkIntent {
     Local((u32, u32), bool),
     /// Move into the right column, next to the file panes.
     Dock,
+    /// From the docked pool: open the project editor.
+    OpenPatterns,
     /// Back to the full-window view.
     Undock,
     /// Fetch every pool file without a local copy, in the background.
@@ -583,53 +589,69 @@ enum RowAct {
     DropFiles(usize, Vec<std::path::PathBuf>),
 }
 
-/// The mode switch across the top of both full-window pages.
+/// The mode switch across the top of both full-window pages, with the
+/// layout switches on the right.
 pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
     if ui.add(theme::pane_title("Sample Editor", false)).clicked() {
         out.push(ElkIntent::BackToEditor);
     }
-    if ui.add(theme::pane_title("Elk Sample Order", st.page == ElkPage::Order)).clicked() {
-        st.page = ElkPage::Order;
-    }
-    if ui
-        .add(theme::pane_title("Elk Project Editor", st.page == ElkPage::Project))
-        .on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt 1 only)")
-        .clicked()
-    {
-        st.page = ElkPage::Project;
-    }
+    ui.add_space(14.0);
+    ui.add(theme::pane_title("Device", true));
     ui.separator();
     if let Some(p) = &st.project {
-        ui.label(
-            RichText::new(format!("{} · {}", p.model.name(), p.versions))
-                .weak()
-                .small(),
-        );
+        ui.label(RichText::new(format!("{} · {}", p.model.name(), p.versions)).weak().small());
     }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui
+            .button("⇥ Dock beside files")
+            .on_hover_text("Back to the editor, with the pool as one pane in the right column")
+            .clicked()
+        {
+            out.push(ElkIntent::Dock);
+        }
+        ui.toggle_value(&mut st.hide_files, "Hide file panes")
+            .on_hover_text("Give this view the whole window. Off: the file panes stay on the sides and this view takes the editor's place. Remembered.");
+    });
+}
+
+/// The full-window top: mode tabs, then the device bar with the page's own
+/// tools and the status.
+pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, page_tools: impl FnOnce(&mut egui::Ui, &mut ElkState)) {
+    ui.horizontal(|ui| mode_header(ui, st, out));
+    ui.horizontal_wrapped(|ui| {
+        device_bar(ui, st, out, true);
+        if st.project.is_some() {
+            ui.separator();
+            page_tools(ui, st);
+        }
+        status_line(ui, st, true);
+    });
+    if st.project.is_none() {
+        return;
+    }
+    // Samples / Patterns, with each page's view options beside them.
+    ui.add_space(2.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui.add(theme::mode_title("Samples", st.page == ElkPage::Order, false)).on_hover_text("The sample pool in two side-by-side panes").clicked() {
+            st.page = ElkPage::Order;
+        }
+        let pat = theme::mode_title("Patterns", st.page == ElkPage::Project, false);
+        if ui.add(pat).on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt 1 only)").clicked() {
+            st.page = ElkPage::Project;
+        }
+        ui.separator();
+        match st.page {
+            ElkPage::Order => preview_tools(ui, st, out),
+            ElkPage::Project => crate::ui::elk_project_view::view_tools(ui, st),
+        }
+    });
+    ui.separator();
 }
 
 pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     let mut out = Vec::new();
-    ui.horizontal(|ui| {
-        mode_header(ui, st, &mut out);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .button("⇥ Dock beside files")
-                .on_hover_text("Show one pool pane in the right column, with the source files and the editor back on screen")
-                .clicked()
-            {
-                out.push(ElkIntent::Dock);
-            }
-        });
-    });
-
+    top(ui, st, &mut out, order_tools);
     let busy = st.busy.is_some();
-    if st.project.is_some() {
-        ui.horizontal_wrapped(|ui| {
-            project_tools(ui, st, &mut out, true);
-        });
-        ui.horizontal_wrapped(|ui| preview_tools(ui, st, &mut out));
-    }
     body(ui, st, &mut out, busy);
     finish(ui, st, &mut out);
     out
@@ -639,11 +661,22 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
 pub fn show_docked(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     let mut out = Vec::new();
     let busy = st.busy.is_some();
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("⤢").on_hover_text("Open the pool in two side-by-side panes, to drag between banks").clicked() {
+            out.push(ElkIntent::Undock);
+        }
+        if ui.button("Patterns").on_hover_text("Open the Device view on Patterns: move, copy, clear and rename patterns").clicked() {
+            out.push(ElkIntent::OpenPatterns);
+        }
+        ui.separator();
+        device_bar(ui, st, &mut out, false);
+    });
     if st.project.is_some() {
         ui.horizontal_wrapped(|ui| {
-            project_tools(ui, st, &mut out, false);
+            order_tools(ui, st);
+            preview_tools(ui, st, &mut out);
         });
-        ui.horizontal_wrapped(|ui| preview_tools(ui, st, &mut out));
+        ui.horizontal(|ui| status_line(ui, st, false));
         if let Some(why) = st.project.as_ref().and_then(|p| p.read_only.clone()).filter(|_| !busy) {
             ui.colored_label(Color32::from_rgb(230, 120, 90), "Read-only").on_hover_text(why);
         }
@@ -651,14 +684,12 @@ pub fn show_docked(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
         st.keys(ui.ctx());
         ui.push_id("docked", |ui| slot_pane(ui, st, 0));
     } else {
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         if let Some((label, done, total)) = &st.busy {
             ui.label(format!("{label}…"));
             ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(format!("{done}/{total}")));
         } else {
-            if ui.button(RichText::new("⬇ Load current project").color(theme::ACCENT_BRIGHT)).on_hover_text("Read the project open on the device now").clicked() {
-                out.push(ElkIntent::Read);
-            }
+            ui.label(RichText::new("Reads whatever project is open on the device now. To work on another one, load it on the device first (PROJECT › LOAD).").weak().small());
             if !st.status.is_empty() {
                 ui.colored_label(Color32::from_rgb(230, 120, 90), &st.status);
             }
@@ -711,75 +742,128 @@ fn preview_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>)
     });
 }
 
-/// Close / reload / push / undo / reset, and progress or status.
-/// Close / reload / push / save dump: what both pages share.
-pub(crate) fn session_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
+/// Load / reload, push, the +Drive project list, dump and close: what every
+/// layout shares. `wide`: with words, else icons.
+pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
     let busy = st.busy.is_some();
+    if st.project.is_none() {
+        // The full-window page shows a big load button of its own.
+        if !wide && !busy {
+            let b = egui::Button::new(RichText::new("⬇ Load current project").color(theme::ACCENT_BRIGHT));
+            if ui.add(b).on_hover_text("Read the project open on the device now (from its memory)").clicked() {
+                out.push(ElkIntent::Read);
+            }
+        }
+        projects_menu(ui, st, out, wide);
+        return;
+    }
+    if ui.add_enabled(!busy, egui::Button::new(if wide { "⬇ Reload" } else { "⬇" })).on_hover_text("Read the project open on the device again (from its memory). Unpushed changes here are dropped.").clicked() {
+        out.push(ElkIntent::Read);
+    }
+    let changed = st.changed();
+    let waiting = st.filling.len();
+    let can_push = !busy && changed > 0 && waiting == 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
+    let label = if wide { format!("⬆ Push to device ({changed})") } else { format!("⬆ {changed}") };
+    let push = ui
+        .add_enabled(can_push, egui::Button::new(RichText::new(label).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
+        .on_hover_text(if waiting > 0 {
+            format!("Waiting for {waiting} dropped file(s) to reach the +Drive")
+        } else {
+            format!(
+                "Write {} pool and {} pattern change(s) into the project loaded on the device (its memory, not the saved copy on +Drive)",
+                st.pool_changed(),
+                st.proj.changed()
+            )
+        });
+    if push.clicked() {
+        st.confirm_push = true;
+    }
+    projects_menu(ui, st, out, wide);
+    let can_save = !busy && st.project.as_ref().is_some_and(|p| !p.partial);
+    if ui
+        .add_enabled(can_save, egui::Button::new("💾"))
+        .on_hover_text("Save dump: the project as read (raw .syx, decoded structs, names and strings) to ~/Documents/sample_manager/project_dumps, for format research")
+        .clicked()
     {
-        if !wide {
-            if ui.button("⤢").on_hover_text("Undock: back to the full-window Sample Order view").clicked() {
-                out.push(ElkIntent::Undock);
-            }
-        }
-        let close = theme::close_button(wide.then_some("Close / pick another"), false);
-        if ui.add_enabled(!busy, close).on_hover_text("Close this project and go back to the project list").clicked() {
-            if st.changed() > 0 {
-                st.confirm_close = true;
-            } else {
-                st.close_project();
-            }
-        }
-        if ui.add_enabled(!busy, egui::Button::new(if wide { "⬇ Reload" } else { "⬇" })).on_hover_text("Fetch the project open on the device right now again (from its memory)").clicked() {
-            out.push(ElkIntent::Read);
-        }
-        let changed = st.changed();
-        let waiting = st.filling.len();
-        let can_push = !busy && changed > 0 && waiting == 0 && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
-        let push = ui
-            .add_enabled(can_push, egui::Button::new(RichText::new(if wide { format!("⬆ Push to memory ({changed})") } else { format!("⬆ Push ({changed})") }).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
-            .on_hover_text(if waiting > 0 {
-                format!("Waiting for {waiting} dropped file(s) to reach the +Drive")
-            } else {
-                "Write the new order (and any files put into empty slots) into the project loaded on the device (not the saved copy on +Drive)".to_owned()
-            });
-        if push.clicked() {
-            st.confirm_push = true;
-        }
-        let can_save = !busy && st.project.as_ref().is_some_and(|p| !p.partial);
-        if ui
-            .add_enabled(can_save, egui::Button::new(if wide { "💾 Save dump" } else { "💾" }))
-            .on_hover_text("Save the project as read (raw .syx, decoded structs, names and strings) to ~/Documents/sample_manager/project_dumps, for format research")
-            .clicked()
-        {
-            out.push(ElkIntent::SaveDump);
+        out.push(ElkIntent::SaveDump);
+    }
+    let close = theme::close_button(None, false);
+    if ui.add_enabled(!busy, close).on_hover_text("Close this project here (the device keeps it)").clicked() {
+        if st.changed() > 0 {
+            st.confirm_close = true;
+        } else {
+            st.close_project();
         }
     }
+}
+
+/// The projects saved on the +Drive, as a dropdown. They can't be opened
+/// from here: they're listed so you know what to load on the device.
+fn projects_menu(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
+    let n = match &st.projects {
+        Some(Ok(v)) => format!(" ({})", v.len()),
+        _ => String::new(),
+    };
+    let text = if wide { format!("+Drive projects{n}") } else { format!("+Drive{n}") };
+    egui::ComboBox::from_id_salt("elk_drive_projects")
+        .selected_text(text)
+        .height(420.0)
+        .width(if wide { 180.0 } else { 90.0 })
+        .show_ui(ui, |ui| {
+            ui.set_min_width(260.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Saved on the +Drive").strong());
+                if ui.small_button("⟳").on_hover_text("List again").clicked() {
+                    out.push(ElkIntent::ListProjects);
+                }
+            });
+            ui.label(RichText::new("To work on one: load it on the device (PROJECT › LOAD), then Load / Reload here.").weak().small());
+            ui.separator();
+            match &st.projects {
+                None => {
+                    ui.spinner();
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(Color32::from_rgb(230, 120, 90), e);
+                }
+                Some(Ok(v)) if v.is_empty() => {
+                    ui.label(RichText::new("No saved projects").font(oled_font(12.0)).color(OLED_DIM));
+                }
+                Some(Ok(v)) => {
+                    for p in v {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{:03}", p.slot)).font(oled_font(13.0)).color(OLED_DIM));
+                            ui.label(RichText::new(&p.name).font(oled_font(13.0)).color(OLED));
+                            ui.label(RichText::new(format!("{} KB", p.size / 1024)).font(oled_font(10.0)).color(OLED_DIM));
+                        });
+                    }
+                }
+            }
+        });
 }
 
 /// The progress bar while the device works, else the last status.
 pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElkState, wide: bool) {
     if let Some((label, done, total)) = &st.busy {
-        let w = if wide { ui.available_width().max(320.0) } else { ui.available_width().max(160.0) };
+        let w = if wide { ui.available_width().clamp(160.0, 420.0) } else { ui.available_width().max(120.0) };
         ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
     } else if !st.status.is_empty() && st.project.is_some() {
         ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
     }
 }
 
-fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
-    session_tools(ui, st, out, wide);
+/// Undo / reset for the sample order.
+fn order_tools(ui: &mut egui::Ui, st: &mut ElkState) {
     let busy = st.busy.is_some();
     let changed = st.pool_changed();
-    {
-        if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new(if wide { "↶ Undo" } else { "↶" })).on_hover_text("Undo the last move (⌘Z)").clicked() {
-            st.undo();
-        }
-        if ui.add_enabled(!busy && changed > 0, egui::Button::new(if wide { "↺ Reset" } else { "↺" })).on_hover_text("Back to the order as read from the device").clicked() {
-            st.undo.push((st.order.clone(), st.fills.clone()));
-            st.order = (0..st.order.len() as u16).collect();
-            st.fills.clear();
-        }
-        status_line(ui, st, wide);
+    let wide = !st.docked;
+    if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new(if wide { "↶ Undo" } else { "↶" })).on_hover_text("Undo the last move (⌘Z)").clicked() {
+        st.undo();
+    }
+    if ui.add_enabled(!busy && changed > 0, egui::Button::new(if wide { "↺ Reset" } else { "↺" })).on_hover_text("Back to the order as read from the device").clicked() {
+        st.undo.push((st.order.clone(), st.fills.clone()));
+        st.order = (0..st.order.len() as u16).collect();
+        st.fills.clear();
     }
 }
 
@@ -819,9 +903,9 @@ fn body(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, busy: bo
     }
 }
 
-/// No project loaded: the load button and the saved projects list.
+/// No project loaded: one big load button.
 pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
-    ui.add_space(12.0);
+    ui.add_space(40.0);
     ui.vertical_centered(|ui| {
         if let Some((label, done, total)) = &st.busy {
             ui.label(RichText::new(format!("{label}…")).font(oled_font(14.0)).color(OLED));
@@ -840,8 +924,6 @@ pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<El
             }
         }
     });
-    ui.add_space(12.0);
-    projects_list(ui, st, out);
 }
 
 /// Requests and confirmations common to both layouts.
@@ -927,72 +1009,6 @@ fn confirm_stale(ctx: &egui::Context) -> Option<Stale> {
         });
     });
     answer
-}
-
-fn projects_list(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
-    let n = match &st.projects {
-        Some(Ok(v)) => format!(" ({})", v.len()),
-        _ => String::new(),
-    };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("Projects on +Drive{n}")).strong());
-        if ui.small_button("⟳").on_hover_text("List again").clicked() {
-            out.push(ElkIntent::ListProjects);
-        }
-        ui.label(
-            RichText::new(
-                "Can't be opened from here: load one on the device, then use the button above.",
-            )
-            .weak()
-            .small(),
-        );
-    });
-    egui::Frame::new()
-        .fill(OLED_BG)
-        .corner_radius(2.0)
-        .inner_margin(6.0)
-        .show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
-            match &st.projects {
-                None => {
-                    ui.spinner();
-                }
-                Some(Err(e)) => {
-                    ui.colored_label(Color32::from_rgb(230, 120, 90), e);
-                }
-                Some(Ok(v)) if v.is_empty() => {
-                    ui.label(
-                        RichText::new("No saved projects")
-                            .font(oled_font(12.0))
-                            .color(OLED_DIM),
-                    );
-                }
-                Some(Ok(v)) => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("elk_proj_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for p in v {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(format!("{:03}", p.slot))
-                                            .font(oled_font(TEXT))
-                                            .color(OLED_DIM),
-                                    );
-                                    ui.label(
-                                        RichText::new(&p.name).font(oled_font(TEXT)).color(OLED),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("{} KB", p.size / 1024))
-                                            .font(oled_font(12.0))
-                                            .color(OLED_DIM),
-                                    );
-                                });
-                            }
-                        });
-                }
-            }
-        });
 }
 
 fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {

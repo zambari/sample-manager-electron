@@ -30,8 +30,31 @@ pub(super) struct PoolFetch {
 }
 
 impl App {
+    /// A full-window page. The docked pool stays docked for the way back,
+    /// but the right column shows the files meanwhile.
+    pub(super) fn enter_full_elk(&mut self) {
+        self.dock_pool = false;
+        self.pool_focused = false;
+        self.enter_elk();
+    }
+
     pub(super) fn enter_elk(&mut self) {
         self.elk_mode = true;
+        self.editor_focused = false;
+        self.measure_cache();
+        if !self.elk.asked_projects {
+            self.elk.asked_projects = true;
+            self.device.elk(ElkCmd::ListProjects);
+        }
+    }
+
+    /// Optional home of the pool: docked in the right column, beside the
+    /// files and the editor. (The Device button opens the center view.)
+    pub(super) fn dock_elk(&mut self) {
+        self.elk_mode = false;
+        self.elk_docked = true;
+        self.dock_pool = true;
+        self.pool_focused = true;
         self.editor_focused = false;
         self.measure_cache();
         if !self.elk.asked_projects {
@@ -72,7 +95,7 @@ impl App {
                 self.pool_focused = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(theme::close_button(None, true)).on_hover_text("Close the docked pool (the project stays loaded; reopen it from the editor's Elk Sample Order button)").clicked() {
+                if ui.add(theme::close_button(None, true)).on_hover_text("Close the docked pool (the project stays loaded; reopen it from the Device view's Dock button)").clicked() {
                     self.elk_docked = false;
                     self.pool_focused = false;
                 }
@@ -92,19 +115,21 @@ impl App {
         self.sync_pool_fetch();
         for i in intents {
             match i {
-                ElkIntent::BackToEditor => self.elk_mode = false,
-                ElkIntent::Dock => {
+                ElkIntent::BackToEditor => {
                     self.elk_mode = false;
-                    self.elk_docked = true;
-                    self.dock_pool = true;
-                    self.pool_focused = true;
-                    self.editor_focused = false;
+                    // Back to where the pool lives by default.
+                    if self.elk_docked {
+                        self.dock_pool = true;
+                    }
                 }
+                ElkIntent::Dock => self.dock_elk(),
                 ElkIntent::Undock => {
                     self.elk.page = elk_view::ElkPage::Order;
-                    self.elk_docked = false;
-                    self.pool_focused = false;
-                    self.enter_elk();
+                    self.enter_full_elk();
+                }
+                ElkIntent::OpenPatterns => {
+                    self.elk.page = elk_view::ElkPage::Project;
+                    self.enter_full_elk();
                 }
                 ElkIntent::FetchAll => self.fetch_all(),
                 ElkIntent::StopFetch => self.stop_fetch(),

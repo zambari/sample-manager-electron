@@ -7,19 +7,13 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
         if ui.add(crate::ui::theme::mode_title("Sample Editor", true, focused)).clicked() {
             out.push(EdIntent::TookFocus);
         }
+        ui.add_space(14.0);
         if ui
-            .add(crate::ui::theme::pane_title("Elk Sample Order", false))
-            .on_hover_text("Reorder the sample pool of the project loaded on the Digitakt")
+            .add(crate::ui::theme::pane_title("Device", false))
+            .on_hover_text("The project loaded on the Digitakt (Samples / Patterns), in place of the editor. Its ⇥ Dock button puts the sample pool in the right column instead.")
             .clicked()
         {
             out.push(EdIntent::ElkMode);
-        }
-        if ui
-            .add(crate::ui::theme::pane_title("Elk Project Editor", false))
-            .on_hover_text("Experimental: move, copy, clear and rename the patterns of the project loaded on the Digitakt")
-            .clicked()
-        {
-            out.push(EdIntent::ElkProject);
         }
         ui.separator();
         if let Some(p) = ed.path() {
