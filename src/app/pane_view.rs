@@ -392,7 +392,7 @@ impl App {
         let n_tabs = self.pane(role).tabs.len();
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if n_tabs > 1 && ui.small_button("×").on_hover_text("Close tab").clicked() {
+                if n_tabs > 1 && ui.add(crate::ui::theme::close_button(None, true)).on_hover_text("Close tab").clicked() {
                     close = Some(self.pane(role).active);
                 }
                 if ui

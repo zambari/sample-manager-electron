@@ -821,7 +821,14 @@ impl App {
                 }
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
-                EdIntent::ElkMode => self.enter_elk(),
+                EdIntent::ElkMode => {
+                    self.elk.page = crate::ui::elk_view::ElkPage::Order;
+                    self.enter_elk();
+                }
+                EdIntent::ElkProject => {
+                    self.elk.page = crate::ui::elk_view::ElkPage::Project;
+                    self.enter_elk();
+                }
                 EdIntent::TrimTails => {
                     let rate = self.editor.sample().map_or(1, |s| s.rate.max(1)) as f64;
                     self.status = match self.editor.trim_tails() {

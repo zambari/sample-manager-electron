@@ -8,6 +8,9 @@
 use super::*;
 
 mod dump;
+pub mod patterns;
+
+pub use patterns::{Cell, PatState, Patterns};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Model {
@@ -521,6 +524,8 @@ pub struct ElkProject {
     pub read_only: Option<String>,
     /// Only the pool so far: the patterns are still coming in.
     pub partial: bool,
+    /// The 128 patterns for the project editor, or why they can't be shown.
+    pub patterns: Result<Box<Patterns>, String>,
 }
 
 /// The pool from a project settings struct: where it starts, and its entries.
@@ -613,6 +618,14 @@ impl ElkProject {
             list(&snd_seen)
         );
         let read_only = (!problems.is_empty()).then(|| problems.join("; "));
+        let patterns = if read_only.is_some() {
+            Err("the dump doesn't match the layouts we know".to_owned())
+        } else {
+            Patterns::parse(model, &msgs).map(Box::new)
+        };
+        if let Err(e) = &patterns {
+            crate::log::line(format!("elk-pat: project editor unavailable: {e}"));
+        }
         Ok(Self {
             model,
             msgs,
@@ -624,6 +637,7 @@ impl ElkProject {
             versions,
             read_only,
             partial: false,
+            patterns,
         })
     }
 
@@ -643,6 +657,7 @@ impl ElkProject {
             versions: format!("settings v{sv}"),
             read_only: Some("still reading the patterns".into()),
             partial: true,
+            patterns: Err("still reading the patterns".into()),
         })
     }
 
@@ -656,11 +671,44 @@ impl ElkProject {
     }
 
     /// The messages to send for the pool laid out as `order`, where
-    /// `order[new_slot] = old_slot`: only those whose contents change, in
-    /// dump order (settings last). Untouched patterns, kits and sounds are
-    /// left alone on the device, so edits made there since the read survive.
+    /// `order[new_slot] = old_slot`, and the patterns laid out as `cells`
+    /// (empty = as read): only those whose contents change, in dump order
+    /// (settings last). Untouched patterns, kits and sounds are left alone on
+    /// the device, so edits made there since the read survive.
     /// `fills` are new files put into slots that were empty, by old slot.
-    pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>) -> Vec<Vec<u8>> {
+    pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Vec<u8>> {
+        self.new_data(order, fills, cells)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, d)| {
+                let m = &self.msgs[i];
+                let d = d.filter(|d| *d != m.data)?;
+                Some(build_dump(self.model, m.kind, m.index, &d))
+            })
+            .collect()
+    }
+
+    /// Every pattern payload (by slot) the device should hold after the push,
+    /// to compare with the read-back.
+    pub fn expected_patterns(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Vec<u8>> {
+        let Ok(pats) = &self.patterns else { return Vec::new() };
+        let data = self.new_data(order, fills, cells);
+        (0..patterns::PATTERNS)
+            .map(|i| {
+                let mi = pats.msg_of(i);
+                data[mi].clone().unwrap_or_else(|| self.msgs[mi].data.clone())
+            })
+            .collect()
+    }
+
+    /// The pattern payloads as read, by slot (empty if not parsed).
+    pub fn pattern_data(&self) -> Vec<&[u8]> {
+        let Ok(pats) = &self.patterns else { return Vec::new() };
+        (0..patterns::PATTERNS).map(|i| &self.msgs[pats.msg_of(i)].data[..]).collect()
+    }
+
+    /// New payload per message (`None` = untouched).
+    fn new_data(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Option<Vec<u8>>> {
         let n = self.pool.len();
         let mut new_of = vec![0usize; n];
         for (new, &old) in order.iter().enumerate() {
@@ -692,14 +740,25 @@ impl ElkProject {
                 }
             }
         }
-        self.msgs
-            .iter()
-            .zip(data)
-            .filter_map(|(m, d)| {
-                let d = d.filter(|d| *d != m.data)?;
-                Some(build_dump(self.model, m.kind, m.index, &d))
-            })
-            .collect()
+        // Patterns: built from the pool-remapped payloads, then placed.
+        if let Ok(pats) = &self.patterns {
+            if cells.len() == patterns::PATTERNS {
+                let src = |s: usize| {
+                    let mi = pats.msg_of(s);
+                    data[mi].clone().unwrap_or_else(|| self.msgs[mi].data.clone())
+                };
+                let placed: Vec<(usize, Vec<u8>)> = cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, c)| **c != Cell::as_read(*i))
+                    .filter_map(|(i, c)| Some((pats.msg_of(i), pats.build(i, c, src)?)))
+                    .collect();
+                for (mi, d) in placed {
+                    data[mi] = Some(d);
+                }
+            }
+        }
+        data
     }
 }
 
@@ -725,9 +784,11 @@ pub enum ElkCmd {
         lens: Vec<u32>,
     },
     /// Messages to send, and the settings struct they were built from.
+    /// `force` skips the check that the device still has what we read.
     Push {
         msgs: Vec<Vec<u8>>,
         settings: Vec<u8>,
+        force: bool,
     },
 }
 
@@ -746,6 +807,8 @@ pub enum ElkEv {
     /// `(hash, length) → +Drive path` for pool entries.
     Names(Vec<((u32, u32), String)>),
     Pushed(Result<usize, String>),
+    /// Push not sent: the device's project changed since the read.
+    PushStale,
     /// Answer to `Resolve`: the length that matched and the +Drive path.
     Resolved {
         slot: u16,
@@ -911,19 +974,19 @@ impl Conn {
         Ok(rd.str().ok().filter(|s| !s.is_empty()))
     }
 
-    /// Check the device still has the project we read, then send `msgs`
-    /// paced so it keeps up. `on_sent(n)` after each.
+    /// Check the device still has the project we read (unless `force`),
+    /// then send `msgs` paced so it keeps up. `on_sent(n)` after each.
+    /// `Ok(false)`: nothing sent, the device's project changed.
     pub(super) fn push_project(
         &mut self,
         msgs: &[Vec<u8>],
         settings: &[u8],
+        force: bool,
         on_sent: &mut dyn FnMut(usize),
-    ) -> R<()> {
+    ) -> R<bool> {
         let m = self.model()?;
-        if self.read_settings(m)? != settings {
-            return refused(
-                "the project on the device changed since it was read. Read it again first.",
-            );
+        if !force && self.read_settings(m)? != settings {
+            return Ok(false);
         }
         for (i, msg) in msgs.iter().enumerate() {
             self.send_sysex(msg)?;
@@ -932,7 +995,7 @@ impl Conn {
             ));
             on_sent(i + 1);
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1017,14 +1080,19 @@ impl Worker {
                 crate::log::line(format!("elk: resolve {hash:08x} lens {lens:?} -> {found:?}"));
                 self.em.send(Ev::Elk(ElkEv::Resolved { slot, hash, found }));
             }
-            ElkCmd::Push { msgs, settings } => {
+            ElkCmd::Push { msgs, settings, force } => {
                 let total = msgs.len();
                 prog("Checking project", 0, total);
                 let r = self.with_conn(|c| {
-                    c.push_project(&msgs, &settings, &mut |n| {
+                    c.push_project(&msgs, &settings, force, &mut |n| {
                         prog("Sending to device", n, total)
                     })
                 });
+                if let Ok(false) = r {
+                    crate::log::line("elk: push held back: the device's project changed since the read");
+                    self.em.send(Ev::Elk(ElkEv::PushStale));
+                    return;
+                }
                 if r.is_ok() {
                     // The device keeps writing after the last message lands.
                     prog("Waiting for the device", total, total);

@@ -33,6 +33,9 @@ pub struct ElkState {
     pub busy: Option<(String, usize, usize)>,
     pub status: String,
     pub confirm_push: bool,
+    /// A push was held back because the device's project changed since the
+    /// read: asking whether to push anyway.
+    pub confirm_stale: bool,
     /// Asking whether to drop unpushed changes and close the project.
     confirm_close: bool,
     /// Asking whether to clear these still-referenced slots (as read).
@@ -63,6 +66,13 @@ pub struct ElkState {
     pub docked: bool,
     /// The view gets the keyboard this frame (set by the app).
     pub keys_on: bool,
+    /// Which full-window page is shown.
+    pub page: ElkPage,
+    /// The project editor's layout and selection.
+    pub proj: crate::ui::elk_project_view::ProjEd,
+    /// After a push with pattern edits: every pattern payload, by slot, the
+    /// device should now hold.
+    pub expect_patterns: Option<Vec<Vec<u8>>>,
     /// Pool files queued or on their way into the preview cache.
     pub fetching: HashSet<(u32, u32)>,
     /// Background fetch run: `(done, total)`.
@@ -71,11 +81,19 @@ pub struct ElkState {
     pub cache: Option<(u64, u64)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum ElkPage {
+    #[default]
+    Order,
+    Project,
+}
+
 pub enum ElkIntent {
     BackToEditor,
     ListProjects,
     Read,
-    Push,
+    /// `force`: send even if the device's project changed since the read.
+    Push { force: bool },
     /// Play the local copy of this pool file (`false`), or open it in the
     /// editor (`true`). Fetched into the preview cache first when there is
     /// no local copy.
@@ -97,7 +115,12 @@ pub enum ElkIntent {
 }
 
 impl ElkState {
+    /// Pool slots plus pattern slots changed since the read.
     pub fn changed(&self) -> usize {
+        self.pool_changed() + self.proj.changed()
+    }
+
+    pub fn pool_changed(&self) -> usize {
         self.order
             .iter()
             .enumerate()
@@ -135,9 +158,11 @@ impl ElkState {
         // The full read landing on the pool shown early: keep the edits made
         // while it streamed in.
         if self.project.as_ref().is_some_and(|old| old.partial && old.pool == p.pool) && self.order.len() == p.pool.len() {
+            self.proj.reset(&p);
             self.project = Some(p);
             return;
         }
+        self.proj.reset(&p);
         self.order = (0..p.pool.len() as u16).collect();
         self.confirm_clear = None;
         self.fills.clear();
@@ -151,8 +176,10 @@ impl ElkState {
     }
 
     /// Drops the loaded project, back to the project picker.
-    fn close_project(&mut self) {
+    pub(crate) fn close_project(&mut self) {
         self.project = None;
+        self.proj = Default::default();
+        self.expect_patterns = None;
         self.order.clear();
         self.confirm_clear = None;
         self.fills.clear();
@@ -556,21 +583,35 @@ enum RowAct {
     DropFiles(usize, Vec<std::path::PathBuf>),
 }
 
+/// The mode switch across the top of both full-window pages.
+pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
+    if ui.add(theme::pane_title("Sample Editor", false)).clicked() {
+        out.push(ElkIntent::BackToEditor);
+    }
+    if ui.add(theme::pane_title("Elk Sample Order", st.page == ElkPage::Order)).clicked() {
+        st.page = ElkPage::Order;
+    }
+    if ui
+        .add(theme::pane_title("Elk Project Editor", st.page == ElkPage::Project))
+        .on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt 1 only)")
+        .clicked()
+    {
+        st.page = ElkPage::Project;
+    }
+    ui.separator();
+    if let Some(p) = &st.project {
+        ui.label(
+            RichText::new(format!("{} · {}", p.model.name(), p.versions))
+                .weak()
+                .small(),
+        );
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, st: &mut ElkState) -> Vec<ElkIntent> {
     let mut out = Vec::new();
     ui.horizontal(|ui| {
-        if ui.add(theme::pane_title("Sample Editor", false)).clicked() {
-            out.push(ElkIntent::BackToEditor);
-        }
-        ui.add(theme::pane_title("Elk Sample Order", true));
-        ui.separator();
-        if let Some(p) = &st.project {
-            ui.label(
-                RichText::new(format!("{} · {}", p.model.name(), p.versions))
-                    .weak()
-                    .small(),
-            );
-        }
+        mode_header(ui, st, &mut out);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .button("⇥ Dock beside files")
@@ -671,7 +712,8 @@ fn preview_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>)
 }
 
 /// Close / reload / push / undo / reset, and progress or status.
-fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
+/// Close / reload / push / save dump: what both pages share.
+pub(crate) fn session_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
     let busy = st.busy.is_some();
     {
         if !wide {
@@ -679,8 +721,8 @@ fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>,
                 out.push(ElkIntent::Undock);
             }
         }
-        let close = if wide { "✕ Close / pick another" } else { "✕" };
-        if ui.add_enabled(!busy, egui::Button::new(close)).on_hover_text("Close this project and go back to the project list").clicked() {
+        let close = theme::close_button(wide.then_some("Close / pick another"), false);
+        if ui.add_enabled(!busy, close).on_hover_text("Close this project and go back to the project list").clicked() {
             if st.changed() > 0 {
                 st.confirm_close = true;
             } else {
@@ -711,6 +753,24 @@ fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>,
         {
             out.push(ElkIntent::SaveDump);
         }
+    }
+}
+
+/// The progress bar while the device works, else the last status.
+pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElkState, wide: bool) {
+    if let Some((label, done, total)) = &st.busy {
+        let w = if wide { ui.available_width().max(320.0) } else { ui.available_width().max(160.0) };
+        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
+    } else if !st.status.is_empty() && st.project.is_some() {
+        ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
+    }
+}
+
+fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, wide: bool) {
+    session_tools(ui, st, out, wide);
+    let busy = st.busy.is_some();
+    let changed = st.pool_changed();
+    {
         if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new(if wide { "↶ Undo" } else { "↶" })).on_hover_text("Undo the last move (⌘Z)").clicked() {
             st.undo();
         }
@@ -719,12 +779,7 @@ fn project_tools(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>,
             st.order = (0..st.order.len() as u16).collect();
             st.fills.clear();
         }
-        if let Some((label, done, total)) = &st.busy {
-            let w = if wide { ui.available_width().max(320.0) } else { ui.available_width().max(160.0) };
-            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
-        } else if !st.status.is_empty() && st.project.is_some() {
-            ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
-        }
+        status_line(ui, st, wide);
     }
 }
 
@@ -739,27 +794,7 @@ fn body(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, busy: bo
     }
 
     if st.project.is_none() {
-        ui.add_space(12.0);
-        ui.vertical_centered(|ui| {
-            if let Some((label, done, total)) = &st.busy {
-                ui.label(RichText::new(format!("{label}…")).font(oled_font(14.0)).color(OLED));
-                ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(260.0).text(format!("{done}/{total}")));
-            } else {
-                let big = egui::Button::new(RichText::new("⬇  Load current project from device memory").size(15.0).color(theme::ACCENT_BRIGHT))
-                    .min_size(egui::vec2(320.0, 36.0));
-                if ui.add(big).clicked() {
-                    out.push(ElkIntent::Read);
-                }
-                ui.add_space(6.0);
-                ui.label(RichText::new("Reads whatever project is open on the device now.\nTo work on another one, load it on the device first (PROJECT › LOAD).").weak());
-                if !st.status.is_empty() {
-                    ui.add_space(6.0);
-                    ui.colored_label(Color32::from_rgb(230, 120, 90), &st.status);
-                }
-            }
-        });
-        ui.add_space(12.0);
-        projects_list(ui, st, out);
+        load_screen(ui, st, out);
     } else {
         st.keys(ui.ctx());
         ui.label(
@@ -784,8 +819,33 @@ fn body(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>, busy: bo
     }
 }
 
+/// No project loaded: the load button and the saved projects list.
+pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
+    ui.add_space(12.0);
+    ui.vertical_centered(|ui| {
+        if let Some((label, done, total)) = &st.busy {
+            ui.label(RichText::new(format!("{label}…")).font(oled_font(14.0)).color(OLED));
+            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(260.0).text(format!("{done}/{total}")));
+        } else {
+            let big = egui::Button::new(RichText::new("⬇  Load current project from device memory").size(15.0).color(theme::ACCENT_BRIGHT))
+                .min_size(egui::vec2(320.0, 36.0));
+            if ui.add(big).clicked() {
+                out.push(ElkIntent::Read);
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new("Reads whatever project is open on the device now.\nTo work on another one, load it on the device first (PROJECT › LOAD).").weak());
+            if !st.status.is_empty() {
+                ui.add_space(6.0);
+                ui.colored_label(Color32::from_rgb(230, 120, 90), &st.status);
+            }
+        }
+    });
+    ui.add_space(12.0);
+    projects_list(ui, st, out);
+}
+
 /// Requests and confirmations common to both layouts.
-fn finish(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
+pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
     if let Some((k, open)) = st.want_local.take() {
         out.push(ElkIntent::Local(k, open));
     }
@@ -812,13 +872,61 @@ fn finish(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
         }
     }
     if st.confirm_push {
-        if let Some(yes) = confirm_push(ui.ctx(), st.changed()) {
+        if let Some(yes) = confirm_push(ui.ctx(), st.pool_changed(), st.proj.changed()) {
             st.confirm_push = false;
             if yes {
-                out.push(ElkIntent::Push);
+                out.push(ElkIntent::Push { force: false });
             }
         }
     }
+    if st.confirm_stale {
+        if let Some(a) = confirm_stale(ui.ctx()) {
+            st.confirm_stale = false;
+            match a {
+                Stale::PushAnyway => out.push(ElkIntent::Push { force: true }),
+                Stale::Read => out.push(ElkIntent::Read),
+                Stale::Cancel => {}
+            }
+        }
+    }
+}
+
+enum Stale {
+    PushAnyway,
+    Read,
+    Cancel,
+}
+
+fn confirm_stale(ctx: &egui::Context) -> Option<Stale> {
+    let mut answer = None;
+    egui::Modal::new(egui::Id::unique("elk_stale_modal")).show(ctx, |ui| {
+        ui.set_width(440.0);
+        ui.heading("The project on the device changed");
+        ui.add_space(6.0);
+        ui.label(
+            "Something changed on the device since the project was read. Even turning a knob counts. \
+             Nothing was sent.",
+        );
+        ui.add_space(4.0);
+        ui.label(RichText::new(
+            "Push anyway sends the changes as planned: any pattern, kit or pool data it sends replaces \
+             what the device has there now, including edits made on the device since the read. \
+             Read again first to keep those edits (your unpushed changes here will be lost).",
+        ).weak());
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new("Push anyway").color(Color32::from_rgb(230, 120, 90))).clicked() {
+                answer = Some(Stale::PushAnyway);
+            }
+            if ui.button("Read again").clicked() {
+                answer = Some(Stale::Read);
+            }
+            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                answer = Some(Stale::Cancel);
+            }
+        });
+    });
+    answer
 }
 
 fn projects_list(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>) {
@@ -1371,17 +1479,30 @@ fn slot_row(ui: &mut egui::Ui, st: &ElkState, slot: usize, acts: &mut Vec<RowAct
     }
 }
 
-fn confirm_push(ctx: &egui::Context, changed: usize) -> Option<bool> {
+fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize) -> Option<bool> {
     let mut answer = None;
     egui::Modal::new(egui::Id::unique("elk_push_modal")).show(ctx, |ui| {
         ui.set_width(440.0);
-        ui.heading(format!("Push new sample order ({changed} slots)?"));
+        let what = match (pool, patterns) {
+            (0, n) => format!("{n} pattern slot(s)"),
+            (n, 0) => format!("new sample order, {n} slot(s)"),
+            (a, b) => format!("{a} sample slot(s) and {b} pattern slot(s)"),
+        };
+        ui.heading(format!("Push {what}?"));
         ui.add_space(6.0);
         ui.label(
             "This rewrites the project currently loaded on the device: only the patterns, kits and pool sounds \
-             that reference moved slots are sent, plus the sample pool. Everything else on the device is left as is. \
+             that change are sent, plus the sample pool if it changed. Everything else on the device is left as is. \
              The saved copy on +Drive is not touched.",
         );
+        if patterns > 0 {
+            ui.add_space(4.0);
+            ui.colored_label(
+                Color32::from_rgb(230, 120, 90),
+                "Pattern editing is experimental (Digitakt 1). Each changed slot is sent as a whole pattern with its kit, \
+                 replacing what the device has there now, including edits made on the device since the read.",
+            );
+        }
         ui.add_space(4.0);
         ui.label(RichText::new("Wait for the device's own progress bar to finish. If it sounds right, save via PROJECT › SAVE. If anything is off, don't save: reload the project from +Drive.").weak());
         ui.add_space(8.0);

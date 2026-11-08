@@ -127,6 +127,30 @@ pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget
     }
 }
 
+/// The glyph every close button uses. Plain "×" (U+00D7) is in the bundled
+/// fonts; "✕" and friends are not and render as a missing-glyph box.
+pub const CLOSE_GLYPH: &str = "×";
+
+/// A close button: "×", optionally followed by a label, with one extra pixel
+/// of padding on each side so the narrow glyph doesn't look cramped.
+pub fn close_button(label: Option<&str>, small: bool) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let text = match label {
+            Some(l) => format!("{CLOSE_GLYPH} {l}"),
+            None => CLOSE_GLYPH.to_owned(),
+        };
+        ui.scope(|ui| {
+            ui.spacing_mut().button_padding.x += 1.0;
+            let mut b = egui::Button::new(text);
+            if small {
+                b = b.small();
+            }
+            ui.add(b)
+        })
+        .inner
+    }
+}
+
 /// Corner radius of a pane tab's top corners (the bottom is flat).
 const TAB_RADIUS: f32 = 4.0;
 

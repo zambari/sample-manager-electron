@@ -14,6 +14,13 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
         {
             out.push(EdIntent::ElkMode);
         }
+        if ui
+            .add(crate::ui::theme::pane_title("Elk Project Editor", false))
+            .on_hover_text("Experimental: move, copy, clear and rename the patterns of the project loaded on the Digitakt")
+            .clicked()
+        {
+            out.push(EdIntent::ElkProject);
+        }
         ui.separator();
         if let Some(p) = ed.path() {
             let mut name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -250,7 +257,7 @@ fn close_x(ui: &mut Ui, tab: egui::Rect, dirty: bool) -> bool {
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        "×",
+        crate::ui::theme::CLOSE_GLYPH,
         egui::FontId::proportional(14.0),
         color,
     );

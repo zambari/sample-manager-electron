@@ -63,6 +63,8 @@ pub enum EdIntent {
     NewKit,
     /// Switch the column to the Elk Sample Order view.
     ElkMode,
+    /// Switch to the Elk Project Editor (patterns).
+    ElkProject,
     /// Fade and cut every kit slice's tail below the threshold.
     TrimTails,
     /// Upload what you hear as a new file next to its device original.

@@ -33,7 +33,7 @@ impl App {
                 let exists = fav.is_dir();
                 ui.horizontal(|ui| {
                     if ui
-                        .small_button("×")
+                        .add(crate::ui::theme::close_button(None, true))
                         .on_hover_text("Remove from favourites")
                         .clicked()
                     {

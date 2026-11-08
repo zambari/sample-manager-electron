@@ -43,7 +43,10 @@ impl App {
     pub(super) fn show_elk(&mut self, ui: &mut egui::Ui) {
         self.elk.docked = false;
         self.elk.keys_on = true;
-        let intents = elk_view::show(ui, &mut self.elk);
+        let intents = match self.elk.page {
+            elk_view::ElkPage::Order => elk_view::show(ui, &mut self.elk),
+            elk_view::ElkPage::Project => crate::ui::elk_project_view::show(ui, &mut self.elk),
+        };
         self.elk_intents(intents);
     }
 
@@ -69,7 +72,7 @@ impl App {
                 self.pool_focused = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Close the docked pool (the project stays loaded; reopen it from the editor's Elk Sample Order button)").clicked() {
+                if ui.add(theme::close_button(None, true)).on_hover_text("Close the docked pool (the project stays loaded; reopen it from the editor's Elk Sample Order button)").clicked() {
                     self.elk_docked = false;
                     self.pool_focused = false;
                 }
@@ -98,6 +101,7 @@ impl App {
                     self.editor_focused = false;
                 }
                 ElkIntent::Undock => {
+                    self.elk.page = elk_view::ElkPage::Order;
                     self.elk_docked = false;
                     self.pool_focused = false;
                     self.enter_elk();
@@ -128,9 +132,17 @@ impl App {
                     }
                 }
                 ElkIntent::Local(k, open) => self.elk_local(k, open),
-                ElkIntent::Push => {
+                ElkIntent::Push { force } => {
                     let Some(p) = &self.elk.project else { continue };
-                    let msgs = p.build_push(&self.elk.order, &self.elk.fills);
+                    let cells = &self.elk.proj.cells;
+                    let msgs = p.build_push(&self.elk.order, &self.elk.fills, cells);
+                    let pat_changed = self.elk.proj.changed();
+                    if pat_changed > 0 {
+                        for (i, c) in cells.iter().enumerate().filter(|(i, c)| **c != crate::device::Cell::as_read(*i)) {
+                            crate::log::line(format!("elk-pat: pushing {}: {:?}", crate::device::patterns::label(i), c));
+                        }
+                    }
+                    self.elk.expect_patterns = (pat_changed > 0).then(|| p.expected_patterns(&self.elk.order, &self.elk.fills, cells));
                     for (slot, e) in &self.elk.fills {
                         if e.is_empty() {
                             crate::log::line(format!("elk: pushing slot {slot} (as read) cleared"));
@@ -150,7 +162,7 @@ impl App {
                     let settings = p.settings_data().to_vec();
                     self.elk.expect = Some(self.elk.new_pool());
                     self.elk.busy = Some(("Sending to device".into(), 0, msgs.len()));
-                    self.device.elk(ElkCmd::Push { msgs, settings });
+                    self.device.elk(ElkCmd::Push { msgs, settings, force });
                 }
             }
         }
@@ -490,6 +502,21 @@ impl App {
                                 .filter(|(a, b)| a.is_empty() != b.is_empty() || a.key() != b.key())
                                 .count()
                         };
+                        let pat_check = st.expect_patterns.take().map(|want| {
+                            let got = p.pattern_data();
+                            let Ok(pats) = &p.patterns else {
+                                return Err("patterns couldn't be parsed after the push".to_owned());
+                            };
+                            let off: Vec<usize> = (0..want.len()).filter(|&i| got.get(i).is_none_or(|g| *g != &want[i][..])).collect();
+                            for &i in off.iter().take(8) {
+                                crate::log::line(format!(
+                                    "elk-pat: read back {} differs from what was sent: {}",
+                                    crate::device::patterns::label(i),
+                                    got.get(i).map_or("missing".into(), |g| pats.describe_diff(&want[i], g))
+                                ));
+                            }
+                            if off.is_empty() { Ok(()) } else { Err(format!("{} pattern(s) read back different from what was sent", off.len())) }
+                        });
                         st.status = match st.expect.take() {
                             Some(want) if differ(&want) == 0 => {
                                 "Pushed and read back: the device has the new order. Save on the device (PROJECT › SAVE) to keep it.".to_owned()
@@ -502,6 +529,18 @@ impl App {
                             }
                             None => format!("Read {used} samples"),
                         };
+                        match pat_check {
+                            Some(Ok(())) => {
+                                crate::log::line("elk-pat: read back after push: every pattern matches what was sent".to_owned());
+                                st.status = "Pushed and read back: the device has the new patterns. Save on the device (PROJECT › SAVE) to keep it.".into();
+                            }
+                            Some(Err(e)) => {
+                                let msg = format!("{e} (details in the log, elk-pat:). Check on the device before saving; if anything is off, reload the project from +Drive.");
+                                self.errors.push(msg.clone());
+                                st.status = msg;
+                            }
+                            None => {}
+                        }
                         st.set_project(p);
                         self.refresh_elk_links();
                     }
@@ -555,6 +594,13 @@ impl App {
                     }
                 }
             }
+            ElkEv::PushStale => {
+                st.busy = None;
+                st.expect = None;
+                st.expect_patterns = None;
+                st.status = "Not pushed: the project on the device changed since it was read".into();
+                st.confirm_stale = true;
+            }
             ElkEv::Pushed(r) => match r {
                 Ok(n) => {
                     st.status = format!("Sent {n} messages; reading back to check…");
@@ -563,6 +609,7 @@ impl App {
                 Err(e) => {
                     st.busy = None;
                     st.expect = None;
+                    st.expect_patterns = None;
                     st.status = format!("Push failed: {e}");
                     self.errors.push(format!("push to device: {e}"));
                 }
