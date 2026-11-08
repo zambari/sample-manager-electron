@@ -232,10 +232,11 @@ licensed. Exceptions: `symphonia` is MPL-2.0 (file-level copyleft; we use
 it unmodified), and egui's bundled default fonts are under the SIL Open Font
 License and the Ubuntu Font Licence.
 
-The device-screen pixel font is **[Silkscreen](https://kottke.org/plus/type/silkscreen/)
-by Jason Kottke** (2001), used under the SIL Open Font License 1.1 (see
-[`assets/slkscr-OFL.txt`](assets/slkscr-OFL.txt)). It suits the Elektron
-screens perfectly. Thank you, Jason. Run `cargo metadata` or
+The device-screen pixel font is **[Dogica Pixel](https://rmocci.itch.io/dogica)
+by Roberto Mocci** (2020), used under the SIL Open Font License 1.1 (see
+[`assets/dogicapixel-OFL.txt`](assets/dogicapixel-OFL.txt)). It stays crisp
+and readable across the sizes the Elektron screens need. Thank you, Roberto.
+Run `cargo metadata` or
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) for the full
 list. No third-party file-browser library is used; the file browser is
 written from scratch on top of `walkdir` and `trash`.

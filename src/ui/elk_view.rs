@@ -632,13 +632,16 @@ pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElkState, out: &mut Vec<ElkIntent>
     // Samples / Patterns, with each page's view options beside them.
     ui.add_space(2.0);
     ui.horizontal_wrapped(|ui| {
+        ui.add_space(6.0);
         if ui.add(theme::mode_title("Samples", st.page == ElkPage::Order, false)).on_hover_text("The sample pool in two side-by-side panes").clicked() {
             st.page = ElkPage::Order;
         }
+        ui.add_space(14.0);
         let pat = theme::mode_title("Patterns", st.page == ElkPage::Project, false);
         if ui.add(pat).on_hover_text("Experimental: move, copy, clear and rename patterns (Digitakt 1 only)").clicked() {
             st.page = ElkPage::Project;
         }
+        ui.add_space(6.0);
         ui.separator();
         match st.page {
             ElkPage::Order => preview_tools(ui, st, out),
@@ -1120,8 +1123,11 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElkState, side: usize) {
         .corner_radius(2.0)
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            // show_rows sizes the list with the spacing set *before* it is
+            // called, so zero it here, not inside, or the list gets a blank
+            // tail of rows × spacing.
+            ui.spacing_mut().item_spacing.y = 0.0;
             scroll.show_rows(ui, ROW_H, rows, |ui, range| {
-                ui.spacing_mut().item_spacing.y = 0.0;
                 for i in range {
                     slot_row(ui, st, first + i, &mut acts);
                 }

@@ -259,7 +259,7 @@ pub fn section_header(ui: &mut egui::Ui, label: &str) {
     }
 }
 
-/// Show / hide switch for a panel: a flat, square-cornered Silkscreen label
+/// Show / hide switch for a panel: a flat, square-cornered pixel-font label
 /// whose background is the indicator. On: low-alpha accent fill, normal text.
 /// Off: no fill, dim text. Quieter than the solid orange chips used for
 /// Loop / Snap etc., so the Show bar reads as its own thing.
@@ -300,12 +300,20 @@ pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + '
     }
 }
 
-/// Font family for device-screen text (Silkscreen pixel font).
+/// Font family for device-screen text (Dogica Pixel font).
 pub const OLED_FAMILY: &str = "oled";
 
-/// Device-screen text: the Silkscreen pixel font.
+/// Dogica draws about 2pt larger than Silkscreen did at the same size, and
+/// layouts were tuned for Silkscreen, so every pixel-font size is scaled
+/// down by this factor.
+const OLED_SIZE_SCALE: f32 = 0.7;
+
+/// Device-screen text: the Dogica Pixel font.
 pub fn oled_font(size: f32) -> egui::FontId {
-    egui::FontId::new(size, egui::FontFamily::Name(OLED_FAMILY.into()))
+    egui::FontId::new(
+        size * OLED_SIZE_SCALE,
+        egui::FontFamily::Name(OLED_FAMILY.into()),
+    )
 }
 
 /// Readout green-white, like the device screen. Used for anything that lives
@@ -320,12 +328,12 @@ pub const OLED_HOVER: Color32 = Color32::from_rgb(30, 36, 36);
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "silkscreen".to_owned(),
+        "dogica_pixel".to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-            "../../assets/slkscr.ttf"
+            "../../assets/dogicapixel.ttf"
         ))),
     );
-    let mut fam = vec!["silkscreen".to_owned()];
+    let mut fam = vec!["dogica_pixel".to_owned()];
     fam.extend(
         fonts
             .families

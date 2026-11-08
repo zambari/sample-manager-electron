@@ -48,7 +48,7 @@ impl Model {
         }
     }
 
-    fn kit_tracks(self) -> usize {
+    pub fn kit_tracks(self) -> usize {
         match self {
             Model::Digitakt => 8,
             Model::Digitakt2 => 16,

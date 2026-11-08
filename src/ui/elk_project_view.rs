@@ -401,21 +401,18 @@ fn keys(ctx: &egui::Context, st: &mut ElkState) {
 
 /// View options, beside the Samples / Patterns tabs.
 pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElkState) {
-    let Some(p) = st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()) else { return };
+    if st.project.as_ref().and_then(|p| p.patterns.as_deref().ok()).is_none() {
+        return;
+    }
     let ed = &mut st.proj;
     ui.toggle_value(&mut ed.used_only, "Hide empty").on_hover_text("Hide empty slots (selected and changed ones stay)");
-    if ui.small_button("Open all banks").clicked() {
+    let all_open = ed.banks.iter().all(|&b| b);
+    let all_folded = ed.banks.iter().all(|&b| !b);
+    if ui.add_enabled(!all_open, egui::Button::new("Open all banks").small()).clicked() {
         ed.banks = [true; BANKS];
     }
-    if ui.small_button("Fold all banks").clicked() {
+    if ui.add_enabled(!all_folded, egui::Button::new("Fold all banks").small()).clicked() {
         ed.banks = [false; BANKS];
-    }
-    if ui.small_button("Show steps").on_hover_text("Fold out every pattern in the open banks").clicked() {
-        let vis = ed.visible(p);
-        ed.open.extend(vis);
-    }
-    if ui.small_button("Hide steps").clicked() {
-        ed.open.clear();
     }
 }
 
@@ -501,7 +498,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElkState, busy: bool) {
     let Some(proj) = st.project.as_ref() else { return };
     let Ok(p) = proj.patterns.as_deref() else { return };
     let editable = p.read_only.is_none() && !busy;
-    let audio = p.info.first().map_or(8, |i| i.tracks.len().max(8));
+    // Audio tracks: 8 on the DT1 (then 8 MIDI tracks), 16 on the DT2.
+    let audio = proj.model.kit_tracks();
     let ed = &mut st.proj;
     let names = &st.names;
     let vis = ed.visible(p);
@@ -859,23 +857,34 @@ fn dots(painter: &egui::Painter, at: egui::Pos2, max_w: f32, seq: &TrackSeq) -> 
 }
 
 /// The audio tracks squeezed into a small picture: 2 px per step, one thin
-/// line per track.
+/// line per track. More than 8 tracks (DT2) share lines two at a time, so
+/// each line stays tall enough to read.
 fn mini(painter: &egui::Painter, at: egui::Pos2, h: f32, tracks: &[&TrackSeq]) {
+    const BG: Color32 = Color32::from_rgb(92, 42, 6);
+    const LEN: Color32 = Color32::from_rgb(122, 60, 16);
+    const LOCK: Color32 = Color32::from_rgb(196, 128, 70);
     let Some(first) = tracks.first() else { return };
     let n = first.steps.len();
-    let line = h / tracks.len().max(1) as f32;
+    let per_line = if tracks.len() > 8 { 2 } else { 1 };
+    let lines = tracks.len().div_ceil(per_line).max(1);
+    let line = h / lines as f32;
     let bg = Rect::from_min_size(at, egui::vec2(n as f32 * 2.0, h));
-    painter.rect_filled(bg.expand(1.0), 1.0, Color32::from_rgb(10, 12, 12));
-    for (t, seq) in tracks.iter().enumerate() {
-        let y = at.y + t as f32 * line;
-        // The track's length, faintly.
-        let lr = Rect::from_min_size(egui::pos2(at.x, y + line * 0.35), egui::vec2(seq.len as f32 * 2.0, (line * 0.3).max(0.5)));
-        painter.rect_filled(lr, 0.0, Color32::from_rgb(26, 31, 30));
-        for (k, s) in seq.steps.iter().enumerate().take(seq.len) {
-            let c = match s {
-                Step::Note => OLED,
-                Step::Lock => OLED_DIM,
-                Step::None => continue,
+    painter.rect_filled(bg.expand(1.0), 1.0, BG);
+    for (l, group) in tracks.chunks(per_line).enumerate() {
+        let y = at.y + l as f32 * line;
+        // The longest track's length, faintly.
+        let len = group.iter().map(|t| t.len).max().unwrap_or(0);
+        let lr = Rect::from_min_size(egui::pos2(at.x, y + line * 0.35), egui::vec2(len as f32 * 2.0, (line * 0.3).max(0.5)));
+        painter.rect_filled(lr, 0.0, LEN);
+        for k in 0..len {
+            // A note on either track wins over a lock.
+            let step = |t: &&TrackSeq| if k < t.len { t.steps.get(k).copied().unwrap_or(Step::None) } else { Step::None };
+            let c = if group.iter().any(|t| step(t) == Step::Note) {
+                OLED
+            } else if group.iter().any(|t| step(t) == Step::Lock) {
+                LOCK
+            } else {
+                continue;
             };
             painter.rect_filled(Rect::from_min_size(egui::pos2(at.x + k as f32 * 2.0, y + 0.3), egui::vec2(1.6, (line - 0.6).max(1.0))), 0.0, c);
         }
