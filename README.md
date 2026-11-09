@@ -232,11 +232,13 @@ licensed. Exceptions: `symphonia` is MPL-2.0 (file-level copyleft; we use
 it unmodified), and egui's bundled default fonts are under the SIL Open Font
 License and the Ubuntu Font Licence.
 
-The device-screen pixel font is **[Dogica Pixel](https://rmocci.itch.io/dogica)
-by Roberto Mocci** (2020), used under the SIL Open Font License 1.1 (see
-[`assets/dogicapixel-OFL.txt`](assets/dogicapixel-OFL.txt)). It stays crisp
-and readable across the sizes the Elektron screens need. Thank you, Roberto.
-Run `cargo metadata` or
+The device-screen pixel font is **[Frucade](http://pixelfonts.style-force.net/)
+by Michael Schmidt** (2005). Frucade is free for personal use only, and
+Michael kindly gave Sample Manager written permission to use it (see
+[`assets/frucade-PERMISSION.txt`](assets/frucade-PERMISSION.txt)). The font
+is not covered by Sample Manager's MIT license, so to use it in your own
+project, ask the author. It is the closest match we found to the Elektron
+screen font. Thank you, Michael. Run `cargo metadata` or
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) for the full
 list. No third-party file-browser library is used; the file browser is
 written from scratch on top of `walkdir` and `trash`.

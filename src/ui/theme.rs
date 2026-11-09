@@ -414,15 +414,15 @@ pub fn device_tab_strip<T: PartialEq + Copy>(
     picked
 }
 
-/// Font family for device-screen text (Dogica Pixel font).
+/// Font family for device-screen text (Frucade pixel font).
 pub const OLED_FAMILY: &str = "oled";
 
-/// Dogica draws about 2pt larger than Silkscreen did at the same size, and
-/// layouts were tuned for Silkscreen, so every pixel-font size is scaled
-/// down by this factor.
-const OLED_SIZE_SCALE: f32 = 0.6;
+/// Frucade's capitals are 7/8 of the font size, much taller than Silkscreen's
+/// (5/8), and layouts were tuned for Silkscreen, so every pixel-font size is
+/// scaled down by this factor.
+const OLED_SIZE_SCALE: f32 = 0.8;
 
-/// Device-screen text: the Dogica Pixel font.
+/// Device-screen text: the Frucade pixel font.
 pub fn oled_font(size: f32) -> egui::FontId {
     egui::FontId::new(
         size * OLED_SIZE_SCALE,
@@ -442,12 +442,12 @@ pub const OLED_HOVER: Color32 = Color32::from_rgb(30, 36, 36);
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        "dogica_pixel".to_owned(),
+        "frucade".to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-            "../../assets/dogicapixel.ttf"
+            "../../assets/frucade.ttf"
         ))),
     );
-    let mut fam = vec!["dogica_pixel".to_owned()];
+    let mut fam = vec!["frucade".to_owned()];
     fam.extend(
         fonts
             .families

@@ -1,0 +1,13 @@
+Frucade Regular pixel font (assets/frucade.ttf)
+Copyright 2004-2005 Michael Schmidt (http://www.style-force.net)
+Originally distributed via Semplice Pixelfonts: http://pixelfonts.style-force.net/
+
+The font's own readme makes it free for personal use only; other use needs the
+author's permission. Michael Schmidt granted Sample Manager written permission
+to use Frucade by email on 2026-11-09:
+
+    "You can use the Frucade font of course. Your sample manager looks great. :)"
+
+This permission covers Frucade's use in Sample Manager only. The font is NOT
+covered by Sample Manager's MIT license. Anyone reusing it elsewhere needs
+their own permission from the author.
