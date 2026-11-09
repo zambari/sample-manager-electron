@@ -10,6 +10,10 @@ Elektron Digitakt.
 - **Digitakt +Drive access over USB MIDI**: browse, create folders, rename,
   move, delete (to `/trash`, so mistakes can be undone), and transfer
   samples both ways.
+- **Project view** for the project loaded on the Digitakt: reorder and
+  clean up the sample pool, move, copy and rename patterns, preview
+  on-device samples from a local cache, and back up or restore projects
+  with their samples.
 
 Built in Rust with [egui](https://github.com/emilk/egui).
 
@@ -128,31 +132,92 @@ its real start on the device.
   browser as files committed to the destination, so you can see what's
   already in the kit.
 
-### Elek Sample Order
+### Elektron device view
 
-Click **Elek Sample Order** next to the editor title to rearrange the sample
-pool of the project loaded on a Digitakt or Digitakt II. Drag a slot onto
-any other (in any bank) to swap them, or select several and move them with
-**⌥↑ / ⌥↓**. **Push to memory** writes the new order into the project in
-the device's memory, updating patterns, kits and sounds to match. Only the
-parts that changed are sent. Saved projects on the +Drive are never
-written; save the project on the device to keep the result.
+Click **Device** next to the editor title to work on the project loaded on
+a Digitakt or Digitakt II, in place of the editor. It has two pages,
+**Samples** and **Patterns**. *Load* reads whatever project is open on the
+device now (load another one on the device with PROJECT › LOAD first).
+Patterns arrive one by one, folded-out banks first; a bank can be edited
+as soon as all of it is in, and **Stop** ends a read early, keeping the
+banks that finished.
 
-Two panes show two banks side by side; drag onto a bank tab or into the
-other pane to move samples between banks. Hold **⌃** or **⌥** while
-dropping to insert and shift the following slots instead of swapping.
-The `×N` column shows how many times the project uses each sample (kit
-tracks, sample locks and sounds).
+Changes stay in the app until you **Push to device**, which writes them
+into the project in the device's memory, updating patterns, kits and
+sounds to match, then reads it back to check. Only the parts that changed
+are sent. Saved projects on the +Drive are never written; save the
+project on the device (PROJECT › SAVE) to keep the result. **⌘Z** undoes
+an edit, and *Read again* goes back to what's on the device. The app
+notices when the device is plugged in or out and reconnects on its own.
 
-Click a slot, or move onto it with ↑/↓, to hear it. A sample without a
-local copy is fetched into a preview cache first; *Cache …* fetches the
-whole pool in the background. Drop audio files onto empty slots to add
-them to the project: they're uploaded into the +Drive folder open in a
-file tab (files already on the +Drive are just linked).
+#### Samples: reorder and clean up the pool
+
+- Drag a slot onto any other (in any bank) to swap them, or select several
+  and move them with **⌥↑ / ⌥↓**. Hold **⌃** or **⌥** while dropping to
+  insert and shift the following slots instead of swapping.
+- Two panes show two banks side by side; drag onto a bank tab or into the
+  other pane to move samples between banks. **⇥ Dock beside files** puts
+  the pool in the right column instead, next to the editor and files.
+- The `×N` column shows how many times the project uses each sample (kit
+  tracks, sample locks and sounds), and the pool shows how many are unused.
+- **Clear** (⌫) empties a slot; *Clear all unused samples* empties every
+  slot nothing points at. The files stay on the +Drive. Clearing a sample
+  that is still used asks first.
+- Drop audio files onto empty slots to add them to the project: they're
+  uploaded into the +Drive folder open in a file tab (files already on the
+  +Drive are just linked).
 
 ![Elek Sample Order: two bank panes of a Digitakt II project](docs/elek_sample_order.png)
 
-> **Use at your own risk.** Push to memory rewrites the project that is
+#### Patterns: organise and rename (experimental)
+
+- **Move** patterns by dragging (swaps with what's there; hold **⌥** while
+  dropping to copy), or **copy and paste** them (⌘C / ⌘V), within a bank or
+  between banks. **Clear** (⌫) empties a pattern. Songs that refer to a
+  moved pattern aren't updated yet.
+- **Pack bank** moves a bank's used patterns to the front, in order.
+- **Rename** a pattern with ⏎ or a double-click; this sets both the
+  pattern name and its kit name. With several selected, *Rename all* names
+  them from a template: `{n}` counts 1, 2, 3…, `{slot}` is A01…, `{name}`
+  keeps the current name (e.g. `VERSE {n}`). A preview shows the result.
+- *Fold all* / *Open all banks* and *Hide empty* keep long projects
+  manageable.
+
+Digitakt II pattern support is newer and less tested than Digitakt 1.
+
+#### Preview cache for samples on the device
+
+Click a pool slot, or move onto it with ↑/↓, to hear it. When the app has a
+local copy of the file (one you uploaded or downloaded earlier and haven't
+changed), it plays straight from that. Otherwise the sample is fetched
+into a preview cache first, ahead of anything else queued. **⬇ Fetch all
+for preview** fills the cache for the whole pool in the background.
+
+Cached samples are kept by content, so they play instantly next time,
+whichever project uses them. The *Cache* menu shows its size and can move
+it to the Trash. It lives in `~/Library/Caches/sample_manager` on macOS
+and `%LOCALAPPDATA%\sample_manager\cache` on Windows.
+
+#### Project backup and restore (experimental)
+
+- **Save project…** writes the project as read (patterns, kits, sounds and
+  the sample pool) to a JSON file. **Save project with samples…** makes a
+  folder with the JSON and a `samples/` folder holding every WAV it uses,
+  so it can be restored even if the +Drive files are gone.
+- **Load project…** opens a saved project in the app. Its samples are
+  found on the device by content; with a bundle, missing ones are uploaded
+  from its `samples/` folder. Nothing goes to the device until you push,
+  and pushing replaces the project in the device's memory.
+- A single pattern can be saved the same way (*Save pattern…*, with or
+  without samples) and loaded into any slot with *Load pattern here…*.
+  Samples it needs that aren't in the pool go into empty slots.
+- Files go to `~/Documents/sample_manager` by default.
+
+This is not yet a replacement for the device's own backups: keep using
+Elektron Transfer or the +Drive's saved projects for anything you can't
+afford to lose.
+
+> **Use at your own risk.** Push to device rewrites the project that is
 > currently loaded on the device. The saved copy on the +Drive is left
 > alone, but the reverse-engineered project format may still have gaps.
 > **Save your project on the Digitakt before pushing**, so you can reload
