@@ -9,17 +9,23 @@ pub const ACCENT: Color32 = Color32::from_rgb(184, 88, 18);
 pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(236, 132, 44);
 /// Text drawn on top of an `ACCENT` fill.
 pub const ON_ACCENT: Color32 = Color32::from_rgb(255, 238, 222);
+/// Second accent for everything that is the Elektron device: the Device
+/// switch, its Samples / Patterns tabs, +Drive panes and the device views.
+/// Warm yellow so it sits beside the orange without blending into it.
+pub const DEVICE_ACCENT: Color32 = Color32::from_rgb(176, 136, 16);
+/// Brighter device yellow for text, outlines and markers.
+pub const DEVICE_ACCENT_BRIGHT: Color32 = Color32::from_rgb(232, 194, 64);
 /// Main waveform colour inside the in/out region.
 pub const WAVE: Color32 = Color32::from_rgb(178, 200, 214);
 
 /// Faint frame around a pane showing the Digitakt's +Drive.
 pub fn device_frame() -> Stroke {
-    Stroke::new(1.5, ACCENT_BRIGHT.gamma_multiply(0.45))
+    Stroke::new(1.5, DEVICE_ACCENT_BRIGHT.gamma_multiply(0.45))
 }
 
 /// Barely-there wash behind a +Drive pane.
 pub fn device_wash() -> Color32 {
-    ACCENT.gamma_multiply(0.05)
+    DEVICE_ACCENT.gamma_multiply(0.05)
 }
 
 pub fn apply(ctx: &egui::Context) {
@@ -103,12 +109,18 @@ pub fn pane_title(label: &str, focused: bool) -> impl egui::Widget + '_ {
 /// the active mode is always underlined so you can tell which one you're in;
 /// it lights up orange only when its column also has keyboard focus.
 pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget + '_ {
+    accent_title(label, active, focused, ACCENT, ACCENT_BRIGHT)
+}
+
+/// [`mode_title`] in the given accent colours (`fill` for the underline,
+/// `bright` for focused text).
+fn accent_title(label: &str, active: bool, focused: bool, fill: Color32, bright: Color32) -> impl egui::Widget + '_ {
     move |ui: &mut egui::Ui| {
         let text = egui::RichText::new(label.to_uppercase())
             .size(12.0)
             .strong();
         let text = if focused {
-            text.color(ACCENT_BRIGHT)
+            text.color(bright)
         } else if active {
             text.color(ui.visuals().strong_text_color())
         } else {
@@ -120,7 +132,7 @@ pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget
             ui.painter().hline(
                 r.x_range().shrink(4.0),
                 r.bottom(),
-                Stroke::new(2.0, ACCENT),
+                Stroke::new(2.0, fill),
             );
         }
         resp
@@ -153,13 +165,25 @@ pub fn device_dimmed<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R)
     .inner
 }
 
+/// The darker rounded box that holds the Device switch and its Samples /
+/// Patterns tabs, so the switch and its sub-modes read as one group.
+pub fn device_group<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(20, 19, 16))
+        .stroke(Stroke::new(1.0, DEVICE_ACCENT.gamma_multiply(0.35)))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| ui.horizontal(add).inner)
+        .inner
+}
+
 /// The "🎹 DEVICE" mode switch, shared by the editor's header and the
 /// Device view's own. Faded while no device is plugged in; with more than
 /// one plugged in, shows a warning mark in the error colour.
 pub fn device_switch(ui: &mut egui::Ui, active: bool, focused: bool) -> egui::Response {
     let presence = crate::device::presence();
     let label = device_label("Device");
-    let mut resp = device_dimmed(ui, |ui| ui.add(mode_title(&label, active, focused)));
+    let mut resp = device_dimmed(ui, |ui| ui.add(accent_title(&label, active, focused, DEVICE_ACCENT, DEVICE_ACCENT_BRIGHT)));
     if matches!(presence, crate::device::Presence::Many(_)) {
         let err = ui.visuals().error_fg_color;
         resp |= ui.label(egui::RichText::new("⚠").color(err).strong());
@@ -358,7 +382,7 @@ pub fn device_tab(label: &str, selected: bool) -> impl egui::Widget + '_ {
         let resp = ui.add(egui::Button::new(text).frame(false));
         if selected {
             let r = resp.rect;
-            ui.painter().hline(r.x_range().shrink(4.0), r.bottom(), Stroke::new(2.0, ACCENT));
+            ui.painter().hline(r.x_range().shrink(4.0), r.bottom(), Stroke::new(2.0, DEVICE_ACCENT));
         }
         resp
     }

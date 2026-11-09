@@ -665,7 +665,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 if changed > 0 {
                     note.push_str(&format!(" · {changed} changed"));
                 }
-                ui.painter().text(egui::pos2(r.left() + 100.0, r.center().y), egui::Align2::LEFT_CENTER, note, oled_font(10.0), if changed > 0 { theme::ACCENT_BRIGHT } else { OLED_DIM });
+                ui.painter().text(egui::pos2(r.left() + 100.0, r.center().y), egui::Align2::LEFT_CENTER, note, oled_font(10.0), if changed > 0 { theme::DEVICE_ACCENT_BRIGHT } else { OLED_DIM });
                 if hdr.clicked() {
                     bank_toggles.push(b);
                 }
@@ -708,12 +708,12 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 painter.rect_filled(rect, 2.0, fill);
                 let changed = *cell != Cell::as_read(i);
                 if landing.contains(&i) {
-                    painter.rect_stroke(rect, 2.0, Stroke::new(2.0, theme::ACCENT_BRIGHT), egui::StrokeKind::Inside);
+                    painter.rect_stroke(rect, 2.0, Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT), egui::StrokeKind::Inside);
                 } else if ed.cursor == Some(i) {
                     painter.rect_stroke(rect, 2.0, Stroke::new(1.0, OLED_DIM), egui::StrokeKind::Inside);
                 }
                 if changed {
-                    painter.rect_filled(Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height())), 1.0, theme::ACCENT);
+                    painter.rect_filled(Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height())), 1.0, theme::DEVICE_ACCENT);
                 }
 
                 let head = Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), ROW_H - 2.0));
@@ -747,7 +747,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     _ => None,
                 };
                 for bt in badge.into_iter().chain(cell.name.is_some().then(|| "✎".to_owned())) {
-                    let r = painter.text(egui::pos2(bx, y), egui::Align2::LEFT_CENTER, bt, oled_font(11.0), theme::ACCENT_BRIGHT);
+                    let r = painter.text(egui::pos2(bx, y), egui::Align2::LEFT_CENTER, bt, oled_font(11.0), theme::DEVICE_ACCENT_BRIGHT);
                     bx = r.right() + 6.0;
                 }
 
@@ -808,7 +808,9 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                                 let max_w = (rect.right() - dots_x - 10.0).max(120.0);
                                 dots(&painter, egui::pos2(dots_x, cy), max_w, seq);
                                 if let Some(pp) = pointer.filter(|pp| (pp.y - cy).abs() <= TRACK_H / 2.0 && rect.contains(*pp)) {
-                                    if let Some(k) = step_at(seq.steps.len(), dots_x, max_w, pp.x).filter(|&k| k < seq.len && seq.steps[k] != Step::None) {
+                                    let hit = nearest_step(seq.steps.len(), dots_x, max_w, pp.x, |k| k < seq.len && seq.steps[k] != Step::None);
+                                    if let Some((k, sx)) = hit {
+                                        painter.circle_stroke(egui::pos2(sx, cy), 4.5, egui::Stroke::new(1.0, theme::DEVICE_ACCENT_BRIGHT));
                                         step_hover = Some(step_tip(seq, k, label, &sample_name));
                                     }
                                 }
@@ -961,7 +963,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
         } else if let Some(pt) = pointer {
             let n = ed.sel.len();
             let tip = format!("{} {n}{}", if mods.alt { "⧉ copy" } else { "move" }, under.map(|u| format!(" → {}", patterns::label(u))).unwrap_or_default());
-            ui.painter().text(pt + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, tip, oled_font(12.0), theme::ACCENT_BRIGHT);
+            ui.painter().text(pt + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, tip, oled_font(12.0), theme::DEVICE_ACCENT_BRIGHT);
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         }
     }
@@ -990,10 +992,17 @@ fn dot_pitch(n: usize, max_w: f32) -> (f32, f32) {
     (((max_w - groups * gap) / n.max(1) as f32).clamp(3.0, 9.0), gap)
 }
 
-/// The step under `x` in a dot line drawn from `x0`.
-fn step_at(n: usize, x0: f32, max_w: f32, x: f32) -> Option<usize> {
+/// The step accepted by `want` nearest to `x` in a dot line drawn from
+/// `x0`, within a reach wider than the dot itself so it's easy to hover.
+/// Returns the step and its centre x.
+fn nearest_step(n: usize, x0: f32, max_w: f32, x: f32, want: impl Fn(usize) -> bool) -> Option<(usize, f32)> {
     let (pitch, gap) = dot_pitch(n, max_w);
-    (0..n).find(|&k| (x - (x0 + k as f32 * pitch + (k / 16) as f32 * gap + pitch / 2.0)).abs() <= pitch / 2.0)
+    let reach = (pitch * 2.0).max(14.0);
+    (0..n)
+        .filter(|&k| want(k))
+        .map(|k| (k, x0 + k as f32 * pitch + (k / 16) as f32 * gap + pitch / 2.0))
+        .filter(|&(_, cx)| (x - cx).abs() <= reach)
+        .min_by(|a, b| (x - a.1).abs().total_cmp(&(x - b.1).abs()))
 }
 
 /// What's on step `k`: note-ish bytes, flags, p-locks.

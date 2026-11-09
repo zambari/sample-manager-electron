@@ -631,18 +631,20 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
         out.push(ElekIntent::BackToEditor);
     }
     ui.add_space(14.0);
-    theme::device_switch(ui, true, true);
-    if crate::device::presence().available() || st.project.is_some() {
-        if let Some(page) = device_pages(ui, Some(st.page)) {
-            st.page = page;
+    theme::device_group(ui, |ui| {
+        theme::device_switch(ui, true, true);
+        if crate::device::presence().available() || st.project.is_some() {
+            if let Some(page) = device_pages(ui, Some(st.page)) {
+                st.page = page;
+            }
         }
-    }
+    });
     ui.separator();
     if let Some(p) = &st.project {
         ui.label(RichText::new(format!("{} · {}", p.model.name(), p.versions)).weak().small());
         if let Some(f) = &p.from_file {
             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            ui.label(RichText::new(format!("from file: {name}")).color(theme::ACCENT_BRIGHT).small())
+            ui.label(RichText::new(format!("from file: {name}")).color(theme::DEVICE_ACCENT_BRIGHT).small())
                 .on_hover_text(format!("{}\nNot on the device yet: Push sends the whole project into the device's memory.", f.display()));
         }
     }
@@ -800,7 +802,7 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<El
     if st.project.is_none() {
         // The full-window page shows a big load button of its own.
         if !wide && !busy {
-            let b = egui::Button::new(RichText::new("⬇ Load current project").color(theme::ACCENT_BRIGHT));
+            let b = egui::Button::new(RichText::new("⬇ Load current project").color(theme::DEVICE_ACCENT_BRIGHT));
             if ui.add(b).on_hover_text("Read the project open on the device now (from its memory)").clicked() {
                 out.push(ElekIntent::Read);
             }
@@ -822,7 +824,7 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<El
     let can_push = !busy && (changed > 0 || from_file) && waiting == 0 && !pool_blocked && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
     let label = if wide { format!("⬆ Push to device ({changed})") } else { format!("⬆ {changed}") };
     let push = ui
-        .add_enabled(can_push, egui::Button::new(RichText::new(label).color(if can_push { theme::ACCENT_BRIGHT } else { Color32::GRAY })))
+        .add_enabled(can_push, egui::Button::new(RichText::new(label).color(if can_push { theme::DEVICE_ACCENT_BRIGHT } else { Color32::GRAY })))
         .on_hover_text(if waiting > 0 {
             format!("Waiting for {waiting} file(s) to reach or be found on the +Drive")
         } else if pool_blocked && !busy {
@@ -1027,7 +1029,7 @@ pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
             ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(260.0).text(format!("{done}/{total}")));
             stop_read(ui, st);
         } else {
-            let big = egui::Button::new(RichText::new("⬇  Load current project from device memory").size(15.0).color(theme::ACCENT_BRIGHT))
+            let big = egui::Button::new(RichText::new("⬇  Load current project from device memory").size(15.0).color(theme::DEVICE_ACCENT_BRIGHT))
                 .min_size(egui::vec2(320.0, 36.0));
             if ui.add(big).clicked() {
                 out.push(ElekIntent::Read);
@@ -1344,7 +1346,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
         painter.rect_filled(
             egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
             0.0,
-            theme::ACCENT_BRIGHT,
+            theme::DEVICE_ACCENT_BRIGHT,
         );
     }
     let (fg, dim) = if selected {
@@ -1355,7 +1357,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     let font = oled_font(TEXT);
     let y = rect.center().y;
     let label_color = if moved && !selected {
-        theme::ACCENT_BRIGHT
+        theme::DEVICE_ACCENT_BRIGHT
     } else {
         dim
     };
@@ -1392,7 +1394,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     let uses_w = 44.0;
     let name_x = rect.left() + 8.0 + label_w;
     // A local copy is known: a small dot before the name.
-    let dot_c = if selected { OLED_BG } else { theme::ACCENT_BRIGHT };
+    let dot_c = if selected { OLED_BG } else { theme::DEVICE_ACCENT_BRIGHT };
     if linked.is_some() {
         painter.circle_filled(egui::pos2(name_x - 7.0, y), 2.5, dot_c);
     } else if !off && !e.is_empty() && st.fetching.contains(&e.key()) {
@@ -1462,14 +1464,14 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
                 rect.bottom()
             };
             ui.painter()
-                .hline(rect.x_range(), ly, Stroke::new(2.0, theme::ACCENT_BRIGHT));
+                .hline(rect.x_range(), ly, Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT));
         } else {
             let n = st.sel.len().max(1).min(st.order.len() - slot);
             let r = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_H * n as f32));
             ui.painter().rect_stroke(
                 r,
                 0.0,
-                Stroke::new(2.0, theme::ACCENT_BRIGHT),
+                Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1479,7 +1481,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
         let ok = st.free(from as u16);
         let n = if ok { d.paths.len().min(st.order.len() - slot) } else { 1 };
         let r = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_H * n as f32));
-        let c = if ok { theme::ACCENT_BRIGHT } else { Color32::from_rgb(230, 120, 90) };
+        let c = if ok { theme::DEVICE_ACCENT_BRIGHT } else { Color32::from_rgb(230, 120, 90) };
         ui.painter().rect_stroke(r, 0.0, Stroke::new(2.0, c), egui::StrokeKind::Inside);
     }
     if let Some(d) = resp.release_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
@@ -1671,7 +1673,7 @@ fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize, whole: bool) 
         ui.label(RichText::new("Wait for the device's own progress bar to finish. If it sounds right, save via PROJECT › SAVE. If anything is off, don't save: reload the project from +Drive.").weak());
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button(RichText::new("Push to device").color(theme::ACCENT_BRIGHT)).clicked() {
+            if ui.button(RichText::new("Push to device").color(theme::DEVICE_ACCENT_BRIGHT)).clicked() {
                 answer = Some(true);
             }
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
