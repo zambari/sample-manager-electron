@@ -83,12 +83,20 @@ pub struct ElekState {
     pub expect_patterns: Option<Vec<Option<Vec<u8>>>>,
     /// While a read runs: which banks to read first, and its stop flag.
     pub reading: Option<std::sync::Arc<crate::device::ReadCtl>>,
+    /// The running read's pool has arrived and is what's shown.
+    pub read_shown: bool,
     /// Pool files queued or on their way into the preview cache.
     pub fetching: HashSet<(u32, u32)>,
     /// Background fetch run: `(done, total)`.
     pub fetch: Option<(usize, usize)>,
     /// Preview cache on disk: `(bytes, files)`, once measured.
     pub cache: Option<(u64, u64)>,
+    /// Every pool edit goes to the device straight away, every pattern
+    /// renumbered as usual (overwriting changes made on the device). Only
+    /// with the whole project read.
+    pub live: bool,
+    /// When the pool was last edited, so live pushes wait for a pause.
+    pub edited_at: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -135,6 +143,12 @@ pub enum ElekIntent {
 }
 
 impl ElekState {
+    /// Pool changes can be pushed: every pattern they renumber has arrived,
+    /// so none is left pointing at the wrong sample.
+    pub fn pool_pushable(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| !p.partial)
+    }
+
     /// Pool slots plus pattern slots changed since the read.
     pub fn changed(&self) -> usize {
         self.pool_changed() + self.proj.changed()
@@ -172,6 +186,7 @@ impl ElekState {
         self.filling.remove(&old);
         self.undo.push((self.order.clone(), self.fills.clone()));
         self.fills.insert(old, e);
+        self.edited_at = Some(std::time::Instant::now());
     }
 
     /// The read landing on the project shown while it streamed in (pool
@@ -195,8 +210,10 @@ impl ElekState {
 
     /// Edits are off: the device is busy with something other than a read
     /// streaming in.
+    /// Until a re-read's pool arrives, the old project is still shown and
+    /// edits to it would be dropped, so they're off then too.
     pub fn edit_locked(&self) -> bool {
-        self.busy.is_some() && self.reading.is_none()
+        self.busy.is_some() && (self.reading.is_none() || !self.read_shown)
     }
 
     pub fn set_project(&mut self, p: Box<ElekProject>) {
@@ -270,6 +287,7 @@ impl ElekState {
             return;
         }
         self.undo.push((before, self.fills.clone()));
+        self.edited_at = Some(std::time::Instant::now());
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -289,6 +307,7 @@ impl ElekState {
             self.order = prev;
             self.fills = fills;
             self.status = "Undone".into();
+            self.edited_at = Some(std::time::Instant::now());
         }
     }
 
@@ -393,24 +412,33 @@ impl ElekState {
         });
     }
 
-    /// Puts an empty slot at `at`, pushing `at` and the samples below it down
-    /// as far as the next empty slot, which is used up.
-    fn insert_empty(&mut self, at: usize) {
-        if self.project.is_none() {
+    /// Puts `n` empty slots at `at`, pushing `at` and the samples below it
+    /// down; each one uses up the next empty slot further down.
+    fn insert_empty(&mut self, at: usize, n: usize) {
+        if self.project.is_none() || n == 0 {
             return;
         }
-        let Some(e) =
-            (at + 1..self.order.len()).find(|&i| self.free(self.order[i]))
-        else {
+        let mut order = self.order.clone();
+        let (mut made, mut last) = (0, at);
+        while made < n {
+            // Past the empties made so far (the first one may sit on `at`).
+            let from = at + made.max(1);
+            let Some(e) = (from..order.len()).find(|&i| self.free(order[i])) else { break };
+            order[at..=e].rotate_right(1);
+            made += 1;
+            last = last.max(e);
+        }
+        if made == 0 {
             self.status = "No empty slot below to make room".into();
             return;
+        }
+        self.edit(|o| *o = order);
+        let short = if made < n { format!(" (only {made} of {n}: no more empty slots below)") } else { String::new() };
+        self.status = if made == 1 {
+            format!("Inserted empty at {}; shifted down to {}{short}", self.label(at), self.label(last))
+        } else {
+            format!("Inserted {made} empty at {}–{}; shifted down to {}{short}", self.label(at), self.label(at + made - 1), self.label(last))
         };
-        self.edit(|order| order[at..=e].rotate_right(1));
-        self.status = format!(
-            "Inserted empty at {}; shifted down to {}",
-            self.label(at),
-            self.label(e)
-        );
     }
 
     /// Removes the empty slot at `at`, pulling the samples below it up as far
@@ -460,6 +488,7 @@ impl ElekState {
         let Some(p) = &self.project else { return };
         let was: Vec<bool> = olds.iter().map(|&o| p.pool[o as usize].is_empty()).collect();
         self.undo.push((self.order.clone(), self.fills.clone()));
+        self.edited_at = Some(std::time::Instant::now());
         for (&o, empty_as_read) in olds.iter().zip(was) {
             if empty_as_read {
                 // A file added this session: just take it back out.
@@ -555,7 +584,7 @@ impl ElekState {
                 self.want_local = Some((k, false));
             }
         }
-        if m.command && z {
+        if m.command && z && !self.edit_locked() {
             self.undo();
         }
         if m.command && a {
@@ -580,7 +609,9 @@ impl ElekState {
             return;
         }
         if m.alt && (up || down) {
-            self.nudge(step);
+            if !self.edit_locked() {
+                self.nudge(step);
+            }
             return;
         }
         let c = self.cursor.unwrap_or(0) as i32;
@@ -612,7 +643,8 @@ enum RowAct {
     DragStart(usize),
     DropBefore(usize),
     DropOn(usize),
-    InsertEmpty(usize),
+    /// `(slot, how many)`.
+    InsertEmpty(usize, usize),
     CloseGap(usize),
     MoveHere(usize),
     Nudge(i32),
@@ -820,7 +852,7 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<El
     let waiting = st.filling.len();
     let from_file = st.project.as_ref().is_some_and(|p| p.from_file.is_some());
     // A stopped read: pool changes rewrite every pattern, so they need them all.
-    let pool_blocked = st.project.as_ref().is_some_and(|p| p.partial) && st.pool_changed() > 0;
+    let pool_blocked = !st.pool_pushable() && st.pool_changed() > 0;
     let can_push = !busy && (changed > 0 || from_file) && waiting == 0 && !pool_blocked && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
     let label = if wide { format!("⬆ Push to device ({changed})") } else { format!("⬆ {changed}") };
     let push = ui
@@ -953,7 +985,7 @@ pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElekState, wide: bool) {
 
 /// Undo / reset for the sample order.
 fn order_tools(ui: &mut egui::Ui, st: &mut ElekState) {
-    let busy = st.busy.is_some();
+    let busy = st.edit_locked();
     let changed = st.pool_changed();
     let wide = !st.docked;
     if ui.add_enabled(!busy && !st.undo.is_empty(), egui::Button::new(if wide { "↶ Undo" } else { "↶" })).on_hover_text("Undo the last move (⌘Z)").clicked() {
@@ -963,6 +995,24 @@ fn order_tools(ui: &mut egui::Ui, st: &mut ElekState) {
         st.undo.push((st.order.clone(), st.fills.clone()));
         st.order = (0..st.order.len() as u16).collect();
         st.fills.clear();
+        st.edited_at = Some(std::time::Instant::now());
+    }
+    // The whole project, read from the device: every pattern can follow
+    // its samples, so a live push never leaves one on the wrong sample.
+    let can_live = st.project.as_ref().is_some_and(|p| p.read_only.is_none() && p.from_file.is_none() && !p.partial);
+    let was = st.live;
+    ui.add_enabled_ui(can_live || st.live, |ui| {
+        ui.toggle_value(&mut st.live, if wide { "⚡ Live" } else { "⚡" })
+            .on_hover_text(
+                "Push every sample order change straight away, without asking. Every pattern that uses a moved \
+                 sample is renumbered to follow it, as with a normal push, so nothing plays the wrong sample. \
+                 Changes made on the device since the last read are overwritten. Each push is read back in full \
+                 before the next one goes.",
+            )
+            .on_disabled_hover_text("Needs the whole project read from the device (let the read finish, or reload)");
+    });
+    if st.live && !was {
+        st.status = "Live: sample order changes push right away; every pattern follows its samples".into();
     }
 }
 
@@ -1154,8 +1204,11 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
             Sense::empty(),
         );
         ui.painter().rect_filled(strip, 0.0, OLED_BG);
-        let cell = 26.0;
-        let x0 = strip.center().x - cell * (banks as f32 + 2.0) / 2.0;
+        // Narrow cells in a narrow pane so the strip never spills past the
+        // left edge (it is centred, so overflow would be clipped there).
+        let cells = banks as f32 + 2.0;
+        let cell = (strip.width() / cells).clamp(12.0, 26.0);
+        let x0 = (strip.center().x - cell * cells / 2.0).max(strip.left());
         let font = oled_font(TEXT);
         let arrow = |ui: &mut egui::Ui, i: f32, txt: &str, to: Option<usize>| {
             let r = egui::Rect::from_min_size(
@@ -1263,7 +1316,13 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
     if side == st.active {
         st.reveal = None;
     }
+    let locked = st.edit_locked();
     for a in acts {
+        let edits = !matches!(a, RowAct::Click(..) | RowAct::DragStart(_) | RowAct::Local(..));
+        if locked && edits {
+            st.status = "Wait a moment: the device is busy, and an edit now would be lost".into();
+            continue;
+        }
         match a {
             RowAct::Click(s, m) => {
                 st.active = side;
@@ -1289,7 +1348,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
                 st.active = side;
                 st.move_sel_to(s);
             }
-            RowAct::InsertEmpty(s) => st.insert_empty(s),
+            RowAct::InsertEmpty(s, n) => st.insert_empty(s, n),
             RowAct::CloseGap(s) => st.close_gap(s),
             RowAct::MoveHere(s) => st.move_sel_to(s),
             RowAct::Nudge(d) => st.nudge(d),
@@ -1393,14 +1452,20 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     let size_w = 84.0;
     let uses_w = 44.0;
     let name_x = rect.left() + 8.0 + label_w;
-    // A local copy is known: a small dot before the name.
+    // The sample moved and patterns point at it: the push renumbers them.
     let dot_c = if selected { OLED_BG } else { theme::DEVICE_ACCENT_BRIGHT };
-    if linked.is_some() {
+    if !off && from != slot && uses > 0 {
         painter.circle_filled(egui::pos2(name_x - 7.0, y), 2.5, dot_c);
-    } else if !off && !e.is_empty() && st.fetching.contains(&e.key()) {
-        // Queued for the preview cache.
-        painter.circle_stroke(egui::pos2(name_x - 7.0, y), 2.5, Stroke::new(1.0, dot_c));
     }
+    // Name brightness shows the preview cache: full white plays at once,
+    // 0.8 opacity still has to be pulled from the device.
+    let name_c = if selected {
+        fg
+    } else if linked.is_some() {
+        Color32::WHITE
+    } else {
+        fg.gamma_multiply(0.8)
+    };
     let clip = egui::Rect::from_min_max(
         egui::pos2(name_x, rect.top()),
         egui::pos2(rect.right() - size_w - uses_w, rect.bottom()),
@@ -1410,7 +1475,7 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
         egui::Align2::LEFT_CENTER,
         name,
         font.clone(),
-        if (e.is_empty() && filling.is_none()) || off { dim } else { fg },
+        if (e.is_empty() && filling.is_none()) || off { dim } else { name_c },
     );
     if uses > 0 {
         painter.text(
@@ -1523,8 +1588,23 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
             )
             .clicked()
         {
-            acts.push(RowAct::InsertEmpty(slot));
+            acts.push(RowAct::InsertEmpty(slot, 1));
             ui.close();
+        }
+        // Several selected: make room for as many, above the selection.
+        if selected && n_sel > 1 {
+            let top = st.sel.first().copied().unwrap_or(slot);
+            if ui
+                .button(format!("Insert {n_sel} empty slots above selection"))
+                .on_hover_text(format!(
+                    "Shift {} and everything below down by {n_sel}, using up the next {n_sel} empty slots further down",
+                    st.label(top)
+                ))
+                .clicked()
+            {
+                acts.push(RowAct::InsertEmpty(top, n_sel));
+                ui.close();
+            }
         }
         if st.free(from as u16)
             && ui
@@ -1620,6 +1700,9 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
         tip.push_str(&format!("\npool slot {slot}"));
         if moved {
             tip.push_str(&format!(", was {}", st.label(from)));
+        }
+        if from != slot && uses > 0 {
+            tip.push_str("\npatterns using it get renumbered on push");
         }
         tip.push_str(&format!(
             "\nused {uses}× (once per pattern track, plus pool sounds)"

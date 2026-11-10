@@ -25,7 +25,7 @@ pub(super) struct PoolFetch {
     /// (likely unplugged) drops the queue.
     fails: usize,
     /// Uploads of files dropped onto the pool: job → `(slot as read, file)`.
-    uploads: std::collections::HashMap<u64, Vec<(u16, PathBuf)>>,
+    pub(super) uploads: std::collections::HashMap<u64, Vec<(u16, PathBuf)>>,
     /// Slots being looked up from an earlier upload's link: if the device
     /// no longer has that file, upload it again.
     prior: std::collections::HashMap<u16, PathBuf>,
@@ -216,46 +216,89 @@ impl App {
                 ElekIntent::SavePattern(slot, name, bundle) => self.save_pattern_file(slot, &name, bundle),
                 ElekIntent::LoadPattern(slot) => self.load_pattern_file(slot),
                 ElekIntent::Local(k, open) => self.elek_local(k, open),
-                ElekIntent::Push { force } => {
-                    let Some(p) = &self.elek.project else { continue };
-                    // A project from a file: the device holds something else
-                    // entirely, so there's nothing to compare against.
-                    let whole = p.from_file.is_some();
-                    let force = force || whole;
-                    let cells = &self.elek.proj.cells;
-                    let msgs = p.build_push(&self.elek.order, &self.elek.fills, cells);
-                    let pat_changed = self.elek.proj.changed();
-                    if pat_changed > 0 {
-                        for (i, c) in cells.iter().enumerate().filter(|(i, c)| **c != crate::device::Cell::as_read(*i)) {
-                            crate::log::line(format!("elek-pat: pushing {}: {:?}", crate::device::patterns::label(i), c));
-                        }
-                    }
-                    self.elek.expect_patterns = (pat_changed > 0 || whole).then(|| p.expected_patterns(&self.elek.order, &self.elek.fills, cells));
-                    for (slot, e) in &self.elek.fills {
-                        if e.is_empty() {
-                            crate::log::line(format!("elek: pushing slot {slot} (as read) cleared"));
-                        } else {
-                            crate::log::line(format!("elek: pushing new file in slot {slot} (as read): hash {:08x} size {} inode {} seqnr {}", e.hash, e.size, e.inode, e.seqnr));
-                        }
-                    }
-                    if msgs.is_empty() {
-                        self.elek.status = "Nothing to send: no pattern, kit or sound changes with this order.".into();
-                        continue;
-                    }
-                    crate::log::line(format!(
-                        "elek: {} push, {} of {} dump messages",
-                        if whole { "whole-project" } else { "partial" },
-                        msgs.len(),
-                        p.msg_count()
-                    ));
-                    let model = p.model;
-                    let settings = p.settings_data().to_vec();
-                    self.elek.expect = Some(self.elek.new_pool());
-                    self.elek.busy = Some(("Sending to device".into(), 0, msgs.len()));
-                    self.device.elek(ElekCmd::Push { msgs, settings, force, model });
-                }
+                ElekIntent::Push { force } => self.elek_push(force, false),
             }
         }
+    }
+
+    /// Send the edits to the device. `live`: an automatic push from Live
+    /// mode (always forced, quieter log).
+    pub(super) fn elek_push(&mut self, force: bool, live: bool) {
+        let Some(p) = &self.elek.project else { return };
+        // A project from a file: the device holds something else
+        // entirely, so there's nothing to compare against.
+        let whole = p.from_file.is_some();
+        let force = force || whole || live;
+        let cells = &self.elek.proj.cells;
+        let msgs = p.build_push(&self.elek.order, &self.elek.fills, cells);
+        let pat_changed = self.elek.proj.changed();
+        if pat_changed > 0 {
+            for (i, c) in cells.iter().enumerate().filter(|(i, c)| **c != crate::device::Cell::as_read(*i)) {
+                crate::log::line(format!("elek-pat: pushing {}: {:?}", crate::device::patterns::label(i), c));
+            }
+        }
+        self.elek.expect_patterns = (pat_changed > 0 || whole).then(|| p.expected_patterns(&self.elek.order, &self.elek.fills, cells));
+        for (slot, e) in &self.elek.fills {
+            if e.is_empty() {
+                crate::log::line(format!("elek: pushing slot {slot} (as read) cleared"));
+            } else {
+                crate::log::line(format!("elek: pushing new file in slot {slot} (as read): hash {:08x} size {} inode {} seqnr {}", e.hash, e.size, e.inode, e.seqnr));
+            }
+        }
+        if msgs.is_empty() {
+            self.elek.status = "Nothing to send: no pattern, kit or sound changes with this order.".into();
+            return;
+        }
+        crate::log::line(format!(
+            "elek: {} push, {} of {} dump messages",
+            if whole { "whole-project" } else if live { "live" } else { "partial" },
+            msgs.len(),
+            p.msg_count()
+        ));
+        let model = p.model;
+        let settings = p.settings_data().to_vec();
+        self.elek.expect = Some(self.elek.new_pool());
+        self.elek.busy = Some((if live { "Live push" } else { "Sending to device" }.into(), 0, msgs.len()));
+        self.device.elek(ElekCmd::Push { msgs, settings, force, model });
+    }
+
+    /// Live mode: once the pool edits pause and the last push has been read
+    /// back in full, push them.
+    pub(super) fn live_push_tick(&mut self, ctx: &egui::Context) {
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+        let st = &mut self.elek;
+        if !st.live {
+            return;
+        }
+        let Some(p) = &st.project else {
+            st.live = false;
+            return;
+        };
+        if p.read_only.is_some() || p.from_file.is_some() {
+            st.live = false;
+            return;
+        }
+        if st.pool_changed() == 0 || !st.filling.is_empty() || st.confirm_push || st.confirm_stale {
+            return;
+        }
+        if let Some(t) = st.edited_at {
+            let since = t.elapsed();
+            if since < SETTLE {
+                ctx.request_repaint_after(SETTLE - since);
+                return;
+            }
+        }
+        // A read stopped early: some patterns would be left on the wrong
+        // samples, so live pushes stop until a full reload.
+        if st.reading.is_none() && st.project.as_ref().is_some_and(|p| p.partial) {
+            st.live = false;
+            st.status = "Live mode off: the read didn't finish, so not every pattern could follow its samples. Reload to turn it on again.".into();
+            return;
+        }
+        if st.busy.is_some() || !st.pool_pushable() {
+            return;
+        }
+        self.elek_push(true, true);
     }
 
     /// Play or open pool file `k`: from a local copy when there is one,
@@ -265,6 +308,7 @@ impl App {
             let (local, note) = (l.local.clone(), super::editing::link_note(l));
             if open {
                 self.elek_mode = false;
+                self.note_pool_edit(k, &local);
                 self.load_into_editor(&local);
             } else {
                 self.preview_toggle(&local);
@@ -1001,6 +1045,7 @@ impl App {
         let ctl = std::sync::Arc::new(crate::device::ReadCtl::default());
         ctl.open.store(self.elek.proj.bank_mask(), std::sync::atomic::Ordering::Relaxed);
         self.elek.reading = Some(ctl.clone());
+        self.elek.read_shown = false;
         self.device.elek(ElekCmd::Read { known, ctl });
     }
 
@@ -1010,6 +1055,7 @@ impl App {
             ElekEv::Projects(r) => st.projects = Some(r),
             ElekEv::Partial(p) => {
                 st.set_project(p);
+                st.read_shown = true;
                 self.refresh_elek_links();
             }
             ElekEv::Pattern { msg, pats } => {
@@ -1155,8 +1201,9 @@ impl App {
                         let e = crate::device::PoolEntry::new_file(hash, len);
                         let n = st.order.len();
                         let dup = (1..n).find(|&s| {
+                            // Replacing a slot's own sample isn't a duplicate of it.
                             let x = st.entry(st.order[s] as usize);
-                            !x.is_empty() && x.key() == e.key()
+                            st.order[s] != slot && !x.is_empty() && x.key() == e.key()
                         });
                         if let Some(at) = dup {
                             st.filling.remove(&slot);
@@ -1166,6 +1213,7 @@ impl App {
                             st.names.insert((hash, len), path.clone());
                             st.status = format!("{name} is ready in its slot; push to send it to the device");
                             self.refresh_elek_links();
+                            self.pool_edit_filled(slot, (hash, len), &path);
                         }
                     }
                     Ok(None) => {

@@ -151,6 +151,10 @@ impl App {
         if self.editor.current.is_none() {
             return;
         }
+        // Opened from a pool slot: export means "update the slot".
+        if self.saves_to_pool() {
+            return self.update_on_device();
+        }
         let tab = self.pane(Role::Dest).active_tab();
         let (dest, to_dev) = (tab.cwd.clone(), tab.device);
         let mono = self.editor.fold();
@@ -248,6 +252,10 @@ impl App {
     pub(super) fn save_in_place(&mut self) {
         if self.editor.current.is_none() || self.editor.exporting {
             return;
+        }
+        // Opened from a pool slot: saving replaces the slot's sample.
+        if self.saves_to_pool() {
+            return self.update_on_device();
         }
         // A new kit has no file yet: its first save is the export.
         if self.showing_kit && !self.editor.path().is_some_and(Path::is_file) {
@@ -684,6 +692,7 @@ impl App {
                         self.start_play();
                     }
                 }
+                Outcome::Exported(p) if self.pool_edit_rendered(&p) => self.pool_edit_upload(p),
                 Outcome::Exported(p)
                     if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) =>
                 {
@@ -746,6 +755,9 @@ impl App {
                     self.reload_showing(&dir, false);
                 }
                 Outcome::Error(e) => {
+                    if let Some(pe) = self.pool_edit.as_mut() {
+                        pe.cancel_render();
+                    }
                     // A failed render never reaches the upload, and the
                     // edits it was saving are still unsaved: stay put.
                     self.staged_upload = None;
@@ -778,6 +790,7 @@ impl App {
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned()),
             device_home: self.device_home().map(|p| device::dev_str(&p)),
+            pool_slot: self.pool_edit_label(),
         };
         let intents = editor_view::show(
             ui,
@@ -886,7 +899,7 @@ pub(super) fn link_note(l: &crate::links::Link) -> String {
 
 /// `name 2`, or one past a number already at the end (`kick 3` → `kick 4`),
 /// the first that `free` accepts.
-fn next_name(name: &str, free: impl Fn(&str) -> bool) -> String {
+pub(super) fn next_name(name: &str, free: impl Fn(&str) -> bool) -> String {
     let (base, start) = match name.rsplit_once(' ') {
         Some((b, n)) if !b.is_empty() && n.parse::<u32>().is_ok() => (b, n.parse::<u32>().unwrap_or(1) + 1),
         _ => (name, 2),

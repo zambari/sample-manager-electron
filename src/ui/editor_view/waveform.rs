@@ -12,6 +12,14 @@ pub(super) fn waveform(
     trim: Option<&crate::editor::TrimPlan>,
     out: &mut Vec<EdIntent>,
 ) {
+    // When the pane is resized, keep the same stretch of time on screen
+    // (rescale) rather than showing more or less of it at the old zoom.
+    if let Some(prev) = ed.wave_rect {
+        let (old_w, new_w) = (prev.width() as f64, rect.width() as f64);
+        if old_w > 1.0 && new_w > 1.0 && (old_w - new_w).abs() > 0.5 {
+            ed.view.fpp *= old_w / new_w;
+        }
+    }
     ed.wave_rect = Some(rect);
     let frames = ed.frames();
     if ed.view.fit_pending && rect.width() > 1.0 {

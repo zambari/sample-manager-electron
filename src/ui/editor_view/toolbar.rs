@@ -504,6 +504,26 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
         } else {
             (ed.can_save(), "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file".to_owned())
         };
+        // Opened from a device pool slot: one button saves it back there.
+        if let Some(slot) = slots.pool_slot.as_ref().filter(|_| !showing_kit) {
+            let label = if ed.exporting { "Updating…".to_owned() } else { format!("⬆ Update on device{mono} (slot {slot})") };
+            let tip = format!(
+                "⌘S / ↩ — send what you hear (trimmed, with gain) to slot {slot} and push, so the device plays it right away. \
+                 The first update is uploaded as a new file next to the original (which stays, other projects may use it); \
+                 later ones replace that copy."
+            );
+            let button = egui::Button::new(egui::RichText::new(label).color(crate::ui::theme::ON_ACCENT))
+                .fill(crate::ui::theme::ACCENT);
+            if ui
+                .add_enabled(has && can && !ed.exporting, button)
+                .on_hover_text(&tip)
+                .on_disabled_hover_text(format!("Nothing changed yet. {tip}"))
+                .clicked()
+            {
+                out.push(EdIntent::SaveInPlace);
+            }
+            return;
+        }
         let label = if ed.exporting { "Saving…".to_owned() } else { format!("💾 Save in place{mono}") };
         let enabled = has && can && !ed.exporting;
         if ui

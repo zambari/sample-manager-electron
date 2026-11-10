@@ -96,6 +96,8 @@ pub struct Slots {
     pub sample_name: Option<String>,
     /// The device file the sample came from or went to, when known.
     pub device_home: Option<String>,
+    /// The sample came from this device pool slot: saving updates it there.
+    pub pool_slot: Option<String>,
 }
 
 const RULER_H: f32 = 18.0;

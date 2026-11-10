@@ -36,6 +36,7 @@ mod kit;
 mod nav;
 mod os_dnd;
 mod pane_view;
+mod pool_edit;
 mod relaunch;
 mod transfers;
 mod undo;
@@ -126,6 +127,8 @@ pub struct App {
     /// The device presence seen last frame, to act when the cable goes in or out.
     last_presence: crate::device::Presence,
     staged_upload: Option<StagedUpload>,
+    /// A pool sample in the editor, saved back into its slot.
+    pool_edit: Option<pool_edit::PoolEdit>,
     keymap: Keymap,
     sizes: SizeCache,
     preview: Preview,
@@ -387,6 +390,7 @@ impl App {
             device_status: None,
             last_presence: Default::default(),
             staged_upload: None,
+            pool_edit: None,
             engine,
             editor,
             other,
@@ -614,6 +618,7 @@ impl eframe::App for App {
             self.absorb(events);
         }
         self.track_presence();
+        self.live_push_tick(ctx);
 
         // Back from another app: files may have changed under us.
         let focused = ctx.input(|i| i.focused);

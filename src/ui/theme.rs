@@ -420,7 +420,7 @@ pub const OLED_FAMILY: &str = "oled";
 /// Frucade's capitals are 7/8 of the font size, much taller than Silkscreen's
 /// (5/8), and layouts were tuned for Silkscreen, so every pixel-font size is
 /// scaled down by this factor.
-const OLED_SIZE_SCALE: f32 = 0.8;
+const OLED_SIZE_SCALE: f32 = 0.7;
 
 /// Device-screen text: the Frucade pixel font.
 pub fn oled_font(size: f32) -> egui::FontId {
