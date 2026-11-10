@@ -73,6 +73,33 @@ pub struct PatternInfo {
     /// For finding offsets by hand.
     pub tail: Vec<u8>,
     pub tail_at: usize,
+    /// Pattern-level length and scale settings, when the layout is known.
+    pub timing: Option<Timing>,
+}
+
+/// Pattern-level timing (DT1 v9/v10), in the bytes after the pattern name.
+/// Similar to the Analog Rytm's pattern struct: tempo ×120, master length
+/// (the device's RESET: all tracks restart; 1 = INF), master change (1 = OFF), then at +9 the scale mode (1 = per
+/// track) and +10 the master scale. Checked against DT1 v10 dumps.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    pub tempo_x120: u16,
+    pub master_len: u16,
+    pub change: u16,
+    pub per_track: bool,
+    pub scale: u8,
+}
+
+impl Timing {
+    fn read(t: &[u8]) -> Option<Self> {
+        let be = |i: usize| Some(u16::from_be_bytes([*t.get(i)?, *t.get(i + 1)?]));
+        Some(Self { tempo_x120: be(2)?, master_len: be(4)?, change: be(6)?, per_track: *t.get(9)? == 1, scale: *t.get(10)? })
+    }
+}
+
+/// Elektron scale (speed) values, fastest first; 2 = 1x.
+pub fn scale_label(s: u8) -> Option<&'static str> {
+    ["2x", "3/2x", "1x", "3/4x", "1/2x", "1/4x", "1/8x"].get(s as usize).copied()
 }
 
 impl PatternInfo {
@@ -88,6 +115,7 @@ impl PatternInfo {
             diff: 0,
             tail: Vec::new(),
             tail_at: 0,
+            timing: None,
         }
     }
 }
@@ -101,6 +129,8 @@ pub struct TrackSeq {
     pub len: usize,
     /// `len` was read from the track, not guessed from the last used step.
     pub len_known: bool,
+    /// Track scale (see `scale_label`), when the layout is known.
+    pub scale: Option<u8>,
     /// The last `TAIL` bytes of the track struct (track settings: length,
     /// scale… [unverified] which is where), for finding offsets by hand.
     pub tail: Vec<u8>,
@@ -201,13 +231,15 @@ fn parse_seq(model: Model, pv: u32, d: &[u8], plocks: usize, sample_param: Optio
                 })
                 .collect();
             let byte = if model == DT && pv >= 9 { d.get(at + stride - 6).map(|&b| b as usize) } else { None };
+            // Two bytes after the length: the track's scale (DT1 v10 dumps).
+            let scale = if model == DT && pv >= 9 { d.get(at + stride - 4).copied().filter(|&b| scale_label(b).is_some()) } else { None };
             let (len, len_known) = match byte {
                 Some(n) if (1..=steps.len()).contains(&n) => (n, true),
                 // Unknown layout: up to the last used step, in whole pages.
                 _ => ((steps.iter().rposition(|s| *s != Step::None).map_or(0, |p| p + 1).div_ceil(16) * 16).max(16), false),
             };
             let tail = d.get(at + stride - TAIL.min(stride)..at + stride).map(<[u8]>::to_vec).unwrap_or_default();
-            TrackSeq { steps, len, len_known, tail, flags, arrays, locks, sample_param }
+            TrackSeq { steps, len, len_known, scale, tail, flags, arrays, locks, sample_param }
         })
         .collect()
 }
@@ -317,7 +349,8 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
     let name = if !pf.is_empty() && printable(d, pattern_name_at) { pf.clone() } else { kit_name.clone() };
     let tail_at = pattern_name_at + 16;
     let tail = d.get(tail_at..(tail_at + PAT_TAIL).min(d.len())).map(<[u8]>::to_vec).unwrap_or_default();
-    PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff, tail, tail_at }
+    let timing = (g.model == DT && g.pv >= 9).then(|| Timing::read(&tail)).flatten().filter(|t| scale_label(t.scale).is_some());
+    PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff, tail, tail_at, timing }
 }
 
 impl Patterns {

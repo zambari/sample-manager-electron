@@ -762,7 +762,19 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                         let notes: usize = tr.iter().map(|t| t.notes()).sum();
                         if !tr.is_empty() {
                             let right = dots_x + n.seq[0].steps.len() as f32 * 2.0 + 10.0;
-                            painter.text(egui::pos2(right, y), egui::Align2::LEFT_CENTER, format!("{longest} steps · {notes} trigs"), oled_font(10.0), OLED_DIM);
+                            // One bar (16 steps) at 1x is the default: say nothing.
+                            let mut parts: Vec<String> = Vec::new();
+                            if longest != 16 {
+                                parts.push(len_label(longest));
+                            }
+                            if let Some(sc) = pattern_scale(n) {
+                                parts.push(sc);
+                            }
+                            parts.push(format!("{notes} trigs"));
+                            let r = painter.text(egui::pos2(right, y), egui::Align2::LEFT_CENTER, parts.join(" · "), oled_font(10.0), OLED_DIM);
+                            if pointer.is_some_and(|pp| r.expand(3.0).contains(pp)) {
+                                step_hover = Some(timing_tip(&patterns::label(i), n, &tr));
+                            }
                         }
                     }
                     if open {
@@ -799,7 +811,15 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                             let seq = &n.seq[*t];
                             // Track length in steps (16 = one bar); ≈ when
                             // guessed from the last used step.
-                            let len = if seq.len_known { seq.len.to_string() } else { format!("≈{}", seq.len) };
+                            // 16 steps is the default: only other lengths are shown.
+                            let mut len = match (seq.len, seq.len_known) {
+                                (16, _) => String::new(),
+                                (n, true) => n.to_string(),
+                                (n, false) => format!("≈{n}"),
+                            };
+                            if let Some(sc) = seq.scale.filter(|&s| s != 2).and_then(patterns::scale_label) {
+                                len = if len.is_empty() { sc.to_owned() } else { format!("{sc}  {len}") };
+                            }
                             painter.text(egui::pos2(x0 + DOTS_X - 10.0, cy), egui::Align2::RIGHT_CENTER, len, oled_font(10.0), OLED_DIM);
                             if ed.bytes {
                                 let hx: Vec<String> = seq.tail.iter().map(|b| format!("{b:02x}")).collect();
@@ -1006,6 +1026,57 @@ fn nearest_step(n: usize, x0: f32, max_w: f32, x: f32, want: impl Fn(usize) -> b
 }
 
 /// What's on step `k`: note-ish bytes, flags, p-locks.
+/// A track or pattern length: "2 bar" for whole bars past one, else steps.
+fn len_label(n: usize) -> String {
+    if n > 16 && n % 16 == 0 { format!("{} bar", n / 16) } else { format!("{n} steps") }
+}
+
+/// The scales other than 1x in use (master and tracks), fastest first,
+/// e.g. "2x 1/2x"; `None` when everything runs at 1x.
+fn pattern_scale(n: &patterns::PatternInfo) -> Option<String> {
+    let used: BTreeSet<u8> = n.timing.map(|t| t.scale).into_iter().chain(n.seq.iter().filter_map(|t| t.scale)).filter(|&s| s != 2).collect();
+    let labels: Vec<&str> = used.into_iter().filter_map(patterns::scale_label).collect();
+    (!labels.is_empty()).then(|| labels.join(" "))
+}
+
+/// Hover text for the folded length / scale summary.
+fn timing_tip(label: &str, n: &patterns::PatternInfo, tr: &[&TrackSeq]) -> String {
+    let mut out = vec![label.to_owned()];
+    if let Some(t) = n.timing {
+        let len = match t.master_len {
+            1 => "INF".to_owned(),
+            l => format!("{l} steps{}", if l % 16 == 0 && l > 16 { format!(" ({})", len_label(l as usize)) } else { String::new() }),
+        };
+        out.push(format!("scale mode: {}", if t.per_track { "per track" } else { "normal" }));
+        out.push(format!("reset (master length): {len}"));
+        out.push(format!("change: {}", if t.change <= 1 { "OFF".to_owned() } else { t.change.to_string() }));
+        out.push(format!("master scale: {}", patterns::scale_label(t.scale).unwrap_or("?")));
+        out.push(format!("tempo: {:.1} BPM", t.tempo_x120 as f32 / 120.0));
+    } else {
+        out.push("master length / change / scale: layout unknown for this version".to_owned());
+    }
+    // Per track, grouped when several share a length and scale.
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (k, t) in tr.iter().enumerate() {
+        let len = if t.len_known { t.len.to_string() } else { format!("≈{}", t.len) };
+        let sc = t.scale.and_then(patterns::scale_label).map_or(String::new(), |s| format!(" at {s}"));
+        let key = format!("{len} steps{sc}");
+        match groups.iter_mut().find(|g| g.0 == key) {
+            Some(g) => g.1.push(k + 1),
+            None => groups.push((key, vec![k + 1])),
+        }
+    }
+    if groups.len() == 1 {
+        out.push(format!("all tracks: {}", groups[0].0));
+    } else {
+        for (key, ts) in groups {
+            let names: Vec<String> = ts.iter().map(|t| t.to_string()).collect();
+            out.push(format!("track {}: {key}", names.join(", ")));
+        }
+    }
+    out.join("\n")
+}
+
 fn step_tip(seq: &TrackSeq, k: usize, track: &str, sample_name: &dyn Fn(usize) -> String) -> String {
     let mut s = format!("{track} step {} (bar {}, step {})", k + 1, k / 16 + 1, k % 16 + 1);
     s += &format!("\ntrig flags {:04x}", seq.flags.get(k).copied().unwrap_or(0));
