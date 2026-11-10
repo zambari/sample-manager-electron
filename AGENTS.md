@@ -1,5 +1,9 @@
 # Sample Manager
 
+## Finding things
+
+Read [MAP.md](MAP.md) first when a request names a concept, a button or a panel. It covers the vocabulary ("device" and "+Drive" mean an Elektron sampler), which control lives in which function, where styling is set, and where the job queues are. Keep it up to date when you move or rename something it points to.
+
 ## Workflow rules
 
 - **Build after every code change, but never kill or launch the app.** The user keeps the app running while they work. At the end of each round where code changed, just build:
