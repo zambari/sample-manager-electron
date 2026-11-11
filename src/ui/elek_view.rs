@@ -74,6 +74,9 @@ pub struct ElekState {
     pub preview: bool,
     /// Shown as one pane in the right column, beside the files and editor.
     pub docked: bool,
+    /// Pass number (+1) when the dialogs were last drawn. The Patterns page
+    /// and the docked pool both call `finish`, so this keeps them to once a frame.
+    dialogs_pass: u64,
     /// The view gets the keyboard this frame (set by the app).
     pub keys_on: bool,
     /// Which full-window page is shown.
@@ -858,14 +861,16 @@ fn memory_bar(ui: &mut egui::Ui, st: &ElekState) {
     if waiting > 0 {
         tip += &format!(" {waiting} sample(s) still uploading aren't counted yet.");
     }
+    // Device-font label over a thin square bar.
     ui.add_space(4.0);
-    ui.add(
-        egui::ProgressBar::new(frac.min(1.0) as f32)
-            .desired_width(ui.available_width())
-            .fill(fill)
-            .text(RichText::new(text).color(Color32::WHITE)),
-    )
-    .on_hover_text(tip);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), MEM_BAR_H - 6.0), Sense::hover());
+    let painter = ui.painter();
+    painter.text(rect.left_top(), egui::Align2::LEFT_TOP, text, oled_font(11.0), if frac > 0.9 { fill } else { OLED_DIM });
+    let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 4.0), rect.right_bottom());
+    painter.rect_filled(bar, 0.0, OLED_BG);
+    let w = bar.width() * frac.min(1.0) as f32;
+    painter.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(w, bar.height())), 0.0, fill);
+    resp.on_hover_text(tip);
 }
 
 /// Bytes as "12.3 MB".
@@ -1198,6 +1203,11 @@ pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIn
     if let Some(pairs) = st.want_files.take() {
         out.push(ElekIntent::AddFiles(pairs));
     }
+    let pass = ui.ctx().cumulative_pass_nr() + 1;
+    if st.dialogs_pass == pass {
+        return;
+    }
+    st.dialogs_pass = pass;
     if let Some(r) = st.renaming.as_mut() {
         if let Some(ok) = rename_dialog(ui.ctx(), r) {
             let (key, from, to, _) = st.renaming.take().unwrap_or_default();
