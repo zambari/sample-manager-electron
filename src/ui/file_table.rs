@@ -82,9 +82,11 @@ pub enum Intent {
         name: String,
     },
     /// Make a new folder in `dir`, move these into it, and start renaming it.
+    /// With `name`, make exactly that folder and just select it.
     NewFolderWith {
         dir: PathBuf,
         paths: Vec<PathBuf>,
+        name: Option<String>,
     },
     /// Open this file as a slice kit and make it the one K adds to.
     UseAsKit(PathBuf),
@@ -113,12 +115,18 @@ pub struct TableCtx<'a> {
     pub committed: &'a std::collections::HashSet<PathBuf>,
     /// Device files with a known local copy; drawn with a dot badge.
     pub links: &'a crate::links::Links,
+    /// Local files edited since their device copy was made, for samples in
+    /// the loaded project: drawn amber.
+    pub changed: &'a std::collections::HashSet<PathBuf>,
     /// Files being written by the editor (`None`), or written at this
     /// instant: drawn with a pulse, then a fading flash.
     pub saving: &'a std::collections::HashMap<PathBuf, Option<std::time::Instant>>,
     pub pane_focused: bool,
     /// The clipboard, for dimming cut items and enabling Paste.
     pub clipboard: Option<&'a crate::ops::Clipboard>,
+    /// Pool slots cut or copied on the device's Samples page (and no file
+    /// clipboard): Paste downloads them here. 0 on +Drive tabs.
+    pub slot_clip: usize,
     /// Name of the folder the other pane is showing, offered as a new-folder name.
     pub other_folder: Option<String>,
 }
@@ -131,6 +139,9 @@ impl TableCtx<'_> {
     }
 
     fn paste_label(&self) -> Option<String> {
+        if self.clipboard.is_none() && self.slot_clip > 0 {
+            return Some(format!("Download {} pool sample(s) here", self.slot_clip));
+        }
         let c = self.clipboard?;
         let n = c.paths.len();
         let what = if n == 1 {
@@ -260,7 +271,23 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
         // when it's already visible.
         let y = c as f32 * (ROW_HEIGHT + ui.spacing().item_spacing.y);
         area = area.vertical_scroll_offset(y - ROW_HEIGHT * 4.0);
+    } else if tab.scroll_to_ping {
+        // A pinged row: scroll only if it's out of view, then centre it.
+        let at = match &tab.ping {
+            Some((Some(p), _)) => tab.entries.iter().position(|e| &e.path == p).map(|i| i + up),
+            Some((None, _)) => Some(0),
+            None => None,
+        };
+        if let Some(i) = at {
+            let row_h = ROW_HEIGHT + ui.spacing().item_spacing.y;
+            let y = i as f32 * row_h;
+            let (top, h) = tab.view;
+            if y < top || y + row_h > top + h {
+                area = area.vertical_scroll_offset((y - (h - row_h) / 2.0).max(0.0));
+            }
+        }
     }
+    tab.scroll_to_ping = false;
 
     // Empty space below (and behind) the rows: right-click to paste into the
     // folder being shown. Registered before the rows, so rows win the hit.
@@ -270,7 +297,8 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
         intents.push(Intent::TookFocus);
     }
     bg.context_menu(|ui| {
-        new_folder_button(ui, cx, tab.cwd.clone(), None, intents);
+        let with = if tab.device { Vec::new() } else { tab.effective_selection() };
+        new_folder_button(ui, cx, tab.cwd.clone(), None, with, intents);
         paste_button(ui, cx, None, intents);
         if !tab.device {
             reveal_button(ui, tab.cwd.clone(), intents);
@@ -284,7 +312,7 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
             .rect_filled(ui.available_rect_before_wrap(), 2.0, OLED_BG);
     }
 
-    area.show_rows(ui, ROW_HEIGHT, total, |ui, range| {
+    let out = area.show_rows(ui, ROW_HEIGHT, total, |ui, range| {
         ui.set_min_width(ui.available_width());
         for i in range {
             if i < up {
@@ -299,6 +327,10 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
             }
         }
     });
+    tab.view = (out.state.clamped_offset().y, out.inner_rect.height());
+    if tab.ping.as_ref().is_some_and(|(_, at)| at.elapsed().as_secs_f32() >= PING_SECS) {
+        tab.ping = None;
+    }
 
     // Fire an armed slow-click rename once its double-click window is over,
     // provided that row is still the only thing selected.
@@ -315,6 +347,24 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
                 .request_repaint_after(std::time::Duration::from_secs_f64(at - now));
         }
     }
+}
+
+/// How long a ping (a row pointed out from the device view) lasts.
+pub const PING_SECS: f32 = 1.6;
+
+/// A ping: two quick pulses of the accent that fade out.
+pub fn paint_ping(ui: &Ui, rect: egui::Rect, at: std::time::Instant, color: egui::Color32) {
+    let t = at.elapsed().as_secs_f32();
+    if t >= PING_SECS {
+        return;
+    }
+    let k = 1.0 - t / PING_SECS;
+    let beat = 0.55 + 0.45 * (t * std::f32::consts::TAU * 1.5).cos();
+    let a = k * beat;
+    ui.painter().rect_filled(rect, 2.0, color.gamma_multiply(0.35 * a));
+    ui.painter()
+        .rect_stroke(rect, 2.0, Stroke::new(2.0, color.gamma_multiply(a)), StrokeKind::Inside);
+    ui.ctx().request_repaint();
 }
 
 /// How long the "saved" flash takes to fade out.
@@ -377,6 +427,9 @@ fn parent_row(ui: &mut Ui, tab: &DirTab, intents: &mut Vec<Intent>) {
         ui.painter().rect_filled(rect, 2.0, fill);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    if let Some((None, at)) = &tab.ping {
+        paint_ping(ui, rect, *at, crate::ui::theme::ACCENT_BRIGHT);
+    }
     // Painted, not label widgets, so the text can't swallow clicks.
     let inner = rect.shrink2(egui::vec2(6.0, 0.0));
     if tab.device {
@@ -428,6 +481,11 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
     }
     if let Some(mark) = cx.saving.get(&entry.path) {
         paint_save_mark(ui, rect, *mark);
+    }
+    if let Some((Some(p), at)) = &tab.ping {
+        if *p == entry.path {
+            paint_ping(ui, rect, *at, crate::ui::theme::ACCENT_BRIGHT);
+        }
     }
     if is_cursor && cx.pane_focused {
         let color = if tab.device {
@@ -747,14 +805,15 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
         // Next to the row, i.e. in the folder the row sits in.
         if let Some(parent) = entry.path.parent() {
             let base = entry.is_dir.then(|| entry.name.clone());
-            new_folder_button(ui, cx, parent.to_path_buf(), base, intents);
-            if local {
-                let sel = tab.effective_selection();
-                let label = if sel.len() == 1 { "New folder with this item".to_owned() } else { format!("New folder with {} items", sel.len()) };
-                if ui.button(label).on_hover_text("Move the selection into a new subfolder and rename it").clicked() {
-                    intents.push(Intent::NewFolderWith { dir: parent.to_path_buf(), paths: sel });
+            let sel = if local { tab.effective_selection() } else { Vec::new() };
+            if sel.len() == 1 {
+                new_folder_button(ui, cx, parent.to_path_buf(), base, Vec::new(), intents);
+                if ui.button("New folder with this item").on_hover_text("Move it into a new subfolder and rename it").clicked() {
+                    intents.push(Intent::NewFolderWith { dir: parent.to_path_buf(), paths: sel, name: None });
                     ui.close();
                 }
+            } else {
+                new_folder_button(ui, cx, parent.to_path_buf(), base, sel, intents);
             }
         }
         ui.separator();
@@ -917,6 +976,8 @@ fn draw_cells(
     let name_color = if entry.empty {
         // Empty folder: nothing to see inside, so it recedes a little.
         egui::Color32::from_gray(185)
+    } else if !device && cx.changed.contains(&entry.path) {
+        crate::ui::theme::CHANGED
     } else if !device && cx.opened.contains(&entry.path) {
         egui::Color32::GRAY
     } else {
@@ -1022,7 +1083,7 @@ fn paste_button(
         (None, _) => "Paste".to_owned(),
     };
     if ui
-        .add_enabled(cx.clipboard.is_some(), egui::Button::new(label))
+        .add_enabled(cx.paste_label().is_some(), egui::Button::new(label))
         .clicked()
     {
         intents.push(Intent::Paste(target));
@@ -1030,29 +1091,43 @@ fn paste_button(
     }
 }
 
+/// "New folder" entries. With several items in `with` (a local selection),
+/// they make the folder and move those items into it.
 fn new_folder_button(
     ui: &mut Ui,
     cx: &TableCtx<'_>,
     dir: PathBuf,
     base: Option<String>,
+    with: Vec<PathBuf>,
     intents: &mut Vec<Intent>,
 ) {
-    if ui.button("New folder").clicked() {
-        intents.push(Intent::NewFolder {
-            dir: dir.clone(),
-            base,
+    let n = with.len();
+    let multi = n > 1;
+    let label = if multi { format!("New folder with {n} items") } else { "New folder".to_owned() };
+    let mut b = ui.button(label);
+    if multi {
+        b = b.on_hover_text("Move the selection into a new subfolder and rename it");
+    }
+    if b.clicked() {
+        intents.push(if multi {
+            Intent::NewFolderWith { dir: dir.clone(), paths: with.clone(), name: None }
+        } else {
+            Intent::NewFolder { dir: dir.clone(), base }
         });
         ui.close();
     }
     if let Some(name) = &cx.other_folder {
-        if ui
-            .button(format!("New folder “{name}”"))
-            .on_hover_text("Named after the folder open in the other pane")
-            .clicked()
-        {
-            intents.push(Intent::NewFolderNamed {
-                dir,
-                name: name.clone(),
+        let label = if multi { format!("New folder “{name}” with {n} items") } else { format!("New folder “{name}”") };
+        let tip = if multi {
+            "Named after the folder open in the other pane; the selection moves into it"
+        } else {
+            "Named after the folder open in the other pane"
+        };
+        if ui.button(label).on_hover_text(tip).clicked() {
+            intents.push(if multi {
+                Intent::NewFolderWith { dir, paths: with, name: Some(name.clone()) }
+            } else {
+                Intent::NewFolderNamed { dir, name: name.clone() }
             });
             ui.close();
         }
@@ -1210,9 +1285,11 @@ mod tests {
                         opened: &Default::default(),
                         committed: &Default::default(),
                         links: &Default::default(),
+                        changed: &Default::default(),
                         saving: &Default::default(),
                         pane_focused: true,
                         clipboard: None,
+                        slot_clip: 0,
                         other_folder: None,
                     },
                 );

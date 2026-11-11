@@ -445,7 +445,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
             (
                 &mut p.scalpel,
                 "Scalpel",
-                "40 ms extreme-zoom strip around the playhead",
+                "80 ms extreme-zoom strip around the playhead",
             ),
             (
                 &mut p.minimap,

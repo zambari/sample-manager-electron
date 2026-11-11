@@ -28,6 +28,9 @@ pub fn device_wash() -> Color32 {
     DEVICE_ACCENT.gamma_multiply(0.05)
 }
 
+/// Something on the device is older than its local file (edited since).
+pub const CHANGED: Color32 = Color32::from_rgb(245, 190, 60);
+
 pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.style_mut_of(egui::Theme::Dark, |style| {

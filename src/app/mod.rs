@@ -317,6 +317,16 @@ pub struct App {
     /// The centre column shows the Elek Sample Order view instead of the editor.
     elek_mode: bool,
     elek: crate::ui::elek_view::ElekState,
+    /// Last file under each pane's cursor and the last slot under the pool's
+    /// cursor, so a change pings its match on the other side (`cross_ping`).
+    seen_file: [Option<PathBuf>; 2],
+    seen_slot: Option<(u32, u32)>,
+    /// Local files of pool samples edited since they went to the device
+    /// (`ElekState::changed_local`), and when that was last checked.
+    changed_paths: std::collections::HashSet<PathBuf>,
+    changed_at: Option<std::time::Instant>,
+    /// Slots (as read) taking an edited file: push once the last lands.
+    update_push: std::collections::HashSet<u16>,
     /// The pool is docked into the right column (see [`elek`]).
     elek_docked: bool,
     /// `elek_docked` as of last frame: the frame it turns on, the right
@@ -506,6 +516,11 @@ impl App {
             relaunch: false,
             elek_mode: false,
             elek: Default::default(),
+            seen_file: [None, None],
+            seen_slot: None,
+            changed_paths: Default::default(),
+            changed_at: None,
+            update_push: Default::default(),
             elek_docked: false,
             was_docked: false,
             dock_pool: false,
@@ -682,6 +697,7 @@ impl eframe::App for App {
         }
         self.track_presence();
         self.live_push_tick(ctx);
+        self.check_changed(ctx);
 
         // Back from another app: files may have changed under us.
         let focused = ctx.input(|i| i.focused);
@@ -808,6 +824,8 @@ impl eframe::App for App {
                 }
             }
         }
+
+        self.cross_ping();
 
         // Modal last, so it paints over both panes.
         if let Some(p) = &self.pending {

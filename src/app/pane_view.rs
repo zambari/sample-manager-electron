@@ -137,6 +137,7 @@ impl App {
             return;
         }
 
+        let slot_clip = if on_device || self.clipboard.is_some() { 0 } else { self.elek.clip_keys().len() };
         let intents = {
             let sizes = &self.sizes;
             let preview = &self.preview;
@@ -144,6 +145,7 @@ impl App {
             let committed = &self.committed;
             let saving = &self.saving;
             let links = &self.links;
+            let changed = &self.changed_paths;
             // Borrow the pane field directly rather than via `pane_mut`, so
             // the borrow checker can see it is disjoint from `sizes`/`preview`.
             let pane = match role {
@@ -161,8 +163,10 @@ impl App {
                     committed,
                     saving,
                     links,
+                    changed,
                     pane_focused: focused,
                     clipboard: self.clipboard.as_ref(),
+                    slot_clip,
                     other_folder,
                 },
             )
@@ -187,7 +191,8 @@ impl App {
                 );
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
                 if ui.input(|i| i.pointer.any_released()) {
-                    self.slots_dropped(role, keys);
+                    let dest = self.pane(role).active_tab().cwd.clone();
+                    self.slots_dropped(role, dest, keys);
                 }
             }
         }
@@ -283,7 +288,9 @@ impl App {
                 Intent::NewFolderNamed { dir, name } => {
                     self.new_folder(role, dir, Some(name), None)
                 }
-                Intent::NewFolderWith { dir, paths } => self.new_folder_with(role, dir, paths),
+                Intent::NewFolderWith { dir, paths, name } => {
+                    self.new_folder_with(role, dir, paths, name)
+                }
                 Intent::LoadFromDevice(p) => self.ask_device_load(p),
                 Intent::RevealLocal(p) => {
                     if let Some(local) = self.local_copy_of(&p) {
@@ -703,9 +710,8 @@ impl App {
 
     /// Pool samples dropped on a local pane: copy their +Drive files into
     /// its folder, unless some are already here locally (then ask first).
-    /// `keys` come with their slot labels.
-    pub(super) fn slots_dropped(&mut self, role: Role, keys: Vec<((u32, u32), String)>) {
-        let dest = self.pane(role).active_tab().cwd.clone();
+    /// `keys` come with their slot labels. Also how pasting copied slots lands.
+    pub(super) fn slots_dropped(&mut self, role: Role, dest: PathBuf, keys: Vec<((u32, u32), String)>) {
         let mut paths = Vec::new();
         let mut labels = HashMap::new();
         let mut have = Vec::new();

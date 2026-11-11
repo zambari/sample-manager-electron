@@ -178,6 +178,84 @@ impl App {
         self.elek_intents(intents);
     }
 
+    /// The sample pool is on screen: the Samples page, or docked.
+    fn pool_shown(&self) -> bool {
+        self.elek.project.is_some()
+            && ((self.elek_mode && self.elek.page == elek_view::ElekPage::Order)
+                || (self.dock_col_shown() && self.dock_pool))
+    }
+
+    /// While the pool is on screen, point from one side to the other
+    /// without selecting anything: a local file under a pane's cursor pings
+    /// the slot holding its device copy, and a slot under the pool's cursor
+    /// pings its local file in the source pane (or, when that file is
+    /// elsewhere, the folder row leading to it, else the ".." row).
+    /// An edited original still counts: it pings the older version.
+    pub(super) fn cross_ping(&mut self) {
+        let shown = self.pool_shown();
+        for (i, role) in [Role::Source, Role::Dest].into_iter().enumerate() {
+            let tab = self.pane(role).active_tab();
+            let cur = (!tab.device)
+                .then(|| tab.cursor.and_then(|c| tab.entries.get(c)))
+                .flatten()
+                .filter(|e| !e.is_dir)
+                .map(|e| e.path.clone());
+            if cur == self.seen_file[i] {
+                continue;
+            }
+            self.seen_file[i] = cur.clone();
+            if let (true, Some(p)) = (shown, cur) {
+                if let Some(l) = self.links.for_local(&p).cloned() {
+                    self.elek.ping_key(|k| l.is(k));
+                }
+            }
+        }
+
+        let key = shown.then(|| self.elek.cursor_key()).flatten();
+        if key == self.seen_slot {
+            return;
+        }
+        self.seen_slot = key;
+        let Some(k) = key else { return };
+        let links = &self.links;
+        let tab = self.pane(Role::Source).active_tab();
+        if tab.device {
+            return;
+        }
+        let here = tab
+            .entries
+            .iter()
+            .find(|e| !e.is_dir && links.for_local(&e.path).is_some_and(|l| l.is(k)))
+            .map(|e| e.path.clone());
+        let target = match here {
+            Some(p) => Some(Some(p)),
+            None => {
+                let elsewhere = links
+                    .user_copy(k.0, k.1)
+                    .or_else(|| links.original(k.0, k.1).filter(|l| l.local.exists()))
+                    .map(|l| l.local.clone());
+                elsewhere.and_then(|local| {
+                    // Inside this folder: the deepest listed folder holding it.
+                    let dir = tab
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| e.is_dir && local.starts_with(&e.path))
+                        .max_by_key(|(j, _)| tab.depths.get(*j).copied().unwrap_or(0))
+                        .map(|(_, e)| e.path.clone());
+                    match dir {
+                        Some(d) => Some(Some(d)),
+                        None if !local.starts_with(&tab.cwd) && tab.parent().is_some() => Some(None),
+                        None => None,
+                    }
+                })
+            }
+        };
+        if let Some(t) = target {
+            self.pane_mut(Role::Source).active_tab_mut().ping(t);
+        }
+    }
+
     /// The pool as a pane in the right column.
     pub(super) fn show_elek_docked(&mut self, ui: &mut egui::Ui) {
         self.elek.docked = true;
@@ -240,6 +318,17 @@ impl App {
                 ElekIntent::StopFetch => self.stop_fetch(),
                 ElekIntent::PurgeCache => self.purge_cache(),
                 ElekIntent::AddFiles(pairs) => self.add_pool_files(pairs),
+                // One clipboard: cut / copied slots replace cut / copied files.
+                ElekIntent::Clipped => self.clipboard = None,
+                ElekIntent::PasteFiles(at) => match self.clipboard.as_ref().filter(|c| !c.device) {
+                    Some(c) => {
+                        let paths = c.paths.clone();
+                        self.elek.paste_files(at, paths);
+                    }
+                    None => {
+                        self.elek.status = "Nothing to paste: cut slots here (⌘X), or copy audio files in a local file pane".into();
+                    }
+                },
                 ElekIntent::ListProjects => {
                     self.elek.projects = None;
                     self.device.elek(ElekCmd::ListProjects);
@@ -266,6 +355,7 @@ impl App {
                 ElekIntent::SavePattern(slot, name, bundle) => self.save_pattern_file(slot, &name, bundle),
                 ElekIntent::LoadPattern(slot) => self.load_pattern_file(slot),
                 ElekIntent::Local(k, open) => self.elek_local(k, open),
+                ElekIntent::UpdateChanged(keys) => self.update_changed(keys),
                 ElekIntent::ShowOriginal(k) => match self.links.original(k.0, k.1).map(|l| (l.local.clone(), l.fresh())) {
                     Some((p, fresh)) if p.exists() => {
                         self.show_in_source(&p);
@@ -652,6 +742,125 @@ impl App {
         self.elek.status = "Preview cache moved to the Trash".into();
     }
 
+    /// Every couple of seconds while a project is loaded: which pool
+    /// samples' local files were edited since they went to the device.
+    /// A stat per linked pool file, so it's cheap.
+    pub(super) fn check_changed(&mut self, ctx: &egui::Context) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        let Some(p) = &self.elek.project else {
+            if !self.changed_paths.is_empty() {
+                self.changed_paths.clear();
+                self.elek.changed_local.clear();
+            }
+            return;
+        };
+        if self.changed_at.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.changed_at = Some(std::time::Instant::now());
+        ctx.request_repaint_after(EVERY);
+        let changed: HashMap<(u32, u32), PathBuf> = (1..p.pool.len())
+            .map(|i| self.elek.entry(i))
+            .filter(|e| !e.is_empty())
+            .filter_map(|e| {
+                let k = e.key();
+                Some((k, self.links.changed_copy(k.0, k.1)?.local.clone()))
+            })
+            .collect();
+        self.changed_paths = changed.values().cloned().collect();
+        self.elek.changed_local = changed;
+    }
+
+    /// Send the edited local file of each of these pool samples to its
+    /// slot: uploaded next to the +Drive original (kept: other projects may
+    /// use it), filled in, then one push once they've all landed.
+    fn update_changed(&mut self, keys: Vec<(u32, u32)>) {
+        if !self.elek.pool_editable() {
+            self.elek.status = "The pool can't take new files right now".into();
+            return;
+        }
+        // Earlier ones that failed or were left out aren't coming.
+        let filling = &self.elek.filling;
+        self.update_push.retain(|s| filling.contains_key(s));
+        let mut by_dir: HashMap<PathBuf, Vec<(u16, PathBuf)>> = HashMap::new();
+        let mut started = 0;
+        for k in keys {
+            let (Some(old), Some(local)) = (self.elek.slot_of(k), self.elek.changed_local.get(&k).cloned()) else {
+                continue;
+            };
+            if self.elek.filling.contains_key(&old) {
+                continue;
+            }
+            let name = local.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.elek.filling.insert(old, name);
+            self.update_push.insert(old);
+            started += 1;
+            self.pool_fetch.prior.remove(&old);
+            // Already on the +Drive as it is now (sent earlier by hand).
+            if let Some((hash, size)) = self.links.local_link(&local).map(|l| (l.hash, l.size)) {
+                self.pool_fetch.prior.insert(old, local);
+                self.resolve_fill(old, hash, size);
+                continue;
+            }
+            let dir = self
+                .elek
+                .names
+                .get(&k)
+                .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+                .or_else(|| self.pool_upload_dir());
+            match dir {
+                Some(d) => by_dir.entry(d).or_default().push((old, local)),
+                None => {
+                    self.elek.filling.remove(&old);
+                    self.update_push.remove(&old);
+                    started -= 1;
+                    self.elek.status = "Open the device's +Drive in a file tab first, at the folder new samples should go to".into();
+                }
+            }
+        }
+        for (dir, upload) in by_dir {
+            let bytes: u64 = upload.iter().filter_map(|(_, p)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+            let task = device::Task::Transfer {
+                dir: device::Dir::Upload,
+                items: upload.iter().map(|(_, p)| (p.clone(), dir.clone())).collect(),
+                policy: Policy::KeepBoth,
+                mono: None,
+                total_bytes: bytes,
+                local_names: Default::default(),
+            };
+            let n = upload.len();
+            let id = self.run_device(task, &format!("Updating {n} edited sample(s) on the device"), n, bytes);
+            self.pool_fetch.uploads.insert(id, upload);
+        }
+        if started > 0 {
+            self.elek.status = format!("Sending {started} edited sample(s) to their slots…");
+        }
+    }
+
+    /// A slot taking an edited file has its new sample (or gave up): once
+    /// none is left on the way, push.
+    fn update_landed(&mut self, old: u16) {
+        if !self.update_push.remove(&old) {
+            return;
+        }
+        // Failed ones drop out of `filling`: stop waiting for them.
+        let filling = &self.elek.filling;
+        self.update_push.retain(|s| filling.contains_key(s));
+        if !self.update_push.is_empty() {
+            return;
+        }
+        self.changed_at = None;
+        let st = &mut self.elek;
+        if st.live {
+            st.status = "Edited samples are in their slots; going to the device".into();
+        } else if st.busy.is_some() || !st.pool_pushable() {
+            st.status = "Edited samples are in their slots; push when the device is free".into();
+        } else {
+            st.status = "Pushing the edited samples to the device…".into();
+            self.elek_push(false, false);
+        }
+    }
+
     /// Which pool files we have a local copy of, for the view.
     pub(super) fn refresh_elek_links(&mut self) {
         let Some(p) = &self.elek.project else { return };
@@ -668,6 +877,7 @@ impl App {
             crate::log::line(format!("elek: {} pool files have a local copy", linked.len()));
         }
         self.elek.linked = linked;
+        self.changed_at = None;
     }
 
     /// Where project and pattern files go by default.
@@ -1306,6 +1516,7 @@ impl App {
                             st.status = format!("{name} is ready in its slot; push to send it to the device");
                             self.refresh_elek_links();
                             self.pool_edit_filled(slot, (hash, len), &path);
+                            self.update_landed(slot);
                         }
                     }
                     Ok(None) => {

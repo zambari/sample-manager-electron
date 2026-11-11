@@ -69,6 +69,13 @@ pub struct DirTab {
     /// Opened by "Show on device" / "Show local copy" and not navigated by
     /// hand since: the next such jump reuses it instead of adding a tab.
     pub revealed: bool,
+    /// A row flashed to point something out without selecting it: the
+    /// file's path, or `None` for the ".." row. Set with [`Self::ping`].
+    pub ping: Option<(Option<PathBuf>, std::time::Instant)>,
+    /// Scroll the pinged row into view next frame.
+    pub scroll_to_ping: bool,
+    /// Scroll offset and height of the list last frame.
+    pub view: (f32, f32),
 }
 
 impl DirTab {
@@ -102,7 +109,16 @@ impl DirTab {
             scroll_to_cursor: false,
             reveal: None,
             revealed: false,
+            ping: None,
+            scroll_to_ping: false,
+            view: (0.0, 0.0),
         }
+    }
+
+    /// Flash row `path` (`None`: the ".." row) and scroll it into view.
+    pub fn ping(&mut self, path: Option<PathBuf>) {
+        self.ping = Some((path, std::time::Instant::now()));
+        self.scroll_to_ping = true;
     }
 
     pub fn new_device(id: u64, cwd: PathBuf) -> Self {

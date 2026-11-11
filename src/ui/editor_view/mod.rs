@@ -128,7 +128,7 @@ const RULER_H: f32 = 18.0;
 const OVERVIEW_H: f32 = 30.0;
 const SCOPE_H: f32 = 110.0;
 /// Width of the scope strip's fixed window, in seconds.
-const SCOPE_SECS: f64 = 0.040;
+const SCOPE_SECS: f64 = 0.080;
 const GRAB_PX: f32 = 6.0;
 /// Clicks and drags this close to a slice marker or a file end land on it.
 const SNAP_PX: f32 = 8.0;
@@ -234,10 +234,8 @@ pub fn show(
     };
     reserved += help_h;
 
-    // File row sits right above the last of wave / scalpel.
-    if !pn.scalpel {
-        file_row(ui, ed, can_export, slots, &mut out);
-    }
+    // File row (mono preview, Save / Export) sits right above the wave.
+    file_row(ui, ed, can_export, slots, &mut out);
 
     section_header(ui, "Wave");
     let wave_h = (avail.y - reserved - 12.0).max(80.0);
@@ -250,7 +248,6 @@ pub fn show(
     }
 
     if pn.scalpel {
-        file_row(ui, ed, can_export, slots, &mut out);
         section_header(ui, "Scalpel");
         let (srect, _) = ui.allocate_exact_size(vec2(avail.x, SCOPE_H), Sense::hover());
         scope(ui, ed, &pv, srect, &mut out);

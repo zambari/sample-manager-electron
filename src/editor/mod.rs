@@ -83,7 +83,7 @@ pub struct Panels {
     pub gain: bool,
     /// Undo, crop, loop scaling, export.
     pub tools: bool,
-    /// The fixed 40 ms extreme-zoom strip.
+    /// The fixed 80 ms extreme-zoom strip.
     pub scalpel: bool,
     pub minimap: bool,
     /// Stats table and phase meter.

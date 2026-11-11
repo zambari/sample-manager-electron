@@ -30,6 +30,12 @@ pub struct ElekState {
     /// it), by `(hash, length)`: `(device name when linked, local path,
     /// is the original)`. Filled by the app.
     pub linked: HashMap<(u32, u32), (String, std::path::PathBuf, bool)>,
+    /// Pool files whose local file was edited since it was linked, so the
+    /// device still plays the older version: the edited file. Filled by
+    /// the app.
+    pub changed_local: HashMap<(u32, u32), std::path::PathBuf>,
+    /// The slot menu asked to send these edited files to their slots.
+    want_update: Option<Vec<(u32, u32)>>,
     /// A row asked for its local copy: `(key, open in editor)`.
     want_local: Option<((u32, u32), bool)>,
     /// A row asked to show its original in the source pane.
@@ -70,6 +76,10 @@ pub struct ElekState {
     scroll: [f32; 2],
     view_h: [f32; 2],
     reveal: Option<usize>,
+    /// A slot (position now) flashed to point it out without selecting it.
+    ping: Option<(usize, std::time::Instant)>,
+    /// The pane that should scroll to the pinged slot next frame.
+    ping_scroll: Option<usize>,
     /// Clicking a slot (or moving the cursor onto it) plays it.
     pub preview: bool,
     /// Shown as one pane in the right column, beside the files and editor.
@@ -105,6 +115,20 @@ pub struct ElekState {
     pub live: bool,
     /// When the pool was last edited, so live pushes wait for a pause.
     pub edited_at: Option<std::time::Instant>,
+    /// Slots cut or copied (⌘X / ⌘C). A cut pastes back into the pool
+    /// (moving them); either pastes into a local file pane (downloading them).
+    clip: Option<PoolClip>,
+    /// Slots were just cut or copied: the app drops its file clipboard.
+    clipped: bool,
+    /// ⌘V with nothing cut here: paste the file clipboard from this slot.
+    want_paste_files: Option<usize>,
+}
+
+/// Cut or copied slots, by entry as read, so they stay the same samples
+/// while the order changes.
+struct PoolClip {
+    olds: Vec<u16>,
+    cut: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -127,6 +151,9 @@ pub enum ElekIntent {
     /// Select the local file this pool sample was uploaded from in the
     /// source pane.
     ShowOriginal((u32, u32)),
+    /// Upload the edited local file of each of these pool samples next to
+    /// its +Drive file, put it in the same slot and push.
+    UpdateChanged(Vec<(u32, u32)>),
     /// Rename the +Drive file behind a pool sample. Projects refer to it by
     /// hash, so nothing that uses it breaks.
     RenameFile { key: (u32, u32), from: String, to: String },
@@ -144,6 +171,12 @@ pub enum ElekIntent {
     /// Local files dropped on the pool: each goes to the empty slot paired
     /// with it (numbered as read).
     AddFiles(Vec<(u16, std::path::PathBuf)>),
+    /// Pool slots were cut or copied: drop the file clipboard (one
+    /// clipboard at a time).
+    Clipped,
+    /// ⌘V in the pool with nothing cut there: put the local files on the
+    /// file clipboard into the empty slots from this one on.
+    PasteFiles(usize),
     /// Write the dump as read to disk, for format research.
     SaveDump,
     /// Save the project as edited to a file / open one (asks where).
@@ -253,6 +286,7 @@ impl ElekState {
         self.sel.clear();
         self.cursor = None;
         self.undo.clear();
+        self.clip = None;
         self.project = Some(p);
     }
 
@@ -271,7 +305,147 @@ impl ElekState {
         self.sel.clear();
         self.cursor = None;
         self.undo.clear();
+        self.clip = None;
         self.status.clear();
+    }
+
+    /// Cut (`cut`) or copy these slots (as ordered now); empty ones are
+    /// left out. Their names also go on the system clipboard as text, which
+    /// is what makes ⌘V reach the app at all.
+    fn set_clip(&mut self, slots: &[usize], cut: bool, ctx: &egui::Context) {
+        let slots: Vec<usize> = slots.iter().copied().filter(|&s| self.key_at(s).is_some()).collect();
+        if slots.is_empty() {
+            self.status = "Nothing to cut or copy: those slots are empty".into();
+            return;
+        }
+        let names: Vec<String> = slots
+            .iter()
+            .map(|&s| {
+                let k = self.key_at(s).unwrap_or_default();
+                let name = self.names.get(&k).map_or_else(|| self.label(s), |p| p.rsplit('/').next().unwrap_or(p).to_owned());
+                format!("{} {name}", self.label(s))
+            })
+            .collect();
+        ctx.copy_text(names.join("\n"));
+        let n = slots.len();
+        self.status = if cut {
+            format!("Cut {n} sample(s): ⌘V pastes into empty slots from the cursor, ⇧⌘V inserts there and shifts the rest down")
+        } else {
+            format!("Copied {n} sample(s): paste into a file pane to download them")
+        };
+        self.clip = Some(PoolClip { olds: slots.iter().map(|&s| self.order[s]).collect(), cut });
+        self.clipped = true;
+    }
+
+    /// Drops the cut or copied slots (the file clipboard took over).
+    pub(crate) fn drop_clip(&mut self) {
+        self.clip = None;
+    }
+
+    /// Positions now of the clipped samples still in the pool.
+    fn clip_positions(&self) -> Vec<usize> {
+        let Some(c) = &self.clip else { return Vec::new() };
+        let mut v: Vec<usize> = c
+            .olds
+            .iter()
+            .filter_map(|&o| self.order.iter().position(|&x| x == o))
+            .filter(|&s| self.key_at(s).is_some())
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// The cut or copied samples with their slot labels, for downloading
+    /// into a file pane.
+    pub(crate) fn clip_keys(&self) -> Vec<((u32, u32), String)> {
+        self.clip_positions()
+            .into_iter()
+            .filter_map(|s| Some((self.key_at(s)?, self.label(s))))
+            .collect()
+    }
+
+    /// Pastes the cut slots at `at`; the slots they were cut from are left
+    /// empty. `shift`: inserted at `at`, pushing the samples below down,
+    /// each into the next empty slot further down. Otherwise they go into
+    /// the empty slots from `at` on and nothing else moves.
+    fn paste(&mut self, at: usize, shift: bool) {
+        let Some(clip) = &self.clip else {
+            self.want_paste_files = Some(at);
+            return;
+        };
+        if !clip.cut {
+            self.status = "Copied slots paste into a file pane (downloading them). To move them in the pool, cut with ⌘X".into();
+            return;
+        }
+        let from = self.clip_positions();
+        if from.is_empty() {
+            self.clip = None;
+            self.status = "Nothing to paste: the cut slots are empty now".into();
+            return;
+        }
+        let n = self.order.len();
+        let at = at.clamp(1, n - 1);
+        let cut: HashSet<usize> = from.iter().copied().collect();
+        // `None`: a slot being cut, empty once its sample leaves.
+        let mut v: Vec<Option<u16>> = self.order.iter().enumerate().map(|(i, &o)| (!cut.contains(&i)).then_some(o)).collect();
+        // Empty entries taken out of the way, to fill the cut slots after.
+        let mut spare = Vec::new();
+        let mut placed = Vec::new();
+        let mut pos = at;
+        for &f in &from {
+            let Some(e) = (pos..n).find(|&i| v[i].is_none_or(|o| self.free(o))) else {
+                self.status = format!(
+                    "Not enough empty slots from {} down for {} sample(s); nothing pasted",
+                    self.label(at),
+                    from.len()
+                );
+                return;
+            };
+            spare.extend(v[e]);
+            if shift {
+                v[pos..=e].rotate_right(1);
+                v[pos] = Some(self.order[f]);
+                placed.push(pos);
+                pos += 1;
+            } else {
+                v[e] = Some(self.order[f]);
+                placed.push(e);
+                pos = e + 1;
+            }
+        }
+        let mut spare = spare.into_iter();
+        for s in v.iter_mut().filter(|s| s.is_none()) {
+            *s = spare.next();
+        }
+        let Some(new) = v.into_iter().collect::<Option<Vec<u16>>>() else {
+            self.status = "Paste failed: the slot count didn't add up; nothing changed".into();
+            return;
+        };
+        self.edit(|o| *o = new);
+        self.sel = placed.iter().copied().collect();
+        self.cursor = placed.first().copied();
+        self.reveal = self.cursor;
+        self.clip = None;
+        let (a, b) = (placed[0], placed[placed.len() - 1]);
+        let what = if a == b { self.label(a) } else { format!("{}–{}", self.label(a), self.label(b)) };
+        self.status = if shift {
+            format!("Pasted at {what}; the samples below shifted down into the next empty slots")
+        } else {
+            format!("Pasted into {what}")
+        };
+    }
+
+    /// Local files from the file clipboard: into the empty slots from `at` on.
+    pub(crate) fn paste_files(&mut self, at: usize, files: Vec<std::path::PathBuf>) {
+        if !self.pool_editable() {
+            self.status = "The pool can't take files now (read-only, from a file, or the device is busy)".into();
+            return;
+        }
+        let Some(s) = (at.max(1)..self.order.len()).find(|&s| self.free(self.order[s])) else {
+            self.status = "No empty slot from the cursor down".into();
+            return;
+        };
+        self.drop_files(s, files);
     }
 
     /// The pool as it will be after a push.
@@ -295,6 +469,37 @@ impl ElekState {
                 .filter_map(|&s| Some((self.key_at(s)?, self.label(s))))
                 .collect()
         })
+    }
+
+    /// The pool can take new files: a project read from the device (not
+    /// a file, not read-only) and not locked by a running job.
+    pub fn pool_editable(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| p.read_only.is_none() && p.from_file.is_none()) && !self.edit_locked()
+    }
+
+    /// Slot (as read) holding device file `key`, if any.
+    pub fn slot_of(&self, key: (u32, u32)) -> Option<u16> {
+        (1..self.order.len()).find(|&s| self.key_at(s) == Some(key)).map(|s| self.order[s])
+    }
+
+    /// The sample under the keyboard cursor (the last one clicked).
+    pub fn cursor_key(&self) -> Option<(u32, u32)> {
+        self.key_at(self.cursor?)
+    }
+
+    /// Flash the first slot holding device file `key` and bring it into
+    /// view, leaving the selection alone. `false` when no slot holds it.
+    pub fn ping_key(&mut self, matches: impl Fn((u32, u32)) -> bool) -> bool {
+        let Some(pos) = (1..self.order.len()).find(|&s| self.key_at(s).is_some_and(&matches)) else {
+            return false;
+        };
+        self.ping = Some((pos, std::time::Instant::now()));
+        // A pane already on that bank scrolls; otherwise the active one
+        // switches to it.
+        let panes = if self.docked { 1 } else { 2 };
+        let side = (0..panes).find(|&side| self.bank[side] == pos / BANK);
+        self.ping_scroll = Some(side.unwrap_or(if self.docked { 0 } else { self.active }));
+        true
     }
 
     fn key_at(&self, slot: usize) -> Option<(u32, u32)> {
@@ -617,6 +822,29 @@ impl ElekState {
                 i.key_pressed(egui::Key::Space),
             )
         });
+        // ⌘X / ⌘C / ⌘V come as clipboard events (⌘V only when the system
+        // clipboard holds text); ⇧⌘V comes as a plain key.
+        let (ev_cut, ev_copy, ev_paste, shift_paste) = ctx.input(|i| {
+            let ev = |f: fn(&egui::Event) -> bool| i.events.iter().any(f);
+            (
+                ev(|e| matches!(e, egui::Event::Cut)),
+                ev(|e| matches!(e, egui::Event::Copy)),
+                ev(|e| matches!(e, egui::Event::Paste(_))) || (i.modifiers.command_only() && i.key_pressed(egui::Key::V)),
+                i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::V),
+            )
+        });
+        if ev_cut || ev_copy {
+            let slots: Vec<usize> = self.sel.iter().copied().collect();
+            self.set_clip(&slots, ev_cut, ctx);
+        }
+        if ev_paste || shift_paste {
+            if self.edit_locked() {
+                self.status = "Wait a moment: the device is busy, and an edit now would be lost".into();
+            } else {
+                let at = self.cursor.or_else(|| self.sel.first().copied()).unwrap_or(1);
+                self.paste(at, shift_paste);
+            }
+        }
         // Space plays (or stops) the slot under the cursor.
         if space && !m.any() {
             if let Some(k) = self.cursor.and_then(|c| self.key_at(c)) {
@@ -692,9 +920,16 @@ enum RowAct {
     ClearUnused,
     Local((u32, u32), bool),
     ShowOriginal((u32, u32)),
+    UpdateChanged(Vec<(u32, u32)>),
     Rename((u32, u32)),
     /// Local files dropped on this slot.
     DropFiles(usize, Vec<std::path::PathBuf>),
+    /// Cut (`true`) or copy these slots.
+    Clip(Vec<usize>, bool),
+    /// Paste the cut slots here; `true`: shifting the samples below down.
+    Paste(usize, bool),
+    /// Forget the cut.
+    DropClip,
 }
 
 /// The mode switch across the top of both full-window pages, with the
@@ -1136,7 +1371,7 @@ fn body(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, busy: 
     } else {
         st.keys(ui.ctx());
         ui.label(
-            RichText::new("Click / ⇧click / ⌘click to select · drag to place into slots (swaps with what's there; ⌃/⌥ while dropping inserts and shifts instead) · drag onto a bank tab or the other pane · ⌥↑↓ nudge · right-click for more")
+            RichText::new("Click / ⇧click / ⌘click to select · drag to place into slots (swaps with what's there; ⌃/⌥ while dropping inserts and shifts instead) · drag onto a bank tab or the other pane · ⌥↑↓ nudge · ⌘X cut, ⌘V paste into empty slots, ⇧⌘V paste and shift down · right-click for more")
                 .weak()
                 .small(),
         );
@@ -1207,8 +1442,17 @@ pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIn
     if let Some(k) = st.want_original.take() {
         out.push(ElekIntent::ShowOriginal(k));
     }
+    if let Some(keys) = st.want_update.take() {
+        out.push(ElekIntent::UpdateChanged(keys));
+    }
     if let Some(pairs) = st.want_files.take() {
         out.push(ElekIntent::AddFiles(pairs));
+    }
+    if std::mem::take(&mut st.clipped) {
+        out.push(ElekIntent::Clipped);
+    }
+    if let Some(at) = st.want_paste_files.take() {
+        out.push(ElekIntent::PasteFiles(at));
     }
     let pass = ui.ctx().cumulative_pass_nr() + 1;
     if st.dialogs_pass == pass {
@@ -1310,8 +1554,13 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
     let Some(p) = &st.project else { return };
     let n = p.pool.len();
     let banks = n.div_ceil(BANK);
-    // Keep the keyboard cursor visible in the pane it drives.
-    if let Some(r) = st.reveal.filter(|_| side == st.active) {
+    // Keep the keyboard cursor visible in the pane it drives, and a pinged
+    // slot in the pane picked for it.
+    let target = st
+        .reveal
+        .filter(|_| side == st.active)
+        .or_else(|| st.ping.filter(|_| st.ping_scroll == Some(side)).map(|(pos, _)| pos));
+    if let Some(r) = target {
         st.bank[side] = r / BANK;
     }
     if banks > 1 {
@@ -1404,7 +1653,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("elek_slots", side, bank))
         .auto_shrink([false, false]);
-    if let Some(r) = st.reveal.filter(|_| side == st.active) {
+    if let Some(r) = target.filter(|&r| r >= first) {
         let y = (r - first) as f32 * ROW_H;
         let (top, h) = (st.scroll[side], st.view_h[side]);
         if y < top {
@@ -1434,9 +1683,18 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
     if side == st.active {
         st.reveal = None;
     }
+    if st.ping_scroll == Some(side) {
+        st.ping_scroll = None;
+    }
+    if st.ping.is_some_and(|(_, at)| at.elapsed().as_secs_f32() >= crate::ui::file_table::PING_SECS) {
+        st.ping = None;
+    }
     let locked = st.edit_locked();
     for a in acts {
-        let edits = !matches!(a, RowAct::Click(..) | RowAct::DragStart(_) | RowAct::Local(..) | RowAct::ShowOriginal(_) | RowAct::Rename(_));
+        let edits = !matches!(
+            a,
+            RowAct::Click(..) | RowAct::DragStart(_) | RowAct::Local(..) | RowAct::ShowOriginal(_) | RowAct::Rename(_) | RowAct::Clip(..) | RowAct::DropClip
+        );
         if locked && edits {
             st.status = "Wait a moment: the device is busy, and an edit now would be lost".into();
             continue;
@@ -1477,6 +1735,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
             }
             RowAct::Local(k, open) => st.want_local = Some((k, open)),
             RowAct::ShowOriginal(k) => st.want_original = Some(k),
+            RowAct::UpdateChanged(keys) => st.want_update = Some(keys),
             RowAct::Rename(k) => {
                 if let Some(path) = st.names.get(&k).cloned() {
                     let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
@@ -1486,6 +1745,15 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
             RowAct::DropFiles(s, files) => {
                 st.active = side;
                 st.drop_files(s, files);
+            }
+            RowAct::Clip(slots, cut) => st.set_clip(&slots, cut, ui.ctx()),
+            RowAct::Paste(s, shift) => {
+                st.active = side;
+                st.paste(s, shift);
+            }
+            RowAct::DropClip => {
+                st.clip = None;
+                st.status = "Cut cancelled".into();
             }
         }
     }
@@ -1526,6 +1794,10 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
             egui::StrokeKind::Inside,
         );
     }
+    if let Some((_, at)) = st.ping.filter(|&(pos, _)| pos == slot) {
+        crate::ui::file_table::paint_ping(ui, rect, at, theme::DEVICE_ACCENT_BRIGHT);
+    }
+    let painter = ui.painter();
     if moved {
         painter.rect_filled(
             egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
@@ -1584,8 +1856,15 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     }
     // Name brightness shows the preview cache: full white plays at once,
     // 0.8 opacity still has to be pulled from the device.
+    let changed = (!off && !e.is_empty()).then(|| st.changed_local.get(&e.key())).flatten();
+    // Cut and waiting for a paste: faded, like cut files.
+    let is_cut = st.clip.as_ref().is_some_and(|c| c.cut && !e.is_empty() && c.olds.contains(&(from as u16)));
     let name_c = if selected {
         fg
+    } else if is_cut {
+        OLED_DIM
+    } else if changed.is_some() {
+        theme::CHANGED
     } else if linked.is_some() {
         Color32::WHITE
     } else {
@@ -1622,6 +1901,13 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     if off {
         return;
     }
+    let resp = match changed {
+        Some(local) => resp.on_hover_text(format!(
+            "Edited since it went to the device: the device still plays the older version.\n{}\nRight-click › Update on device from edited file",
+            local.display()
+        )),
+        None => resp,
+    };
     // With preview on, the first click of a double-click already played it.
     if resp.clicked() && !(st.preview && resp.double_clicked()) {
         acts.push(RowAct::Click(slot, ui.input(|i| i.modifiers)));
@@ -1704,6 +1990,21 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
                 acts.push(RowAct::Local(e.key(), true));
                 ui.close();
             }
+            if changed.is_some() && st.pool_editable() {
+                let all: Vec<(u32, u32)> = st.changed_local.keys().copied().collect();
+                if ui
+                    .button("⬆ Update on device from edited file")
+                    .on_hover_text("Upload the edited local file next to the +Drive original (which stays, other projects may use it), put it in this slot and push")
+                    .clicked()
+                {
+                    acts.push(RowAct::UpdateChanged(vec![e.key()]));
+                    ui.close();
+                }
+                if all.len() > 1 && ui.button(format!("⬆ Update all {} edited samples", all.len())).clicked() {
+                    acts.push(RowAct::UpdateChanged(all));
+                    ui.close();
+                }
+            }
             // Uploaded from a local file: point at it, so it's clear which
             // of several same-named copies is the one on the device.
             if let Some((_, local, true)) = linked {
@@ -1729,6 +2030,54 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
                     ui.close();
                 }
             }
+            ui.separator();
+        }
+        // Cut / copy: the selection when right-clicking inside it, else this row.
+        let pick: Vec<usize> = if selected { st.sel.iter().copied().collect() } else { vec![slot] };
+        let filled = pick.iter().filter(|&&s| st.key_at(s).is_some()).count();
+        if filled > 0 {
+            let what = if filled == 1 { "sample".to_owned() } else { format!("{filled} samples") };
+            if ui
+                .button(format!("Cut {what}  (⌘X)"))
+                .on_hover_text("Then paste into this pool to move them; the slots they leave become empty. Nothing changes until you paste")
+                .clicked()
+            {
+                acts.push(RowAct::Clip(pick.clone(), true));
+                ui.close();
+            }
+            if ui
+                .button(format!("Copy {what}  (⌘C)"))
+                .on_hover_text("Then paste into a local file pane to download them there, as when dragging slots out")
+                .clicked()
+            {
+                acts.push(RowAct::Clip(pick, false));
+                ui.close();
+            }
+        }
+        let cut_n = st.clip.as_ref().filter(|c| c.cut).map_or(0, |_| st.clip_positions().len());
+        if cut_n > 0 {
+            if ui
+                .button(format!("Paste {cut_n} into empty slots from here  (⌘V)"))
+                .on_hover_text("Fills the empty slots from this one down, skipping filled ones; nothing else moves. The cut slots become empty")
+                .clicked()
+            {
+                acts.push(RowAct::Paste(slot, false));
+                ui.close();
+            }
+            if ui
+                .button(format!("Paste {cut_n} here, shifting down  (⇧⌘V)"))
+                .on_hover_text("Inserts at this slot; this and the samples below move down, each into the next empty slot further down. The cut slots become empty")
+                .clicked()
+            {
+                acts.push(RowAct::Paste(slot, true));
+                ui.close();
+            }
+            if ui.button("Cancel cut").clicked() {
+                acts.push(RowAct::DropClip);
+                ui.close();
+            }
+        }
+        if filled > 0 || cut_n > 0 {
             ui.separator();
         }
         if ui

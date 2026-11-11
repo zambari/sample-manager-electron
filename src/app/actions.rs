@@ -160,6 +160,7 @@ impl App {
         let n = paths.len();
         let verb = if kind == Kind::Move { "Cut" } else { "Copied" };
         self.status = format!("{verb} {n} item(s) — paste into a folder");
+        self.elek.drop_clip();
         self.clipboard = Some(Clipboard {
             kind,
             device,
@@ -170,6 +171,18 @@ impl App {
     /// Paste into `target`, or the pane's current folder when `None`.
     pub(super) fn paste(&mut self, role: Role, target: Option<PathBuf>) {
         let Some(clip) = self.clipboard.clone() else {
+            // Pool slots cut or copied: download them here, as when dragged out.
+            let keys = self.elek.clip_keys();
+            if keys.is_empty() {
+                return;
+            }
+            let tab = self.pane(role).active_tab();
+            if tab.device {
+                self.status = "Those samples are already on the +Drive; paste them into a local folder to download them".into();
+                return;
+            }
+            let dest = target.unwrap_or_else(|| tab.cwd.clone());
+            self.slots_dropped(role, dest, keys);
             return;
         };
         let tab = self.pane(role).active_tab();
@@ -435,17 +448,30 @@ impl App {
     }
 
     /// Make "<parent name> Subfolder" in `dir`, move `paths` into it, and
-    /// open the inline rename on the new folder. Local only; the moves stay
-    /// inside one folder, so they're plain renames.
-    pub(super) fn new_folder_with(&mut self, role: Role, dir: PathBuf, paths: Vec<PathBuf>) {
+    /// open the inline rename on the new folder. With `named`, make exactly
+    /// that folder and just select it. Local only; the moves stay inside one
+    /// folder, so they're plain renames.
+    pub(super) fn new_folder_with(
+        &mut self,
+        role: Role,
+        dir: PathBuf,
+        paths: Vec<PathBuf>,
+        named: Option<String>,
+    ) {
         if paths.is_empty() || self.pane(role).active_tab().device {
             return;
         }
-        let parent_name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "New".to_owned());
-        let folder = fs_model::unique_sibling(&dir.join(format!("{parent_name} Subfolder")));
+        let rename = named.is_none();
+        let folder = match named {
+            Some(n) => dir.join(n),
+            None => {
+                let parent_name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "New".to_owned());
+                fs_model::unique_sibling(&dir.join(format!("{parent_name} Subfolder")))
+            }
+        };
         if let Err(e) = std::fs::create_dir(&folder) {
             self.errors.push(format!("{}: {e}", folder.display()));
             return;
@@ -493,7 +519,9 @@ impl App {
         tab.selected.clear();
         tab.selected.insert(folder.clone());
         tab.cursor = None;
-        tab.renaming = Some((folder, name));
+        if rename {
+            tab.renaming = Some((folder, name));
+        }
     }
 
     /// Run the renames the multi-rename panel settled on, then close it.

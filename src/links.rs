@@ -61,6 +61,11 @@ impl Link {
         stamp(&self.local) == Some((self.len, self.mtime))
     }
 
+    /// This link is to device file `key` (`(hash, size)`).
+    pub fn is(&self, key: (u32, u32)) -> bool {
+        self.hash != 0 && self.hash == key.0 && self.size.abs_diff(key.1) <= SIZE_SLACK
+    }
+
     /// The device file's name when it was linked.
     pub fn device_name(&self) -> &str {
         self.device.rsplit('/').next().unwrap_or(&self.device)
@@ -271,6 +276,21 @@ impl Links {
         self.candidates(hash, size)
             .filter(|l| !cache.as_ref().is_some_and(|c| l.local.starts_with(c)))
             .find(|l| l.fresh())
+    }
+
+    /// The local file this device file came from (or went to) was edited
+    /// since: still on disk but changed, and no other copy outside the
+    /// preview cache still matches. Originals first. Touches the disk.
+    pub fn changed_copy(&self, hash: u32, size: u32) -> Option<&Link> {
+        let cache = pool_cache_dir();
+        let mine = || {
+            self.candidates(hash, size)
+                .filter(|l| !cache.as_ref().is_some_and(|c| l.local.starts_with(c)))
+        };
+        if mine().any(Link::fresh) {
+            return None;
+        }
+        mine().find(|l| l.local.is_file())
     }
 
     /// A link whose local file is still there and unchanged. Touches the

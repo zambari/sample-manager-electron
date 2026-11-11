@@ -859,7 +859,7 @@ impl ElekProject {
                     .iter()
                     .enumerate()
                     .filter(|(i, c)| **c != Cell::as_read(*i))
-                    .filter(|(_, c)| c.src.is_none_or(|s| pats.loaded[s as usize]))
+                    .filter(|(_, c)| c.sources().all(|s| pats.loaded[s as usize]))
                     .filter_map(|(i, c)| Some((pats.msg_of(i)?, pats.build(i, c, src)?)))
                     .collect();
                 for (mi, d) in placed {

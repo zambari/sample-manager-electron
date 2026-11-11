@@ -1,5 +1,6 @@
 //! The 128 patterns of a Digitakt / Digitakt II project: what each slot holds, and
-//! moving / copying / clearing / renaming whole patterns.
+//! moving / copying / clearing / renaming whole patterns, and copying single
+//! tracks between patterns (`Cell::tracks`, `Patterns::splice_track`).
 //!
 //! On the Digitakt each pattern carries its own copy of its kit, and nothing
 //! in the project points at a pattern number, so a pattern moves as one
@@ -11,7 +12,7 @@
 //! hold. See `project_management_discovery.md` §8.
 
 use super::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const PATTERNS: usize = 128;
 
@@ -182,6 +183,14 @@ fn track_stride(m: Model, v: u32, plocks: usize) -> usize {
     }
 }
 
+/// A p-lock row (`[param, track, value per step…]`) with no value set.
+fn no_locks(model: Model, h: &[u8]) -> bool {
+    h[2..].chunks_exact(2).all(|v| {
+        let v = u16::from_be_bytes([v[0], v[1]]);
+        if model == DT2 { v == 0xFFFF } else { v & 0xFF00 == 0xFF00 }
+    })
+}
+
 /// Each track starts with one big-endian u16 of trig flags per step, right
 /// after the pattern's 4-byte version. From DT1 v10 dumps: bit 0 = note
 /// trig; 0x0010 = swing (set on every odd step by default, so ignored); any
@@ -251,11 +260,42 @@ pub struct Cell {
     pub src: Option<u8>,
     /// New kit name, if renamed.
     pub name: Option<String>,
+    /// Tracks taken from another pattern: track → pattern (as `src`; `None`
+    /// = an empty pattern's track). Same track number on both sides.
+    pub tracks: BTreeMap<u8, Option<u8>>,
 }
 
 impl Cell {
     pub fn as_read(slot: usize) -> Self {
-        Self { src: Some(slot as u8), name: None }
+        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new() }
+    }
+
+    pub fn empty() -> Self {
+        Self { src: None, name: None, tracks: BTreeMap::new() }
+    }
+
+    pub fn with_src(src: u8) -> Self {
+        Self { src: Some(src), name: None, tracks: BTreeMap::new() }
+    }
+
+    /// The pattern track `t` comes from (`None`: an empty pattern).
+    pub fn track_src(&self, t: usize) -> Option<u8> {
+        self.tracks.get(&(t as u8)).copied().unwrap_or(self.src)
+    }
+
+    /// Take track `t` from pattern `from`; an override that matches the
+    /// pattern itself is dropped.
+    pub fn set_track(&mut self, t: usize, from: Option<u8>) {
+        if from == self.src {
+            self.tracks.remove(&(t as u8));
+        } else {
+            self.tracks.insert(t as u8, from);
+        }
+    }
+
+    /// Every pattern this cell reads from.
+    pub fn sources(&self) -> impl Iterator<Item = u8> + '_ {
+        self.src.into_iter().chain(self.tracks.values().flatten().copied())
     }
 }
 
@@ -272,6 +312,12 @@ struct Geo {
     ssize: Option<usize>,
     sslot: Option<usize>,
     sample_param: Option<u8>,
+    /// P-lock rows start, and one sequencer track's struct size (when it
+    /// checks out, see `parse_seq`).
+    plocks: Option<usize>,
+    stride: Option<usize>,
+    /// The kit's MIDI-track bit mask (DT2), from the payload start.
+    midi_mask: Option<usize>,
 }
 
 pub struct Patterns {
@@ -289,6 +335,9 @@ pub struct Patterns {
     slot_value: Option<u8>,
     kit_name_at: usize,
     pattern_name_at: usize,
+    /// What an unused p-lock row looks like (from the empty pattern, else
+    /// the most common row with no locks in it).
+    empty_row: Option<Vec<u8>>,
     /// Why moves / renames aren't allowed, if they aren't (names still show).
     pub read_only: Option<String>,
     geo: Geo,
@@ -417,19 +466,26 @@ impl Patterns {
             return Err("pattern payload shorter than expected".into());
         }
 
-        // The slot byte either holds each pattern's own slot (seen on an older
-        // DT1 project) or the same value in every pattern (0 on a fresh one).
-        let off: Vec<String> = have
-            .iter()
-            .filter(|&&i| data(i)[slot_at] as usize != i)
-            .map(|&i| format!("{}={}", label(i), data(i)[slot_at]))
-            .collect();
+        // The slot byte holds each pattern's own slot (seen on an older DT1
+        // project), the same value in every pattern (0 on a fresh one), or a
+        // mix of the two: the DT1 writes 0 when a pattern is saved on the
+        // device and leaves the others alone, and loads either fine.
+        let off_slots: Vec<usize> = have.iter().copied().filter(|&i| data(i)[slot_at] as usize != i).collect();
+        let off: Vec<String> = off_slots.iter().map(|&i| format!("{}={}", label(i), data(i)[slot_at])).collect();
         let first = data(f)[slot_at];
+        let off_value = off_slots.first().map(|&i| data(i)[slot_at]);
         let slot_value = if off.is_empty() {
             None
         } else if have.iter().all(|&i| data(i)[slot_at] == first) {
             log(format!("slot byte at {slot_at} is {first} in every pattern: keeping it at {first} on moves"));
             Some(first)
+        } else if let Some(v) = off_value.filter(|&v| off_slots.iter().all(|&i| data(i)[slot_at] == v)) {
+            log(format!(
+                "slot byte at {slot_at}: own slot in most patterns, {v} in {} (saved on the device): {}; writing the own slot on moves",
+                off.len(),
+                off.iter().take(16).cloned().collect::<Vec<_>>().join(", ")
+            ));
+            None
         } else {
             log(format!(
                 "slot byte at {slot_at} is neither the own slot nor the same everywhere; {} differ from the slot: {}",
@@ -477,7 +533,28 @@ impl Patterns {
         };
 
         let sample_param = sv.and_then(|v| super::sample_param(model, v));
-        let geo = Geo { model, pv, len, kit, sounds, ssize, sslot, sample_param };
+        let plocks = pattern_plocks(model, pv);
+        let stride = plocks.map(|pl| (pl, track_stride(model, pv, pl))).filter(|&(pl, st)| {
+            let body = pl.saturating_sub(4);
+            !(model == DT && body % SEQ_TRACKS != 0) && st >= model.steps() * 2 && st * SEQ_TRACKS <= body
+        });
+        let midi_mask = kit_midi_mask(model, kv).map(|o| kit + o);
+        let empty_row = plocks.and_then(|pl| {
+            let row = 2 + model.steps() * 2;
+            if let Some(r) = blank.as_ref().and_then(|b| b.get(pl..pl + row)) {
+                return Some(r.to_vec());
+            }
+            let mut c: HashMap<&[u8], usize> = HashMap::new();
+            for &i in &have {
+                for r in 0..PLOCK_ROWS {
+                    if let Some(h) = data(i).get(pl + r * row..pl + (r + 1) * row).filter(|h| no_locks(model, h)) {
+                        *c.entry(h).or_default() += 1;
+                    }
+                }
+            }
+            c.into_iter().max_by_key(|(_, n)| *n).map(|(r, _)| r.to_vec())
+        });
+        let geo = Geo { model, pv, len, kit, sounds, ssize, sslot, sample_param, plocks, stride: stride.map(|s| s.1), midi_mask };
         let mut odd_kit = Vec::new();
         let mut pattern_fields = Vec::new();
         let mut bad_sound = Vec::new();
@@ -550,6 +627,7 @@ impl Patterns {
             slot_value,
             kit_name_at,
             pattern_name_at,
+            empty_row,
             read_only: (!problems.is_empty()).then(|| problems.join("; ")),
             geo,
         })
@@ -613,6 +691,16 @@ impl Patterns {
             Some(s) => src_data(s as usize),
             None => self.blank.clone()?,
         };
+        for (&t, from) in &cell.tracks {
+            let s = match from {
+                Some(s) => src_data(*s as usize),
+                None => self.blank.clone()?,
+            };
+            if let Err(e) = self.splice_track(&mut d, &s, t as usize) {
+                log(format!("{}: track {} not copied: {e}", label(i), t + 1));
+                return None;
+            }
+        }
         d[self.slot_at] = self.slot_value.unwrap_or(i as u8);
         if let Some(n) = &cell.name {
             // The device shows the pattern name; the kit name is kept in step
@@ -625,6 +713,61 @@ impl Patterns {
             }
         }
         Some(d)
+    }
+
+    /// Why single tracks can't be copied in this project, if they can't.
+    pub fn track_copy_blocked(&self) -> Option<String> {
+        let g = &self.geo;
+        if let Some(r) = &self.read_only {
+            return Some(r.clone());
+        }
+        if g.stride.is_none() {
+            return Some(format!("the track layout of pattern v{} isn't known", g.pv));
+        }
+        if g.sounds.is_none() || g.ssize.is_none() {
+            return Some("the kit's track sound layout isn't known for this version".into());
+        }
+        if self.empty_row.is_none() {
+            return Some("couldn't tell what an unused p-lock row looks like".into());
+        }
+        None
+    }
+
+    /// Copy track `t` of payload `s` over track `t` of `d`: its sequencer
+    /// track (trigs, notes, length, scale…), its p-lock rows and, for kit
+    /// tracks, its sound (sample, parameters) and MIDI-track bit. The p-lock
+    /// rows are packed to the front afterwards, in their old order.
+    pub(super) fn splice_track(&self, d: &mut [u8], s: &[u8], t: usize) -> Result<(), String> {
+        if let Some(why) = self.track_copy_blocked() {
+            return Err(why);
+        }
+        let g = &self.geo;
+        let (Some(pl), Some(stride), Some(empty)) = (g.plocks, g.stride, &self.empty_row) else { unreachable!() };
+        if t >= SEQ_TRACKS || d.len() != s.len() || d.len() != g.len {
+            return Err("track or payload size out of range".into());
+        }
+        let mut copy = |at: usize, n: usize| d[at..at + n].copy_from_slice(&s[at..at + n]);
+        copy(4 + t * stride, stride);
+        if t < g.model.kit_tracks() {
+            let (Some(s0), Some(sz)) = (g.sounds, g.ssize) else { unreachable!() };
+            copy(g.kit + s0 + t * sz, sz);
+            if let Some(m) = g.midi_mask {
+                let bit = 1u16 << t;
+                let v = (be16(d, m).unwrap_or(0) & !bit) | (be16(s, m).unwrap_or(0) & bit);
+                d[m..m + 2].copy_from_slice(&v.to_be_bytes());
+            }
+        }
+        let row = empty.len();
+        let rows = |x: &[u8]| -> Vec<Vec<u8>> { (0..PLOCK_ROWS).map(|r| x[pl + r * row..pl + (r + 1) * row].to_vec()).collect() };
+        let mut keep: Vec<Vec<u8>> = rows(d).into_iter().filter(|r| r != empty && r[1] as usize != t).collect();
+        keep.extend(rows(s).into_iter().filter(|r| r != empty && r[1] as usize == t));
+        if keep.len() > PLOCK_ROWS {
+            return Err(format!("needs {} p-lock rows, a pattern has {PLOCK_ROWS}", keep.len()));
+        }
+        for r in 0..PLOCK_ROWS {
+            d[pl + r * row..pl + (r + 1) * row].copy_from_slice(keep.get(r).unwrap_or(empty));
+        }
+        Ok(())
     }
 
     /// Bytes where `got` (read back) differs from `want`, for the log.

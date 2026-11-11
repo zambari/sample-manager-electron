@@ -1,8 +1,8 @@
-//! The scope strip: a fixed 40 ms window around the playhead.
+//! The scope strip: a fixed 80 ms window around the playhead.
 
 use super::*;
 
-/// Fixed 40 ms window centred on the work playhead; it never follows the
+/// Fixed 80 ms window centred on the work playhead; it never follows the
 /// play cursor (which is drawn only when it passes through). No zoom: drag the wave to nudge the playhead, drag an in/out
 /// line that falls inside the window to move it, click to park there.
 pub(super) fn scope(
@@ -185,7 +185,7 @@ pub(super) fn scope(
     painter.text(
         Pos2::new(rect.right() - 4.0, ruler.bottom() + 2.0),
         Align2::RIGHT_TOP,
-        "40 ms",
+        "80 ms",
         FontId::proportional(10.0),
         vis.weak_text_color(),
     );
