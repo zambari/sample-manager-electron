@@ -256,6 +256,23 @@ impl Links {
         self.candidates(hash, size).next()
     }
 
+    /// The local file this device file was uploaded from, even if it changed
+    /// since: one still on disk first, unchanged ones before changed ones.
+    /// Touches the disk.
+    pub fn original(&self, hash: u32, size: u32) -> Option<&Link> {
+        let ups = || self.candidates(hash, size).filter(|l| l.uploaded);
+        ups().find(|l| l.fresh()).or_else(|| ups().find(|l| l.local.exists())).or_else(|| ups().next())
+    }
+
+    /// An unchanged local copy that isn't in the preview cache: one the user
+    /// put somewhere themselves. Originals first. Touches the disk.
+    pub fn user_copy(&self, hash: u32, size: u32) -> Option<&Link> {
+        let cache = pool_cache_dir();
+        self.candidates(hash, size)
+            .filter(|l| !cache.as_ref().is_some_and(|c| l.local.starts_with(c)))
+            .find(|l| l.fresh())
+    }
+
     /// A link whose local file is still there and unchanged. Touches the
     /// disk, so call it on a click, not every frame.
     pub fn local(&self, hash: u32, size: u32) -> Option<&Link> {

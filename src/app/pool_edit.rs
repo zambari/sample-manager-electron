@@ -43,6 +43,20 @@ impl PoolEdit {
     }
 }
 
+/// "Save to slot": the editor's sample rendered, uploaded and put into the
+/// empty slot selected in the device view. Once it lands it becomes a
+/// [`PoolEdit`], so later saves update that slot.
+pub(super) struct SlotSave {
+    /// Slot as read, and its position when saved.
+    old: u16,
+    pos: usize,
+    /// The render, and the +Drive folder it goes to.
+    staged: PathBuf,
+    dir: PathBuf,
+    /// Rendered and on its way to the device.
+    sent: bool,
+}
+
 impl App {
     /// A pool sample was opened in the editor from `local`.
     pub(super) fn note_pool_edit(&mut self, k: (u32, u32), local: &Path) {
@@ -204,9 +218,124 @@ impl App {
         }
     }
 
+    /// The empty slot "Save to slot" would fill: `(position now, slot as
+    /// read)`. None for a kit, a pool sample (that one updates its own slot)
+    /// or without exactly one empty slot selected.
+    fn slot_save_target(&self) -> Option<(usize, u16)> {
+        if self.showing_kit || self.editor.current.is_none() || self.saves_to_pool() {
+            return None;
+        }
+        self.elek.lone_empty_sel()
+    }
+
+    /// Label for the editor's "Save to slot" button.
+    pub(super) fn slot_save_label(&self) -> Option<String> {
+        let (pos, _) = self.slot_save_target()?;
+        let len = self.elek.project.as_ref().map_or(0, |p| p.pool.len());
+        Some(slot_label(pos, len))
+    }
+
+    /// Render what you hear and put it into the selected empty slot.
+    pub(super) fn save_to_slot(&mut self) {
+        if self.editor.exporting {
+            return;
+        }
+        let Some((pos, old)) = self.slot_save_target() else { return };
+        // A failed upload drops the slot from `filling`: not waiting any more.
+        if self.slot_save.as_ref().is_some_and(|s| s.sent && self.elek.filling.contains_key(&s.old)) {
+            self.status = "The last save is still on its way to the device".to_owned();
+            return;
+        }
+        // Next to its device original when it has one, else the +Drive tab.
+        let dir = self
+            .device_home()
+            .and_then(|h| h.parent().map(Path::to_path_buf))
+            .or_else(|| self.pool_upload_dir());
+        let Some(dir) = dir else {
+            self.status = "Open the device's +Drive in a file tab first, at the folder new samples should go to".to_owned();
+            return;
+        };
+        let stem = self
+            .editor
+            .path()
+            .and_then(|p| p.file_stem())
+            .map_or_else(|| "sample".to_owned(), |s| s.to_string_lossy().into_owned());
+        let name = if self.device_has(&dir.join(&stem)) {
+            super::editing::next_name(&stem, |c| !self.device_has(&dir.join(c)))
+        } else {
+            stem
+        };
+        let Some(cache) = crate::links::pool_cache_dir().map(|c| c.join("edits")) else {
+            self.errors.push("No cache folder to render the sample into".to_owned());
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&cache) {
+            self.errors.push(format!("{}: {e}", cache.display()));
+            return;
+        }
+        let staged = cache.join(device::wav_name(&name));
+        self.slot_save = Some(SlotSave { old, pos, staged: staged.clone(), dir, sent: false });
+        self.status = format!("Rendering {name} for slot {}…", self.slot_save_label().unwrap_or_default());
+        let mono = self.editor.fold();
+        self.editor.export(staged, mono);
+    }
+
+    /// `p` is the render of a "Save to slot".
+    pub(super) fn slot_save_rendered(&self, p: &Path) -> bool {
+        self.slot_save.as_ref().is_some_and(|s| !s.sent && s.staged == p)
+    }
+
+    /// The render failed: forget it.
+    pub(super) fn slot_save_cancel(&mut self) {
+        self.slot_save.take_if(|s| !s.sent);
+    }
+
+    /// The render is written: upload it, fill the slot when it lands, and
+    /// go on editing what was sent.
+    pub(super) fn slot_save_upload(&mut self, p: PathBuf) {
+        let Some(s) = self.slot_save.as_mut() else { return };
+        let (old, staged, dir) = (s.old, s.staged.clone(), s.dir.clone());
+        if self.elek.project.is_none() || !self.elek.free(old) {
+            self.slot_save = None;
+            self.status = "The slot was filled or the project closed meanwhile; nothing sent".to_owned();
+            return;
+        }
+        s.sent = true;
+        let name = staged.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let bytes = std::fs::metadata(&staged).map_or(0, |m| m.len());
+        let task = device::Task::Transfer {
+            dir: device::Dir::Upload,
+            items: vec![(staged.clone(), dir.clone())],
+            policy: Policy::KeepBoth,
+            mono: None,
+            total_bytes: bytes,
+        };
+        let job = self.run_device(task, &format!("Saving {name} to the device"), 1, bytes);
+        self.pool_fetch.uploads.insert(job, vec![(old, staged)]);
+        self.elek.filling.insert(old, name.clone());
+        self.status = format!("Sending {name} to {}…", device::dev_str(&dir));
+        if self.voice_path.as_deref() == Some(p.as_path()) {
+            self.engine.stop();
+        }
+        self.audition(&p, false);
+    }
+
     /// A file landed in slot `old` (as read): if it was our update, follow
     /// it and push so the device plays it straight away.
     pub(super) fn pool_edit_filled(&mut self, old: u16, key: (u32, u32), path: &str) {
+        // A "Save to slot" landed: from now on it's that slot's sample.
+        if let Some(s) = self.slot_save.take_if(|s| s.sent && s.old == old) {
+            let path = PathBuf::from(path);
+            self.pool_edit = Some(PoolEdit {
+                local: s.staged,
+                key,
+                pos: s.pos,
+                home: path.clone(),
+                ours: Some(path),
+                rendering: None,
+                waiting: Some(old),
+            });
+        }
         let Some(pe) = self.pool_edit.as_mut().filter(|pe| pe.waiting == Some(old)) else { return };
         pe.waiting = None;
         pe.key = key;

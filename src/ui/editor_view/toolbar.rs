@@ -478,10 +478,56 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
 /// Save and Export, always shown. Each button means the same thing in every
 /// state: Save writes over the open file, Export writes a new file into the
 /// destination tab.
+/// Which file is open: its kind and path, each clickable to show it in the
+/// source pane, plus the original when a copy is open.
+fn origin_line(ui: &mut Ui, o: &super::Origin, out: &mut Vec<EdIntent>) {
+    let warn = Color32::from_rgb(230, 170, 80);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let kind = RichText::new(o.kind).strong();
+        ui.label(if o.warn { kind.color(warn) } else { kind }).on_hover_text(&o.tip);
+        let shown = tidy_path(&o.path);
+        if ui
+            .link(RichText::new(crate::app::short_name(&shown, 60)).weak())
+            .on_hover_text(format!("{}\nClick: show it in the source pane", o.path.display()))
+            .clicked()
+        {
+            out.push(EdIntent::ShowInSource(o.path.clone()));
+        }
+        if let Some((orig, fresh)) = &o.original {
+            ui.label("·");
+            let label = if *fresh { "original: " } else { "original (changed since upload): " };
+            ui.label(RichText::new(label).weak());
+            if ui
+                .link(crate::app::short_name(&tidy_path(orig), 48))
+                .on_hover_text(format!(
+                    "{}\nThe file this sample was uploaded from. It may hold markers the device copy lost.\nClick: show it in the source pane",
+                    orig.display()
+                ))
+                .clicked()
+            {
+                out.push(EdIntent::ShowInSource(orig.clone()));
+            }
+        }
+    });
+}
+
+/// `~/…` for paths under the home folder.
+fn tidy_path(p: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
+    }
+}
+
 pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &Slots, out: &mut Vec<EdIntent>) {
     let showing_kit = slots.showing_kit;
     let has = ed.current.is_some();
     section_header(ui, "File");
+    if let Some(o) = slots.origin.as_ref().filter(|_| !showing_kit && has) {
+        origin_line(ui, o, out);
+    }
     ui.horizontal_wrapped(|ui| {
         mono_picker(ui, ed);
         ui.separator();
@@ -567,6 +613,20 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
                 .clicked()
         {
             out.push(EdIntent::ExportAndClose);
+        }
+        // One empty slot selected in the device view: fill it from here.
+        if let Some(slot) = slots.empty_slot.as_ref().filter(|_| !showing_kit) {
+            let tip = format!(
+                "Send what you hear (trimmed, with gain) to the device as a new file, put it in empty slot {slot} and push, \
+                 so the device plays it right away. After that, saving updates that slot."
+            );
+            if ui
+                .add_enabled(has && !ed.exporting, egui::Button::new(format!("⬆ Save to slot{mono} ({slot})")))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                out.push(EdIntent::SaveToSlot);
+            }
         }
         if let Some(home) = slots.device_home.as_ref().filter(|_| !showing_kit) {
             let tip = format!(

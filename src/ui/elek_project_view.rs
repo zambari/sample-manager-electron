@@ -630,6 +630,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     let frame = egui::Frame::new().fill(OLED_BG).corner_radius(2.0).inner_margin(4.0);
     frame.show(ui, |ui| {
         ui.set_min_size(ui.available_size());
+        theme::always_show_scrollbar(ui);
         let sa = egui::ScrollArea::vertical().id_salt("proj_list").auto_shrink([false, false]).show(ui, |ui| {
             let clip = ui.clip_rect();
             // Scroll while dragging near the top or bottom edge.

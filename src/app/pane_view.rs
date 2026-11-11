@@ -174,6 +174,21 @@ impl App {
                 theme::device_frame(),
                 egui::StrokeKind::Inside,
             );
+        } else if let Some(keys) = self.elek.dragged_keys().filter(|k| !k.is_empty()) {
+            // Pool slots dragged out of the Samples page: download them here.
+            // (The table's drop zone eats the slot payload, so go by pointer.)
+            if ui.rect_contains_pointer(ui.max_rect()) {
+                ui.painter().rect_stroke(
+                    ui.max_rect().shrink(1.0),
+                    2.0,
+                    egui::Stroke::new(2.0, theme::ACCENT_BRIGHT),
+                    egui::StrokeKind::Inside,
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
+                if ui.input(|i| i.pointer.any_released()) {
+                    self.slots_dropped(role, keys);
+                }
+            }
         }
 
         for intent in intents {
@@ -214,7 +229,12 @@ impl App {
                     let tab = self.pane_mut(role).active_tab_mut();
                     tab.renaming = None;
                     let on_dev = tab.device;
-                    self.do_rename(&from, &to, on_dev);
+                    let key = tab
+                        .entries
+                        .iter()
+                        .find(|e| e.path == from && !e.is_dir && e.hash != 0)
+                        .map(|e| (e.hash, e.len as u32));
+                    self.do_rename(&from, &to, on_dev, key);
                 }
                 Intent::BeginMultiRename => {
                     self.pane_mut(role).active_tab_mut().begin_multi_rename()
@@ -665,6 +685,73 @@ impl App {
                 None
             }
             None => None,
+        }
+    }
+
+    /// Pool samples dropped on a local pane: copy their +Drive files into
+    /// its folder, unless some are already here locally (then ask first).
+    pub(super) fn slots_dropped(&mut self, role: Role, keys: Vec<(u32, u32)>) {
+        let dest = self.pane(role).active_tab().cwd.clone();
+        let mut paths = Vec::new();
+        let mut have = Vec::new();
+        let mut unknown = 0;
+        for k in keys {
+            let Some(dev) = self.elek.names.get(&k).map(PathBuf::from) else {
+                unknown += 1;
+                continue;
+            };
+            if let Some(l) = self.links.user_copy(k.0, k.1) {
+                have.push((dev.clone(), l.local.clone()));
+            }
+            paths.push(dev);
+        }
+        if paths.is_empty() {
+            self.status = "The device hasn't said where these samples live on the +Drive yet; try again in a moment".into();
+            return;
+        }
+        if unknown > 0 {
+            self.status = format!("{unknown} sample(s) skipped: their +Drive location isn't known yet");
+        }
+        if have.is_empty() {
+            self.transfer(Kind::Copy, true, paths, false, dest);
+        } else {
+            self.slot_download_pending = Some(SlotDownload { role, dest, paths, have });
+        }
+    }
+
+    pub(super) fn answer_slot_download(&mut self, d: SlotDownload, choice: dialogs::SlotDownloadChoice) {
+        use dialogs::SlotDownloadChoice as C;
+        match choice {
+            C::Cancel => self.status = "Download cancelled".into(),
+            C::All => self.transfer(Kind::Copy, true, d.paths, false, d.dest),
+            C::Missing => {
+                let paths: Vec<PathBuf> =
+                    d.paths.into_iter().filter(|p| !d.have.iter().any(|(h, _)| h == p)).collect();
+                self.transfer(Kind::Copy, true, paths, false, d.dest);
+            }
+            C::Show => {
+                let Some((_, first)) = d.have.first() else { return };
+                self.show_file(d.role, false, first);
+                // Select the others too when they sit in the same folder.
+                let dir = first.parent().map(Path::to_path_buf);
+                for r in [d.role, d.role.other()] {
+                    let tab = self.pane_mut(r).active_tab_mut();
+                    if !tab.device && Some(&tab.cwd) == dir.as_ref() {
+                        for (_, l) in &d.have {
+                            if l.parent() == dir.as_deref() {
+                                tab.selected.insert(l.clone());
+                            }
+                        }
+                        break;
+                    }
+                }
+                self.focused = d.role;
+                self.editor_focused = false;
+                self.status = match d.have.len() {
+                    1 => format!("Already here: {}", first.display()),
+                    n => format!("{n} samples already have local copies; the first is selected"),
+                };
+            }
         }
     }
 

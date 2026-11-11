@@ -32,6 +32,11 @@ pub struct ElekState {
     pub linked: HashMap<(u32, u32), (String, std::path::PathBuf, bool)>,
     /// A row asked for its local copy: `(key, open in editor)`.
     want_local: Option<((u32, u32), bool)>,
+    /// A row asked to show its original in the source pane.
+    want_original: Option<(u32, u32)>,
+    /// Renaming a pool sample's +Drive file: `(key, +Drive path, name typed
+    /// so far, focus the field next frame)`.
+    renaming: Option<((u32, u32), String, String, bool)>,
     want_files: Option<Vec<(u16, std::path::PathBuf)>>,
     pub bank: [usize; 2],
     /// `(label, done, total)` while the device works.
@@ -116,6 +121,12 @@ pub enum ElekIntent {
     /// editor (`true`). Fetched into the preview cache first when there is
     /// no local copy.
     Local((u32, u32), bool),
+    /// Select the local file this pool sample was uploaded from in the
+    /// source pane.
+    ShowOriginal((u32, u32)),
+    /// Rename the +Drive file behind a pool sample. Projects refer to it by
+    /// hash, so nothing that uses it breaks.
+    RenameFile { key: (u32, u32), from: String, to: String },
     /// Move into the right column, next to the file panes.
     Dock,
     /// From the docked pool: open the project editor.
@@ -172,6 +183,18 @@ impl ElekState {
     /// Entry `old` holds nothing and nothing is on its way into it.
     pub(crate) fn free(&self, old: u16) -> bool {
         self.entry(old as usize).is_empty() && !self.filling.contains_key(&old)
+    }
+
+    /// The one selected slot, when it's empty and the pool can take a file:
+    /// `(position now, slot as read)`.
+    pub(crate) fn lone_empty_sel(&self) -> Option<(usize, u16)> {
+        let p = self.project.as_ref()?;
+        if self.sel.len() != 1 || p.read_only.is_some() || p.from_file.is_some() || self.edit_locked() {
+            return None;
+        }
+        let pos = *self.sel.first()?;
+        let old = *self.order.get(pos)?;
+        (pos > 0 && self.free(old)).then_some((pos, old))
     }
 
     /// Uses of entry `old` (as read) with the edits so far: an emptied slot
@@ -258,6 +281,12 @@ impl ElekState {
     }
 
     /// The file in `slot` (as ordered now), unless it's empty or "off".
+    /// While slots are being dragged: the samples in the selection, by
+    /// `(hash, length)`. Empty slots are left out.
+    pub(crate) fn dragged_keys(&self) -> Option<Vec<(u32, u32)>> {
+        self.slot_drag.then(|| self.sel.iter().filter_map(|&s| self.key_at(s)).collect())
+    }
+
     fn key_at(&self, slot: usize) -> Option<(u32, u32)> {
         self.project.as_ref()?;
         let e = self.entry(*self.order.get(slot)? as usize);
@@ -652,6 +681,8 @@ enum RowAct {
     Clear(Vec<usize>),
     ClearUnused,
     Local((u32, u32), bool),
+    ShowOriginal((u32, u32)),
+    Rename((u32, u32)),
     /// Local files dropped on this slot.
     DropFiles(usize, Vec<std::path::PathBuf>),
 }
@@ -767,7 +798,12 @@ pub fn show_docked(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         }
         st.active = 0;
         st.keys(ui.ctx());
-        ui.push_id("docked", |ui| slot_pane(ui, st, 0));
+        let size = egui::vec2(ui.available_width(), (ui.available_height() - MEM_BAR_H).max(ROW_H * 4.0));
+        ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_min_size(size);
+            ui.push_id("docked", |ui| slot_pane(ui, st, 0));
+        });
+        memory_bar(ui, st);
     } else {
         ui.add_space(6.0);
         if let Some((label, done, total)) = &st.busy {
@@ -782,6 +818,54 @@ pub fn show_docked(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     }
     finish(ui, st, &mut out);
     out
+}
+
+/// Height kept free under the slot panes for `memory_bar`.
+const MEM_BAR_H: f32 = 26.0;
+
+/// How much of the device's sample memory the pool fills, as it will be
+/// after a push (each slot's file size; uploads still on their way not
+/// counted).
+fn memory_bar(ui: &mut egui::Ui, st: &ElekState) {
+    let Some(p) = &st.project else { return };
+    let total = p.model.sample_memory();
+    let bytes = |pool: &mut dyn Iterator<Item = PoolEntry>| -> u64 {
+        pool.filter(|e| !e.is_empty()).map(|e| e.size as u64).sum()
+    };
+    let now = bytes(&mut st.new_pool().into_iter());
+    let read = bytes(&mut p.pool.iter().copied());
+    let frac = now as f64 / total as f64;
+    let fill = if frac > 1.0 {
+        Color32::from_rgb(220, 70, 60)
+    } else if frac > 0.9 {
+        Color32::from_rgb(230, 150, 60)
+    } else {
+        theme::DEVICE_ACCENT
+    };
+    let mut text = format!("Sample memory {} / {} ({:.0}%)", mb(now), mb(total), frac * 100.0);
+    if now != read {
+        let d = now as i64 - read as i64;
+        text += &format!("  ·  {}{} since read", if d >= 0 { "+" } else { "−" }, mb(d.unsigned_abs()));
+    }
+    if frac > 1.0 {
+        text += "  ·  over the limit";
+    }
+    let waiting = st.filling.len();
+    let mut tip = format!(
+        "Sum of the file sizes in every filled slot, as the pool will be after a push. As read from the device: {}.",
+        mb(read)
+    );
+    if waiting > 0 {
+        tip += &format!(" {waiting} sample(s) still uploading aren't counted yet.");
+    }
+    ui.add_space(4.0);
+    ui.add(
+        egui::ProgressBar::new(frac.min(1.0) as f32)
+            .desired_width(ui.available_width())
+            .fill(fill)
+            .text(RichText::new(text).color(Color32::WHITE)),
+    )
+    .on_hover_text(tip);
 }
 
 /// Bytes as "12.3 MB".
@@ -975,7 +1059,11 @@ fn projects_menu(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent
 /// The progress bar while the device works, else the last status.
 pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElekState, wide: bool) {
     if let Some((label, done, total)) = &st.busy {
-        let w = if wide { ui.available_width().clamp(160.0, 420.0) } else { ui.available_width().max(120.0) };
+        // Leave room for Stop: a bar that fills the row pushes the button
+        // past the edge, and a side panel then grows to fit it.
+        let stop_w = if st.reading.is_some() { 80.0 } else { 0.0 };
+        let room = ui.available_width() - stop_w;
+        let w = if wide { room.clamp(160.0, 420.0) } else { room.max(60.0) };
         ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
         stop_read(ui, st);
     } else if !st.status.is_empty() && st.project.is_some() {
@@ -1041,7 +1129,7 @@ fn body(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, busy: 
                 .small(),
         );
         let w = (ui.available_width() - 8.0) / 2.0;
-        let h = ui.available_height();
+        let h = (ui.available_height() - MEM_BAR_H).max(ROW_H * 4.0);
         ui.horizontal_top(|ui| {
             for side in 0..2 {
                 ui.allocate_ui_with_layout(
@@ -1054,6 +1142,7 @@ fn body(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, busy: 
                 );
             }
         });
+        memory_bar(ui, st);
     }
 }
 
@@ -1103,8 +1192,19 @@ pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIn
     if let Some((k, open)) = st.want_local.take() {
         out.push(ElekIntent::Local(k, open));
     }
+    if let Some(k) = st.want_original.take() {
+        out.push(ElekIntent::ShowOriginal(k));
+    }
     if let Some(pairs) = st.want_files.take() {
         out.push(ElekIntent::AddFiles(pairs));
+    }
+    if let Some(r) = st.renaming.as_mut() {
+        if let Some(ok) = rename_dialog(ui.ctx(), r) {
+            let (key, from, to, _) = st.renaming.take().unwrap_or_default();
+            if ok {
+                out.push(ElekIntent::RenameFile { key, from, to });
+            }
+        }
     }
     if st.confirm_close {
         if let Some(yes) = confirm_close(ui.ctx(), st.changed()) {
@@ -1305,6 +1405,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
             // called, so zero it here, not inside, or the list gets a blank
             // tail of rows × spacing.
             ui.spacing_mut().item_spacing.y = 0.0;
+            theme::always_show_scrollbar(ui);
             scroll.show_rows(ui, ROW_H, rows, |ui, range| {
                 for i in range {
                     slot_row(ui, st, first + i, &mut acts);
@@ -1318,7 +1419,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
     }
     let locked = st.edit_locked();
     for a in acts {
-        let edits = !matches!(a, RowAct::Click(..) | RowAct::DragStart(_) | RowAct::Local(..));
+        let edits = !matches!(a, RowAct::Click(..) | RowAct::DragStart(_) | RowAct::Local(..) | RowAct::ShowOriginal(_) | RowAct::Rename(_));
         if locked && edits {
             st.status = "Wait a moment: the device is busy, and an edit now would be lost".into();
             continue;
@@ -1358,6 +1459,13 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
                 st.clear(&slots);
             }
             RowAct::Local(k, open) => st.want_local = Some((k, open)),
+            RowAct::ShowOriginal(k) => st.want_original = Some(k),
+            RowAct::Rename(k) => {
+                if let Some(path) = st.names.get(&k).cloned() {
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+                    st.renaming = Some((k, path, name, true));
+                }
+            }
             RowAct::DropFiles(s, files) => {
                 st.active = side;
                 st.drop_files(s, files);
@@ -1449,8 +1557,8 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     } else {
         format!("{:.2}MB", e.size.saturating_sub(16) as f64 / 1_048_576.0)
     };
-    let size_w = 84.0;
-    let uses_w = 44.0;
+    let size_w = 58.0;
+    let uses_w = 30.0;
     let name_x = rect.left() + 8.0 + label_w;
     // The sample moved and patterns point at it: the push renumbers them.
     let dot_c = if selected { OLED_BG } else { theme::DEVICE_ACCENT_BRIGHT };
@@ -1479,10 +1587,10 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     );
     if uses > 0 {
         painter.text(
-            egui::pos2(rect.right() - size_w - 6.0, y),
+            egui::pos2(rect.right() - size_w - 4.0, y),
             egui::Align2::RIGHT_CENTER,
-            format!("x{uses}"),
-            font.clone(),
+            uses.to_string(),
+            oled_font(TEXT - 4.0),
             dim,
         );
     }
@@ -1578,6 +1686,31 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
             if ui.button(open).on_hover_text(tip).clicked() {
                 acts.push(RowAct::Local(e.key(), true));
                 ui.close();
+            }
+            // Uploaded from a local file: point at it, so it's clear which
+            // of several same-named copies is the one on the device.
+            if let Some((_, local, true)) = linked {
+                if ui
+                    .button("Show original in source pane")
+                    .on_hover_text(format!("The file it was uploaded from:\n{}", local.display()))
+                    .clicked()
+                {
+                    acts.push(RowAct::ShowOriginal(e.key()));
+                    ui.close();
+                }
+            }
+            // Only once the device told us where the file lives.
+            if let Some(path) = st.names.get(&e.key()) {
+                if ui
+                    .button("Rename on +Drive…")
+                    .on_hover_text(format!(
+                        "{path}\nProjects find samples by content hash, so every project using it keeps working"
+                    ))
+                    .clicked()
+                {
+                    acts.push(RowAct::Rename(e.key()));
+                    ui.close();
+                }
             }
             ui.separator();
         }
@@ -1797,6 +1930,53 @@ fn confirm_clear(ctx: &egui::Context, st: &ElekState, olds: &[u16]) -> Option<bo
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button(RichText::new("Clear anyway").color(Color32::from_rgb(230, 120, 90))).clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                answer = Some(false);
+            }
+        });
+    });
+    answer
+}
+
+/// `Some(true)` to rename, `Some(false)` to cancel.
+fn rename_dialog(ctx: &egui::Context, r: &mut ((u32, u32), String, String, bool)) -> Option<bool> {
+    let (_, path, name, focus) = r;
+    let mut answer = None;
+    egui::Modal::new(egui::Id::unique("elek_rename_modal")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Rename on +Drive");
+        ui.add_space(4.0);
+        ui.label(RichText::new(path.as_str()).weak());
+        ui.add_space(6.0);
+        let te = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+        if std::mem::take(focus) {
+            te.request_focus();
+            // Select the stem, leaving the extension alone.
+            let stem = name.rfind('.').unwrap_or(name.len());
+            let stem = name[..stem].chars().count();
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), te.id) {
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(stem),
+                )));
+                state.store(ui.ctx(), te.id);
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Only the file's name changes. Projects refer to samples by content hash, \
+                 so this one and every other project using the file keep working.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+        let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.horizontal(|ui| {
+            let ok = !name.trim().is_empty() && !name.contains('/');
+            if ui.add_enabled(ok, egui::Button::new("Rename")).clicked() || (ok && enter) {
                 answer = Some(true);
             }
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {

@@ -85,15 +85,22 @@ enum Stage {
 }
 
 impl App {
-    /// A full-window page. The docked pool stays docked for the way back,
-    /// but the right column shows the files meanwhile.
+    /// A device page in the centre. Samples is the pool itself, so the
+    /// right column shows the files meanwhile; Patterns keeps the docked
+    /// pool beside it.
     pub(super) fn enter_full_elek(&mut self) {
-        self.dock_pool = false;
+        if self.elek.page == elek_view::ElekPage::Order {
+            self.dock_pool = false;
+        }
         self.pool_focused = false;
         self.enter_elek();
     }
 
     pub(super) fn enter_elek(&mut self) {
+        // Leaving the editor: don't keep its loop running behind the device view.
+        if !self.elek_mode {
+            self.engine.stop();
+        }
         self.elek_mode = true;
         self.editor_focused = false;
         self.measure_cache();
@@ -101,6 +108,48 @@ impl App {
             self.elek.asked_projects = true;
             self.device.elek(ElekCmd::ListProjects);
         }
+        self.greet_device();
+    }
+
+    /// First visit to the device view this run: read the project in the
+    /// device's memory without waiting for a click, and once its sample
+    /// names are in, show the docked layout (see [`Self::first_dock_now`]).
+    fn greet_device(&mut self) {
+        if self.elek_greeted {
+            return;
+        }
+        let present = matches!(crate::device::presence(), crate::device::Presence::One(_));
+        if !present {
+            return;
+        }
+        self.elek_greeted = true;
+        if self.elek.project.is_some() || self.elek.busy.is_some() || self.elek.reading.is_some() {
+            return;
+        }
+        self.first_dock = true;
+        self.elek_read();
+    }
+
+    /// The first read has its sample names: Patterns in the centre (if
+    /// the user is still on a device page), the pool docked on the right.
+    fn first_dock_now(&mut self) {
+        self.first_dock = false;
+        self.elek_docked = true;
+        self.dock_pool = true;
+        self.pool_focused = false;
+        // The docked pool lives in the right column, which this hides.
+        self.elek.hide_files = false;
+        if self.elek_mode {
+            self.elek.page = elek_view::ElekPage::Project;
+        }
+        self.status = "Project loaded: patterns in the middle, the sample pool docked on the right. \
+            Switch the right column with Files / Sample pool, or × to undock."
+            .into();
+    }
+
+    /// Whether the right column shows the dock (Files / Sample pool switch).
+    pub(super) fn dock_col_shown(&self) -> bool {
+        self.elek_docked && (!self.elek_mode || self.elek.page == elek_view::ElekPage::Project)
     }
 
     /// Optional home of the pool: docked in the right column, beside the
@@ -120,7 +169,8 @@ impl App {
 
     pub(super) fn show_elek(&mut self, ui: &mut egui::Ui) {
         self.elek.docked = false;
-        self.elek.keys_on = true;
+        // The pool docked beside the Patterns page takes the keys once clicked.
+        self.elek.keys_on = !(self.dock_col_shown() && self.dock_pool && self.pool_focused);
         let intents = match self.elek.page {
             elek_view::ElekPage::Order => elek_view::show(ui, &mut self.elek),
             elek_view::ElekPage::Project => crate::ui::elek_project_view::show(ui, &mut self.elek),
@@ -216,6 +266,35 @@ impl App {
                 ElekIntent::SavePattern(slot, name, bundle) => self.save_pattern_file(slot, &name, bundle),
                 ElekIntent::LoadPattern(slot) => self.load_pattern_file(slot),
                 ElekIntent::Local(k, open) => self.elek_local(k, open),
+                ElekIntent::ShowOriginal(k) => match self.links.original(k.0, k.1).map(|l| (l.local.clone(), l.fresh())) {
+                    Some((p, fresh)) if p.exists() => {
+                        self.show_in_source(&p);
+                        self.elek.status = if fresh {
+                            format!("{}: the original, shown in the source pane", p.display())
+                        } else {
+                            format!("{}: changed since upload, so the device plays an older version", p.display())
+                        };
+                    }
+                    Some((p, _)) => self.elek.status = format!("{} was moved or deleted since the upload", p.display()),
+                    None => self.elek.status = "No local original known for this sample".into(),
+                },
+                ElekIntent::RenameFile { key, from, to } => {
+                    let to = to.trim();
+                    let from = PathBuf::from(from);
+                    let Some(parent) = from.parent() else { continue };
+                    let target = parent.join(to);
+                    if to.is_empty() || to.contains('/') || target == from {
+                        continue;
+                    }
+                    let job = self.run_device(
+                        crate::device::Task::Rename { from, to: target.clone() },
+                        "Renaming",
+                        1,
+                        0,
+                    );
+                    self.pool_rename = Some((job, key, target.to_string_lossy().into_owned()));
+                    self.relink_after = Some((job, key, target));
+                }
                 ElekIntent::Push { force } => self.elek_push(force, false),
             }
         }
@@ -341,7 +420,7 @@ impl App {
 
     /// The +Drive folder dropped files go to: the device tab on screen
     /// (source first), else any device tab.
-    fn pool_upload_dir(&self) -> Option<PathBuf> {
+    pub(super) fn pool_upload_dir(&self) -> Option<PathBuf> {
         let active = [Role::Source, Role::Dest].into_iter().map(|r| self.pane(r).active_tab());
         let any = [Role::Source, Role::Dest].into_iter().flat_map(|r| self.pane(r).tabs.iter());
         active.chain(any).find(|t| t.device).map(|t| t.cwd.clone())
@@ -1050,6 +1129,16 @@ impl App {
     }
 
     pub(super) fn elek_event(&mut self, e: ElekEv) {
+        // The names come right after the pool, before the patterns stream
+        // in; a read without that early stage ends in `Loaded`.
+        if self.first_dock {
+            match &e {
+                ElekEv::Pattern { .. } | ElekEv::Loaded(Ok(_)) => self.first_dock_now(),
+                ElekEv::Loaded(Err(_)) if self.elek.project.is_some() => self.first_dock_now(),
+                ElekEv::Loaded(Err(_)) => self.first_dock = false,
+                _ => {}
+            }
+        }
         let st = &mut self.elek;
         match e {
             ElekEv::Projects(r) => st.projects = Some(r),

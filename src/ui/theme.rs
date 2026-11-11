@@ -460,3 +460,12 @@ pub fn install_fonts(ctx: &egui::Context) {
         .insert(egui::FontFamily::Name(OLED_FAMILY.into()), fam);
     ctx.set_fonts(fonts);
 }
+
+/// Keeps the thin floating scrollbar handle faintly visible when the pointer
+/// is elsewhere, so a list shows how much of it is out of view. Call on the
+/// ui the ScrollArea is shown in.
+pub fn always_show_scrollbar(ui: &mut egui::Ui) {
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.dormant_handle_opacity = 0.5;
+    scroll.dormant_background_opacity = 0.0;
+}

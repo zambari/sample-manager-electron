@@ -576,7 +576,9 @@ impl App {
         }
     }
 
-    pub(super) fn do_rename(&mut self, from: &Path, to: &str, device: bool) {
+    /// `key`: a device file's `(hash, size)`, to offer renaming its local
+    /// copy once the device has done it.
+    pub(super) fn do_rename(&mut self, from: &Path, to: &str, device: bool, key: Option<(u32, u32)>) {
         let to = to.trim();
         if to.is_empty() || to.contains(std::path::MAIN_SEPARATOR) || to.contains('/') {
             self.errors.push(format!("invalid name: {to:?}"));
@@ -590,9 +592,12 @@ impl App {
         if device {
             let task = device::Task::Rename {
                 from: from.to_path_buf(),
-                to: target,
+                to: target.clone(),
             };
-            self.run_device(task, "Renaming", 1, 0);
+            let job = self.run_device(task, "Renaming", 1, 0);
+            if let Some(key) = key {
+                self.relink_after = Some((job, key, target));
+            }
             return;
         }
         if target.exists() {
@@ -627,5 +632,86 @@ impl App {
             }
             Err(e) => self.errors.push(format!("rename failed: {e}")),
         }
+    }
+
+    /// A device file was renamed to `device`: if it has a local copy (the
+    /// file it was uploaded from, or a download outside the preview cache)
+    /// whose name differs, ask whether to rename that too.
+    pub(super) fn offer_local_rename(&mut self, key: (u32, u32), device: &Path) {
+        let cache = crate::links::pool_cache_dir();
+        let user_file = |l: &&crate::links::Link| {
+            l.local.exists() && !cache.as_ref().is_some_and(|c| l.local.starts_with(c))
+        };
+        let link = self
+            .links
+            .original(key.0, key.1)
+            .filter(user_file)
+            .or_else(|| self.links.local(key.0, key.1).filter(user_file))
+            .cloned();
+        let Some(link) = link else { return };
+        let Some(dev_name) = device.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return;
+        };
+        // Keep the local file's extension: device names often have none.
+        let ext = link.local.extension().map(|e| e.to_string_lossy().into_owned());
+        let name = match &ext {
+            Some(ext) => {
+                let has = Path::new(&dev_name)
+                    .extension()
+                    .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case(ext));
+                if has { dev_name } else { format!("{dev_name}.{ext}") }
+            }
+            None => dev_name,
+        };
+        let Some(parent) = link.local.parent() else { return };
+        let to = parent.join(&name);
+        if to == link.local {
+            return;
+        }
+        if to.exists() {
+            self.status = format!("Local copy not renamed: {} already exists", to.display());
+            return;
+        }
+        self.local_rename_pending = Some(super::LocalRename { link, to });
+    }
+
+    /// Rename the local copy and move its link along, so the device file
+    /// still knows where its original is.
+    pub(super) fn rename_local_copy(&mut self, r: super::LocalRename) {
+        let from = r.link.local.clone();
+        if r.to.exists() {
+            self.errors.push(format!("{} already exists", r.to.display()));
+            return;
+        }
+        if let Err(e) = std::fs::rename(&from, &r.to) {
+            self.errors.push(format!("rename {} failed: {e}", from.display()));
+            return;
+        }
+        self.push_undo(undo::FileUndo::Moved {
+            pairs: vec![(from.clone(), r.to.clone())],
+            what: "rename",
+            replaced: false,
+        });
+        for ed in [&mut self.editor, &mut self.other] {
+            if ed.path() == Some(from.as_path()) {
+                ed.set_path(r.to.clone());
+            }
+        }
+        if self.voice_path.as_deref() == Some(from.as_path()) {
+            self.voice_path = Some(r.to.clone());
+        }
+        self.follow_rename(&from, &r.to);
+        // A rename keeps size and modification time, so the link stays as
+        // fresh (or stale) as it was.
+        let mut link = r.link;
+        link.local = r.to.clone();
+        crate::links::append(&link);
+        self.links.add(link);
+        self.refresh_elek_links();
+        if let Some(parent) = r.to.parent() {
+            self.sizes.invalidate_subtree(parent);
+            self.reload_showing(parent, false);
+        }
+        self.status = format!("Local copy renamed to {}", r.to.display());
     }
 }

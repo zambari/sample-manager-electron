@@ -81,6 +81,26 @@ enum Leave {
 }
 
 /// An editor export rendered to a temp file, waiting to be uploaded.
+/// A local copy to rename after its device file was renamed.
+/// Pool slots dragged onto a local pane where some samples already have a
+/// local copy: waiting on "download anyway" or "show the local file".
+struct SlotDownload {
+    /// The pane they were dropped on, and the folder it showed.
+    role: Role,
+    dest: PathBuf,
+    /// Every dragged sample's +Drive path.
+    paths: Vec<PathBuf>,
+    /// The ones we already have: `(+Drive path, local copy)`.
+    have: Vec<(PathBuf, PathBuf)>,
+}
+
+struct LocalRename {
+    /// The link as it was; `local` is the file to rename.
+    link: crate::links::Link,
+    /// The new local path.
+    to: PathBuf,
+}
+
 struct StagedUpload {
     staged: PathBuf,
     dest_dir: PathBuf,
@@ -129,6 +149,8 @@ pub struct App {
     staged_upload: Option<StagedUpload>,
     /// A pool sample in the editor, saved back into its slot.
     pool_edit: Option<pool_edit::PoolEdit>,
+    /// The editor's sample on its way into an empty pool slot.
+    slot_save: Option<pool_edit::SlotSave>,
     keymap: Keymap,
     sizes: SizeCache,
     preview: Preview,
@@ -140,6 +162,16 @@ pub struct App {
     /// A local job that made "Keep both" copies: once it finishes, select
     /// them and (for just one) open the inline rename on it.
     rename_after: Option<(u64, Vec<PathBuf>)>,
+    /// A pool sample's +Drive rename: `(job, key, new path)`, shown in the
+    /// pool once the device has done it.
+    pool_rename: Option<(u64, (u32, u32), String)>,
+    /// A +Drive rename of a file that may have a local copy: `(job, (hash,
+    /// size), new device path)`. Once it lands, offer to rename the local file.
+    relink_after: Option<(u64, (u32, u32), PathBuf)>,
+    /// The local copy's rename waiting on the user's yes.
+    local_rename_pending: Option<LocalRename>,
+    /// Pool slots dropped on a local pane, some already downloaded.
+    slot_download_pending: Option<SlotDownload>,
     /// An export's upload job, and the device file to select once it lands.
     reveal_after: Option<(u64, PathBuf)>,
     /// The file an export (not a save in place) is writing: once written,
@@ -274,12 +306,21 @@ pub struct App {
     elek: crate::ui::elek_view::ElekState,
     /// The pool is docked into the right column (see [`elek`]).
     elek_docked: bool,
+    /// `elek_docked` as of last frame: the frame it turns on, the right
+    /// column snaps to its docked width.
+    was_docked: bool,
     /// While docked: the right column shows the pool, not the files.
     dock_pool: bool,
     /// The docked pool has the keyboard.
     pool_focused: bool,
     /// Where the docked pool was drawn last frame, to tell clicks into it.
     pool_rect: Option<egui::Rect>,
+    /// The device view was entered once this run: the first entry reads
+    /// the project by itself.
+    elek_greeted: bool,
+    /// That first read is running: once the names are in, show the
+    /// Patterns page with the pool docked beside it.
+    first_dock: bool,
     pool_fetch: elek::PoolFetch,
     /// Device files we have a local copy of (see [`crate::links`]).
     links: crate::links::Links,
@@ -391,6 +432,7 @@ impl App {
             last_presence: Default::default(),
             staged_upload: None,
             pool_edit: None,
+            slot_save: None,
             engine,
             editor,
             other,
@@ -452,9 +494,12 @@ impl App {
             elek_mode: false,
             elek: Default::default(),
             elek_docked: false,
+            was_docked: false,
             dock_pool: false,
             pool_focused: false,
             pool_rect: None,
+            elek_greeted: false,
+            first_dock: false,
             pool_fetch: Default::default(),
             jobs,
             keymap: Keymap::platform_default(),
@@ -470,6 +515,10 @@ impl App {
             undo: Vec::new(),
             undo_jobs: Default::default(),
             rename_after: None,
+            pool_rename: None,
+            relink_after: None,
+            local_rename_pending: None,
+            slot_download_pending: None,
             reveal_after: None,
             export_rename: None,
             finish_note: None,
@@ -694,15 +743,30 @@ impl eframe::App for App {
                 .size_range(MIN_SIDE_W..=max_for(prev_r))
                 .show(ui, |ui| self.show_pane(ui, Role::Source));
             self.side_widths[0] = left.response.rect.width();
-            let right = egui::Panel::right("dest_col")
+            // Docking the pool snaps the right column to DOCK_W once, and
+            // caps it at DOCK_MAX_W while the dock shows.
+            const DOCK_W: f32 = 420.0;
+            const DOCK_MAX_W: f32 = 680.0;
+            let mut max_r = max_for(self.side_widths[0]);
+            if self.dock_col_shown() {
+                max_r = max_r.min(DOCK_MAX_W).max(MIN_SIDE_W);
+            }
+            let mut right = egui::Panel::right("dest_col")
                 .resizable(true)
                 .default_size(default_w)
-                .size_range(MIN_SIDE_W..=max_for(self.side_widths[0]))
-                .show(ui, |ui| {
-                    // A full-window page in the middle: no second pool here.
-                    if self.elek_docked && !self.elek_mode {
+                .size_range(MIN_SIDE_W..=max_r);
+            if self.elek_docked && !self.was_docked && self.dock_col_shown() {
+                right = right.exact_size(DOCK_W.clamp(MIN_SIDE_W, max_r));
+            }
+            if self.dock_col_shown() || !self.elek_docked {
+                self.was_docked = self.elek_docked;
+            }
+            let right = right.show(ui, |ui| {
+                    // The Samples page already is the pool: no second one here.
+                    if self.dock_col_shown() {
                         self.show_dock_col(ui);
                     } else {
+                        self.pool_rect = None;
                         self.show_pane(ui, Role::Dest);
                     }
                 });
@@ -753,6 +817,23 @@ impl eframe::App for App {
                     Decision::Merge => self.launch_merge(&pending.plan, pending.what),
                     Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
                 }
+            }
+        }
+
+        if let Some(r) = &self.local_rename_pending {
+            if let Some(yes) = dialogs::rename_local(ui.ctx(), &r.link.local, &r.to) {
+                let r = self.local_rename_pending.take().expect("checked above");
+                if yes {
+                    self.rename_local_copy(r);
+                }
+            }
+        }
+
+        if let Some(d) = &self.slot_download_pending {
+            let have: Vec<&Path> = d.have.iter().map(|(_, l)| l.as_path()).collect();
+            if let Some(choice) = dialogs::slot_download(ui.ctx(), &have, d.paths.len(), d.role.label()) {
+                let d = self.slot_download_pending.take().expect("checked above");
+                self.answer_slot_download(d, choice);
             }
         }
 

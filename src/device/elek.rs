@@ -42,6 +42,14 @@ impl Model {
         }
     }
 
+    /// Sample memory a project can fill, in bytes (64 MB / 400 MB).
+    pub fn sample_memory(self) -> u64 {
+        match self {
+            Model::Digitakt => 64 << 20,
+            Model::Digitakt2 => 400 << 20,
+        }
+    }
+
     fn steps(self) -> usize {
         match self {
             Model::Digitakt => 64,

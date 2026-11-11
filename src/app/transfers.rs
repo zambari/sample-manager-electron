@@ -809,6 +809,7 @@ impl App {
                     if !self.active_jobs.is_empty() {
                         self.status += &format!(" · {} more job(s) to go", self.active_jobs.len());
                     }
+                    let errors_empty = errors.is_empty();
                     self.errors.extend(errors);
                     for dir in touched {
                         // A transfer changes sizes up the whole chain, so the
@@ -831,6 +832,17 @@ impl App {
                     if let Some((_, note)) = self.finish_note.take_if(|(id, _)| *id == job) {
                         if !cancelled && self.status.starts_with("Done") {
                             self.status = self.status.replacen("Done", &note, 1);
+                        }
+                    }
+                    if let Some((_, key, path)) = self.pool_rename.take_if(|(id, ..)| *id == job) {
+                        if !cancelled && errors_empty {
+                            self.elek.status = format!("Renamed on the +Drive to {path}");
+                            self.elek.names.insert(key, path);
+                        }
+                    }
+                    if let Some((_, key, path)) = self.relink_after.take_if(|(id, ..)| *id == job) {
+                        if !cancelled && errors_empty {
+                            self.offer_local_rename(key, &path);
                         }
                     }
                     if let Some((_, kept)) = self.rename_after.take_if(|(id, _)| *id == job) {

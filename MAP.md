@@ -48,6 +48,7 @@ status text, latest error. Data: `ActiveJob` and `Batch` in `src/app/mod.rs`.
 | Rows, check marks, speaker icon, inline rename | `row`, `draw_cells`, `draw_device_cells`, `rename_editor` in `src/ui/file_table.rs` |
 | Row right-click menu (Open, Load as kit, Cut/Copy, Make mono copy, Remove duplicates…, Show on device…) | `row` in `src/ui/file_table.rs`; handled where `show_pane` matches on `Intent` |
 | Paste / New folder / reveal buttons | `paste_button`, `new_folder_button`, `reveal_button` in `src/ui/file_table.rs` |
+| After a single +Drive rename (inline or pool slot): offer to rename the linked local copy too | `relink_after` set in `App::do_rename` / `ElekIntent::RenameFile`; `App::offer_local_rename`, `App::rename_local_copy` in `src/app/actions.rs`; dialog `dialogs::rename_local` |
 | Multi-rename panel | `src/ui/rename_view.rs`; logic `src/rename.rs` |
 | Footer counts | `App::pane_footer_text` |
 
@@ -63,7 +64,9 @@ Drawn top to bottom; intents handled in `App::show_editor` (`src/app/editing.rs`
 | **Transport** (play, Loop, Follow, Snap to 0, Auto-load, Auto-play), **Gain** (slider, Normalize, Reset), **Tools** (undo/redo, cut/copy/paste, +100 ms, Crop, loop halve/double) | `toolbar.rs` `toolbar` |
 | Stereo / Mix / L / R | `toolbar.rs` `mono_picker` |
 | **File** row: Save in place, **Export → Destination**, Export and close, Send to device | `toolbar.rs` `file_row` |
+| Which file is open (Original / Device copy / changed since upload, with the original's path), click to show in source pane | `toolbar.rs` `origin_line`; worked out by `App::editor_origin`, shown by `App::show_in_source` in `src/app/editing.rs` |
 | **⬆ Update on device (slot …)**: replaces Save / Export when the sample was opened from a pool slot | `file_row` (`Slots::pool_slot`); logic in `src/app/pool_edit.rs` |
+| **⬆ Save to slot (…)**: shown when exactly one empty pool slot is selected in the device view; fills it with what you hear and pushes | `file_row` (`Slots::empty_slot`, `ElekState::lone_empty_sel`); logic in `src/app/pool_edit.rs` (`SlotSave`, `save_to_slot`) |
 | **Trim** section (kits) | `trim.rs` `trim_section`, `strip.rs` |
 | **Wave**: lanes, ruler, in/out and slice markers, fade handles, all mouse handling | `waveform.rs` |
 | **Nums** | `toolbar.rs` `positions` |
@@ -82,16 +85,21 @@ Intents handled in `App::elek_intents` (`src/app/elek.rs`).
 | Device bar: **⬇ Load current project**, **⬆ Push to device**, **💾 File** menu (Save / Load project…), **+Drive projects** menu, status line | `device_bar`, `file_menu`, `projects_menu`, `status_line` in `src/ui/elek_view.rs` |
 | Samples page tools: **🔊 Preview on click**, **⬇ Fetch all for preview**, Cache menu, Undo / Reset, **⚡ Live** | `preview_tools`, `order_tools` |
 | Live mode (push each pool edit after a pause; needs the whole project read, every pattern renumbered) | `App::live_push_tick`, `App::elek_push` in `src/app/elek.rs`; gate `ElekState::pool_pushable` |
-| Samples page: two bank panes, slot rows, slot right-click menu (Insert empty slot / Insert N above selection, Clear all unused) | `slot_pane`, `slot_row`; edits in `impl ElekState` (`insert_empty`) |
+| Samples page: two bank panes, slot rows, slot right-click menu (Play / Open local copy, Show original in source pane, Rename on +Drive…, Insert empty slot / Insert N above selection, Clear all unused) | `slot_pane`, `slot_row`; edits in `impl ElekState` (`insert_empty`); original lookup `Links::original`, handled under `ElekIntent::ShowOriginal`; rename dialog `rename_dialog`, run under `ElekIntent::RenameFile`, name updated in `App::absorb` (`pool_rename`) |
+| Sample memory bar under the slot panes (fill vs 64 MB / 400 MB, change since read) | `memory_bar` in `src/ui/elek_view.rs`; capacity `Model::sample_memory` in `src/device/elek.rs` |
+| Drag slots out onto a local file pane: download their +Drive files there; if some already have a local copy (not the preview cache), ask: download anyway / only missing / show the local file in that pane | `ElekState::dragged_keys`; caught by pointer in `App::show_pane`, then `App::slots_dropped`, `App::answer_slot_download` in `src/app/pane_view.rs`; dialog `dialogs::slot_download`; lookup `Links::user_copy` |
 | Push / clear / close / stale-project confirmations | `confirm_push`, `confirm_clear`, `confirm_close`, `confirm_stale` in `src/ui/elek_view.rs` |
 | Patterns page tools: Hide empty, Bytes, Open all / Fold all banks | `view_tools` in `src/ui/elek_project_view.rs` |
 | Patterns page: Pack bank, Rename all, pattern list, step dots, row menu (Save / Load pattern…) | `action_bar`, `list`, `dots`, `mini` in `src/ui/elek_project_view.rs`; state in `ProjEd` |
 | Docked column: Files / Sample pool switch | `App::show_dock_col` in `src/app/elek.rs` |
+| Docked column width (snaps to 420 px when docking starts, max 680) | `DOCK_W`, `DOCK_MAX_W` in `App::ui` (`src/app/mod.rs`) |
+| Docked column beside the Patterns page (not the Samples page) | `App::dock_col_shown` in `src/app/elek.rs` |
+| First device-view entry per run: reads the project by itself, then Patterns + docked pool once names are in | `App::greet_device`, `App::first_dock_now` (fired from `App::elek_event`) in `src/app/elek.rs` |
 
 ### Dialogs
 
 Shared modals are functions in `src/ui/dialogs.rs` (conflicts, trash, duplicates,
-device load, leave editor, save scope, name export, name kit, send back). Each
+device load, rename local copy, slot download, leave editor, save scope, name export, name kit, send back). Each
 is opened by a pending field on `App` and answered at the end of `App::ui`.
 
 ## Styling
@@ -187,6 +195,7 @@ There are two mechanisms, and only the device one is a real queue.
 | **commit** | Copy the source selection into the active destination tab; a single file open in the editor is written as heard. | `App::commit` in `src/app/transfers.rs` |
 | **export** | Write the editor's selection to the destination. | `App::export*` in `src/app/editing.rs`, `Editor::export_with`, `src/audio/export.rs` |
 | **update on device**, **pool edit** | A pool sample opened in the editor from its slot; ⌘S / ↩ upload it next to the original, fill the same slot and push. | `src/app/pool_edit.rs` (`PoolEdit`, `update_on_device`, `pool_edit_filled`) |
+| **save to slot** | The editor's sample put into the one empty slot selected on the Samples page; once it lands it becomes a pool edit of that slot. | `src/app/pool_edit.rs` (`SlotSave`, `save_to_slot`, `slot_save_upload`) |
 | **send back**, **Send to device as…** | Upload an edited sample next to the device file it came from. | `App::begin_send_back`, `dialogs::send_back` |
 | **link**, **local copy** | A device file known to match a local file by the +Drive's content hash. | `src/links.rs`, `Worker::note_link` |
 | **preview cache** | Fetched device samples kept by content for playback. | `links::pool_cache_dir`, `PoolFetch` and `App::fetch_all` in `src/app/elek.rs` |

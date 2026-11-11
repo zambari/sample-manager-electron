@@ -45,6 +45,9 @@ pub enum EdIntent {
     /// Export the kit, then close it once the file is written.
     ExportAndClose,
     SaveInPlace,
+    /// Select this local file in the source pane (the open file, or the
+    /// original it was uploaded from).
+    ShowInSource(std::path::PathBuf),
     /// Show the slice kit (`true`) or the browsed sample.
     ShowKit(bool),
     AddSlice,
@@ -69,6 +72,8 @@ pub enum EdIntent {
     TrimTails,
     /// Upload what you hear as a new file next to its device original.
     SendToDevice,
+    /// Put what you hear into the empty pool slot selected in the device view.
+    SaveToSlot,
 }
 
 /// One open kit, for the kit switcher.
@@ -98,6 +103,25 @@ pub struct Slots {
     pub device_home: Option<String>,
     /// The sample came from this device pool slot: saving updates it there.
     pub pool_slot: Option<String>,
+    /// The one empty pool slot selected in the device view: "Save to slot".
+    pub empty_slot: Option<String>,
+    /// Which file the editor has open, in words (sample slot only).
+    pub origin: Option<Origin>,
+}
+
+/// What the open file is, relative to the device: the line under **File**.
+pub struct Origin {
+    /// The open file.
+    pub path: std::path::PathBuf,
+    /// Short kind: "Original", "Device copy (preview cache)", ...
+    pub kind: &'static str,
+    /// The kind needs attention (not what the device plays, or a cache copy
+    /// with an original elsewhere).
+    pub warn: bool,
+    pub tip: String,
+    /// A cache or fetched copy whose original we know: `(path, unchanged
+    /// since upload)`.
+    pub original: Option<(std::path::PathBuf, bool)>,
 }
 
 const RULER_H: f32 = 18.0;

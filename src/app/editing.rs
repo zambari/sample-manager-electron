@@ -485,6 +485,64 @@ impl App {
 
     /// Where on the device the sample in the editor came from (or was sent
     /// to): the device file it was opened through, else the newest link.
+    /// What the sample slot's file is, relative to the device. Only links
+    /// are consulted, plus a stat or two of the files involved.
+    pub(super) fn editor_origin(&self) -> Option<editor_view::Origin> {
+        let path = self.browser().path()?.to_path_buf();
+        let cache = crate::links::pool_cache_dir();
+        let in_cache = cache.as_ref().is_some_and(|c| path.starts_with(c));
+        let link = self.links.for_local(&path);
+        let o = |kind, warn, tip: &str, original| editor_view::Origin {
+            path: path.clone(),
+            kind,
+            warn,
+            tip: tip.to_owned(),
+            original,
+        };
+        let Some(l) = link else {
+            return Some(if in_cache {
+                o("Preview cache", false, "A file in the preview cache, not linked to a device file", None)
+            } else {
+                o("Local file", false, "Not known to be on the device", None)
+            });
+        };
+        let fresh = l.fresh();
+        if l.uploaded {
+            let (kind, warn, tip) = match (in_cache, fresh) {
+                (true, _) => ("Your last device update", false, "Rendered by Update on device and uploaded from the preview cache"),
+                (false, true) => ("Original", false, "The file this device sample was uploaded from, unchanged since"),
+                (false, false) => (
+                    "Original, changed since upload",
+                    true,
+                    "Edited since it went to the device: the device still plays the older version",
+                ),
+            };
+            return Some(o(kind, warn, tip, None));
+        }
+        // A copy fetched from the device: name the original if we know it.
+        let original = self
+            .links
+            .original(l.hash, l.size)
+            .filter(|u| u.local != path && u.local.exists())
+            .map(|u| (u.local.clone(), u.fresh()));
+        let kind = if in_cache { "Device copy (preview cache)" } else { "Fetched from device" };
+        let tip = "Downloaded from the device: slice markers and other WAV metadata didn't survive the trip";
+        let warn = original.is_some();
+        Some(o(kind, warn, tip, original))
+    }
+
+    /// Select local file `p` in the source pane, making the panes visible.
+    pub(super) fn show_in_source(&mut self, p: &Path) {
+        if !p.exists() {
+            self.status = format!("{} isn't there any more", p.display());
+            return;
+        }
+        if self.elek_mode {
+            self.elek.hide_files = false;
+        }
+        self.show_file(Role::Source, false, p);
+    }
+
     pub(super) fn device_home(&self) -> Option<PathBuf> {
         let p = self.browser().path()?;
         match &self.device_origin {
@@ -693,6 +751,7 @@ impl App {
                     }
                 }
                 Outcome::Exported(p) if self.pool_edit_rendered(&p) => self.pool_edit_upload(p),
+                Outcome::Exported(p) if self.slot_save_rendered(&p) => self.slot_save_upload(p),
                 Outcome::Exported(p)
                     if self.staged_upload.as_ref().is_some_and(|s| s.staged == p) =>
                 {
@@ -758,6 +817,7 @@ impl App {
                     if let Some(pe) = self.pool_edit.as_mut() {
                         pe.cancel_render();
                     }
+                    self.slot_save_cancel();
                     // A failed render never reaches the upload, and the
                     // edits it was saving are still unsaved: stay put.
                     self.staged_upload = None;
@@ -791,6 +851,8 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned()),
             device_home: self.device_home().map(|p| device::dev_str(&p)),
             pool_slot: self.pool_edit_label(),
+            empty_slot: self.slot_save_label(),
+            origin: self.editor_origin(),
         };
         let intents = editor_view::show(
             ui,
@@ -857,6 +919,8 @@ impl App {
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
                 EdIntent::RenameKit(name) => self.rename_kit(&name),
                 EdIntent::SendToDevice => self.begin_send_back(),
+                EdIntent::SaveToSlot => self.save_to_slot(),
+                EdIntent::ShowInSource(p) => self.show_in_source(&p),
             }
         }
     }

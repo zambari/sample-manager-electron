@@ -305,6 +305,110 @@ pub fn confirm_device_load(ctx: &Context, path: &std::path::Path, bytes: u64) ->
     answer
 }
 
+/// A device file was renamed and has a local copy: rename that too?
+/// `Some(true)` = rename, `Some(false)` = leave it, `None` = still open.
+pub fn rename_local(ctx: &Context, from: &std::path::Path, to: &std::path::Path) -> Option<bool> {
+    let mut answer = None;
+    let name = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Modal::new(Id::unique("rename_local_modal")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("Rename the local copy too?");
+        ui.add_space(6.0);
+        ui.label("The renamed device file has a local copy:");
+        ui.label(RichText::new(from.display().to_string()).weak());
+        ui.add_space(4.0);
+        ui.label(format!("Rename \"{}\" to \"{}\"?", name(from), name(to)));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Keep local name").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Rename local copy").on_hover_text("↩").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(false);
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+            answer = Some(true);
+        }
+    });
+    answer
+}
+
+/// What to do with pool samples dragged to a local pane when some already
+/// have a local copy.
+pub enum SlotDownloadChoice {
+    Cancel,
+    /// Highlight the local copies in the pane they were dropped on.
+    Show,
+    /// Download every one, making another copy.
+    All,
+    /// Download just the ones without a local copy.
+    Missing,
+}
+
+/// `have`: the local copies already on disk; `total`: samples dragged.
+pub fn slot_download(
+    ctx: &Context,
+    have: &[&std::path::Path],
+    total: usize,
+    pane: &str,
+) -> Option<SlotDownloadChoice> {
+    let mut answer = None;
+    let one = have.len() == 1;
+    Modal::new(Id::unique("slot_download_modal")).show(ctx, |ui| {
+        ui.set_width(500.0);
+        ui.heading(if one { "You already have this sample" } else { "You already have some of these" });
+        ui.add_space(6.0);
+        ui.label(if one && total == 1 {
+            "Downloading it makes a second copy. The local file:".to_owned()
+        } else {
+            format!("{} of the {total} samples already have a local copy:", have.len())
+        });
+        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+            for p in have {
+                ui.label(RichText::new(p.display().to_string()).weak());
+            }
+        });
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(SlotDownloadChoice::Cancel);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let show = if one { "Show local file" } else { "Show local files" };
+                if ui
+                    .button(show)
+                    .on_hover_text(format!("Select it in the {pane} pane instead (↩)"))
+                    .clicked()
+                {
+                    answer = Some(SlotDownloadChoice::Show);
+                }
+                if total > have.len() && ui.button("Download only the missing").clicked() {
+                    answer = Some(SlotDownloadChoice::Missing);
+                }
+                let all = if total == 1 { "Download a copy anyway" } else { "Download all anyway" };
+                if ui.button(all).clicked() {
+                    answer = Some(SlotDownloadChoice::All);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(SlotDownloadChoice::Cancel);
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+            answer = Some(SlotDownloadChoice::Show);
+        }
+    });
+    answer
+}
+
 pub enum LeaveChoice {
     /// Stay on the edited file.
     Cancel,
