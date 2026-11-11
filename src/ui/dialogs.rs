@@ -409,6 +409,57 @@ pub fn slot_download(
     answer
 }
 
+/// Whether pool samples being downloaded get their slot numbers in front of
+/// their file names.
+pub enum SlotPrefixChoice {
+    Cancel,
+    /// Keep the +Drive names.
+    Plain,
+    /// `060_kick.wav`.
+    Numbered,
+}
+
+/// `examples`: the file names with slot numbers, in slot order; `total`:
+/// samples being downloaded.
+pub fn slot_prefix(ctx: &Context, examples: &[String], total: usize) -> Option<SlotPrefixChoice> {
+    let mut answer = None;
+    Modal::new(Id::unique("slot_prefix_modal")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        ui.heading("Add slot numbers to the file names?");
+        ui.add_space(6.0);
+        ui.label(format!(
+            "Puts each sample's pool slot in front of its name, so the {total} copies show where they sat on the device:"
+        ));
+        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+            for n in examples {
+                ui.label(RichText::new(n).weak());
+            }
+        });
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(SlotPrefixChoice::Cancel);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Add slot numbers").on_hover_text("↩").clicked() {
+                    answer = Some(SlotPrefixChoice::Numbered);
+                }
+                if ui.button("Keep names").clicked() {
+                    answer = Some(SlotPrefixChoice::Plain);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(SlotPrefixChoice::Cancel);
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+            answer = Some(SlotPrefixChoice::Numbered);
+        }
+    });
+    answer
+}
+
 pub enum LeaveChoice {
     /// Stay on the edited file.
     Cancel,

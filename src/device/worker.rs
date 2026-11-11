@@ -511,6 +511,7 @@ impl Worker {
                 policy,
                 mono,
                 total_bytes,
+                local_names,
             } => {
                 let n = items.len();
                 crate::log::line(format!("job {job}: {dir:?} {n} item(s), policy {policy:?}"));
@@ -547,7 +548,10 @@ impl Worker {
                         Dir::Upload => self.ensure_dev_dir(&dst_dir).and_then(|()| {
                             self.upload(&src, &dst_dir, policy, mono, cancel, &mut errors)
                         }),
-                        Dir::Download => self.download(&src, &dst_dir, policy, cancel, &mut errors),
+                        Dir::Download => {
+                            let name = local_names.get(&src).map(String::as_str);
+                            self.download(&src, &dst_dir, name, policy, cancel, &mut errors)
+                        }
                         Dir::Copy => self.copy(&src, &dst_dir, policy, cancel, &mut errors),
                     };
                     if let Err(e) = res {

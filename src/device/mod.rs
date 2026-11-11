@@ -67,6 +67,9 @@ pub enum Task {
         mono: Option<crate::audio::stats::Fold>,
         /// Best guess for the progress bar.
         total_bytes: u64,
+        /// Downloads only: the local file name to write a source under, in
+        /// place of its own (e.g. with a pool slot number in front).
+        local_names: HashMap<PathBuf, String>,
     },
     Rename {
         from: PathBuf,

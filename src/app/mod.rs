@@ -92,6 +92,18 @@ struct SlotDownload {
     paths: Vec<PathBuf>,
     /// The ones we already have: `(+Drive path, local copy)`.
     have: Vec<(PathBuf, PathBuf)>,
+    /// Slot label (`060`, `A060`) of every dragged sample, by +Drive path.
+    labels: std::collections::HashMap<PathBuf, String>,
+}
+
+/// Several pool samples about to be downloaded: waiting on whether to put
+/// their slot numbers in front of the file names.
+struct SlotPrefix {
+    dest: PathBuf,
+    /// The +Drive paths to download.
+    paths: Vec<PathBuf>,
+    /// Slot label of each, by +Drive path.
+    labels: std::collections::HashMap<PathBuf, String>,
 }
 
 struct LocalRename {
@@ -172,6 +184,7 @@ pub struct App {
     local_rename_pending: Option<LocalRename>,
     /// Pool slots dropped on a local pane, some already downloaded.
     slot_download_pending: Option<SlotDownload>,
+    slot_prefix_pending: Option<SlotPrefix>,
     /// An export's upload job, and the device file to select once it lands.
     reveal_after: Option<(u64, PathBuf)>,
     /// The file an export (not a save in place) is writing: once written,
@@ -519,6 +532,7 @@ impl App {
             relink_after: None,
             local_rename_pending: None,
             slot_download_pending: None,
+            slot_prefix_pending: None,
             reveal_after: None,
             export_rename: None,
             finish_note: None,
@@ -834,6 +848,22 @@ impl eframe::App for App {
             if let Some(choice) = dialogs::slot_download(ui.ctx(), &have, d.paths.len(), d.role.label()) {
                 let d = self.slot_download_pending.take().expect("checked above");
                 self.answer_slot_download(d, choice);
+            }
+        }
+
+        if let Some(p) = &self.slot_prefix_pending {
+            let mut srcs: Vec<&PathBuf> = p.paths.iter().collect();
+            srcs.sort_by_key(|s| p.labels.get(*s));
+            let examples: Vec<String> = srcs
+                .iter()
+                .filter_map(|s| {
+                    let name = device::wav_name(&s.file_name()?.to_string_lossy());
+                    Some(pane_view::slot_prefixed(p.labels.get(*s)?, &name))
+                })
+                .collect();
+            if let Some(choice) = dialogs::slot_prefix(ui.ctx(), &examples, p.paths.len()) {
+                let p = self.slot_prefix_pending.take().expect("checked above");
+                self.answer_slot_prefix(p, choice);
             }
         }
 

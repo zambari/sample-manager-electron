@@ -665,6 +665,7 @@ impl App {
             policy: Policy::Replace,
             mono: None,
             total_bytes: bytes,
+            local_names: Default::default(),
         };
         let id = self.run_device(task, &format!("Loading {name}"), 1, bytes);
         self.device_origin = Some((local.clone(), src_path));
@@ -769,6 +770,7 @@ impl App {
                         policy: s.policy,
                         mono: None,
                         total_bytes: std::fs::metadata(&p).map_or(0, |m| m.len()),
+                        local_names: Default::default(),
                     };
                     self.status = "Sending to the device…".to_owned();
                     let job = self.run_device(task, "", 1, 0);

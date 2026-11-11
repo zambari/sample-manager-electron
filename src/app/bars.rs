@@ -492,14 +492,14 @@ impl App {
                         None => (0.0, "preparing…".to_owned()),
                     };
                     ui.add(
-                        egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                        theme::progress_bar(frac.clamp(0.0, 1.0))
                             .desired_width(200.0)
                             .text(text),
                     )
                     .on_hover_text("Current file");
                 }
                 ui.add(
-                    egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                    theme::progress_bar(frac.clamp(0.0, 1.0))
                         .desired_width(ui.available_width())
                         .text(text),
                 );

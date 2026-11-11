@@ -286,8 +286,15 @@ impl ElekState {
     /// The file in `slot` (as ordered now), unless it's empty or "off".
     /// While slots are being dragged: the samples in the selection, by
     /// `(hash, length)`. Empty slots are left out.
-    pub(crate) fn dragged_keys(&self) -> Option<Vec<(u32, u32)>> {
-        self.slot_drag.then(|| self.sel.iter().filter_map(|&s| self.key_at(s)).collect())
+    /// The samples in a slot drag under way, with each one's slot label
+    /// (`060`, or `A060` with more than one bank).
+    pub(crate) fn dragged_slots(&self) -> Option<Vec<((u32, u32), String)>> {
+        self.slot_drag.then(|| {
+            self.sel
+                .iter()
+                .filter_map(|&s| Some((self.key_at(s)?, self.label(s))))
+                .collect()
+        })
     }
 
     fn key_at(&self, slot: usize) -> Option<(u32, u32)> {
@@ -811,7 +818,7 @@ pub fn show_docked(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         ui.add_space(6.0);
         if let Some((label, done, total)) = &st.busy {
             ui.label(format!("{label}…"));
-            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(format!("{done}/{total}")));
+            ui.add(theme::progress_bar(*done as f32 / (*total).max(1) as f32).text(format!("{done}/{total}")));
         } else {
             ui.label(RichText::new("Reads whatever project is open on the device now. To work on another one, load it on the device first (PROJECT › LOAD).").weak().small());
             if !st.status.is_empty() {
@@ -884,7 +891,7 @@ fn preview_tools(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent
         .on_hover_text("Clicking a slot, or moving onto it with ↑/↓, plays it. Without a local copy it is fetched from the device first (that slot jumps the fetch queue). Space plays the slot under the cursor either way.");
     match st.fetch {
         Some((done, total)) => {
-            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_width(140.0).text(format!("Fetching {done}/{total}")));
+            ui.add(theme::progress_bar(done as f32 / total.max(1) as f32).desired_width(140.0).text(format!("Fetching {done}/{total}")));
             if ui.small_button("Stop").on_hover_text("Stop fetching; what's already here stays").clicked() {
                 out.push(ElekIntent::StopFetch);
             }
@@ -1069,7 +1076,7 @@ pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElekState, wide: bool) {
         let stop_w = if st.reading.is_some() { 80.0 } else { 0.0 };
         let room = ui.available_width() - stop_w;
         let w = if wide { room.clamp(160.0, 420.0) } else { room.max(60.0) };
-        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
+        ui.add(theme::progress_bar(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
         stop_read(ui, st);
     } else if !st.status.is_empty() && st.project.is_some() {
         ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
@@ -1170,7 +1177,7 @@ pub(crate) fn load_screen(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
     ui.vertical_centered(|ui| {
         if let Some((label, done, total)) = &st.busy {
             ui.label(RichText::new(format!("{label}…")).font(oled_font(14.0)).color(OLED));
-            ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).desired_width(260.0).text(format!("{done}/{total}")));
+            ui.add(theme::progress_bar(*done as f32 / (*total).max(1) as f32).desired_width(260.0).text(format!("{done}/{total}")));
             stop_read(ui, st);
         } else {
             let big = egui::Button::new(RichText::new("⬇  Load current project from device memory").size(15.0).color(theme::DEVICE_ACCENT_BRIGHT))

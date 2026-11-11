@@ -445,10 +445,12 @@ impl Worker {
         res
     }
 
+    /// `name`: write a file under this local name instead of its own.
     pub(super) fn download(
         &mut self,
         src: &Path,
         dst_dir: &Path,
+        name: Option<&str>,
         policy: Policy,
         cancel: &AtomicBool,
         errors: &mut Vec<String>,
@@ -471,14 +473,14 @@ impl Worker {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Err(e) = self.download(&src.join(&k.name), &target, policy, cancel, errors) {
+                if let Err(e) = self.download(&src.join(&k.name), &target, None, policy, cancel, errors) {
                     errors.push(e);
                 }
             }
             return Ok(());
         }
 
-        let target = dst_dir.join(wav_name(&entry.name));
+        let target = dst_dir.join(wav_name(name.unwrap_or(&entry.name)));
         let target = match (target.exists(), policy) {
             (false, _) | (true, Policy::Replace) => target,
             (true, Policy::Skip) => return Ok(()),

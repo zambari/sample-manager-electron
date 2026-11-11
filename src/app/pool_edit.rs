@@ -197,6 +197,7 @@ impl App {
             policy,
             mono: None,
             total_bytes: bytes,
+            local_names: Default::default(),
         };
         let job = self.run_device(task, &format!("Updating {name} on the device"), 1, bytes);
         self.pool_fetch.uploads.insert(job, vec![(old, staged.clone())]);
@@ -309,6 +310,7 @@ impl App {
             policy: Policy::KeepBoth,
             mono: None,
             total_bytes: bytes,
+            local_names: Default::default(),
         };
         let job = self.run_device(task, &format!("Saving {name} to the device"), 1, bytes);
         self.pool_fetch.uploads.insert(job, vec![(old, staged)]);

@@ -198,6 +198,13 @@ pub fn device_switch(ui: &mut egui::Ui, active: bool, focused: bool) -> egui::Re
 /// fonts; "✕" and friends are not and render as a missing-glyph box.
 pub const CLOSE_GLYPH: &str = "×";
 
+/// A progress bar with square corners. Use this instead of
+/// `egui::ProgressBar::new` so every bar in the app looks the same
+/// (egui rounds bars by default and ignores the global corner radius).
+pub fn progress_bar(progress: f32) -> egui::ProgressBar {
+    egui::ProgressBar::new(progress).corner_radius(0)
+}
+
 /// A close button: "×", optionally followed by a label, with one extra pixel
 /// of padding on each side so the narrow glyph doesn't look cramped.
 pub fn close_button(label: Option<&str>, small: bool) -> impl egui::Widget + '_ {

@@ -2,6 +2,7 @@
 //! dropping something on them does.
 
 use super::*;
+use std::collections::HashMap;
 
 impl App {
     /// "12 files · 3 folders · 45.2 MB", plus the selection when there is one.
@@ -174,7 +175,7 @@ impl App {
                 theme::device_frame(),
                 egui::StrokeKind::Inside,
             );
-        } else if let Some(keys) = self.elek.dragged_keys().filter(|k| !k.is_empty()) {
+        } else if let Some(keys) = self.elek.dragged_slots().filter(|k| !k.is_empty()) {
             // Pool slots dragged out of the Samples page: download them here.
             // (The table's drop zone eats the slot payload, so go by pointer.)
             if ui.rect_contains_pointer(ui.max_rect()) {
@@ -667,6 +668,18 @@ impl App {
     }
 }
 
+/// `name` with slot `label` in front (`060_kick.wav`), unless it already
+/// starts with it.
+pub(super) fn slot_prefixed(label: &str, name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let l = label.to_ascii_lowercase();
+    if [format!("{l}_"), format!("{l} "), format!("{l}-")].iter().any(|p| lower.starts_with(p.as_str())) {
+        name.to_owned()
+    } else {
+        format!("{label}_{name}")
+    }
+}
+
 /// ⌥ or Ctrl held: a drop copies instead of moving.
 fn copy_held(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.modifiers.alt || i.modifiers.ctrl)
@@ -690,12 +703,14 @@ impl App {
 
     /// Pool samples dropped on a local pane: copy their +Drive files into
     /// its folder, unless some are already here locally (then ask first).
-    pub(super) fn slots_dropped(&mut self, role: Role, keys: Vec<(u32, u32)>) {
+    /// `keys` come with their slot labels.
+    pub(super) fn slots_dropped(&mut self, role: Role, keys: Vec<((u32, u32), String)>) {
         let dest = self.pane(role).active_tab().cwd.clone();
         let mut paths = Vec::new();
+        let mut labels = HashMap::new();
         let mut have = Vec::new();
         let mut unknown = 0;
-        for k in keys {
+        for (k, label) in keys {
             let Some(dev) = self.elek.names.get(&k).map(PathBuf::from) else {
                 unknown += 1;
                 continue;
@@ -703,6 +718,7 @@ impl App {
             if let Some(l) = self.links.user_copy(k.0, k.1) {
                 have.push((dev.clone(), l.local.clone()));
             }
+            labels.insert(dev.clone(), label);
             paths.push(dev);
         }
         if paths.is_empty() {
@@ -713,9 +729,42 @@ impl App {
             self.status = format!("{unknown} sample(s) skipped: their +Drive location isn't known yet");
         }
         if have.is_empty() {
-            self.transfer(Kind::Copy, true, paths, false, dest);
+            self.download_slots(dest, paths, labels);
         } else {
-            self.slot_download_pending = Some(SlotDownload { role, dest, paths, have });
+            self.slot_download_pending = Some(SlotDownload { role, dest, paths, have, labels });
+        }
+    }
+
+    /// Copies are going to be made: with several samples, ask first whether
+    /// to put their slot numbers in front of the file names.
+    fn download_slots(&mut self, dest: PathBuf, paths: Vec<PathBuf>, labels: HashMap<PathBuf, String>) {
+        if paths.is_empty() {
+            return;
+        }
+        if labels.len() > 1 {
+            self.slot_prefix_pending = Some(SlotPrefix { dest, paths, labels });
+        } else {
+            self.transfer(Kind::Copy, true, paths, false, dest);
+        }
+    }
+
+    pub(super) fn answer_slot_prefix(&mut self, p: SlotPrefix, choice: dialogs::SlotPrefixChoice) {
+        use dialogs::SlotPrefixChoice as C;
+        match choice {
+            C::Cancel => self.status = "Download cancelled".into(),
+            C::Plain => self.transfer(Kind::Copy, true, p.paths, false, p.dest),
+            C::Numbered => {
+                let names: HashMap<PathBuf, String> = p
+                    .paths
+                    .iter()
+                    .filter_map(|src| {
+                        let name = src.file_name()?.to_string_lossy().into_owned();
+                        let label = p.labels.get(src)?;
+                        Some((src.clone(), slot_prefixed(label, &name)))
+                    })
+                    .collect();
+                self.transfer_as(Kind::Copy, true, p.paths, false, p.dest, &names);
+            }
         }
     }
 
@@ -723,11 +772,11 @@ impl App {
         use dialogs::SlotDownloadChoice as C;
         match choice {
             C::Cancel => self.status = "Download cancelled".into(),
-            C::All => self.transfer(Kind::Copy, true, d.paths, false, d.dest),
+            C::All => self.download_slots(d.dest, d.paths, d.labels),
             C::Missing => {
                 let paths: Vec<PathBuf> =
                     d.paths.into_iter().filter(|p| !d.have.iter().any(|(h, _)| h == p)).collect();
-                self.transfer(Kind::Copy, true, paths, false, d.dest);
+                self.download_slots(d.dest, paths, d.labels);
             }
             C::Show => {
                 let Some((_, first)) = d.have.first() else { return };

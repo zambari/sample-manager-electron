@@ -1,6 +1,7 @@
 //! Directory listing, copy/move/commit planning, device jobs and absorbing worker events.
 
 use super::*;
+use std::collections::HashMap;
 
 impl Batch {
     pub(super) fn absorb(&mut self, a: &ActiveJob, cancelled: bool) {
@@ -241,6 +242,20 @@ impl App {
         to_dev: bool,
         dest_dir: PathBuf,
     ) {
+        self.transfer_as(kind, from_dev, sources, to_dev, dest_dir, &HashMap::new());
+    }
+
+    /// [`Self::transfer`], with downloads written under `names` (by source
+    /// path) instead of their own names.
+    pub(super) fn transfer_as(
+        &mut self,
+        kind: Kind,
+        from_dev: bool,
+        sources: Vec<PathBuf>,
+        to_dev: bool,
+        dest_dir: PathBuf,
+        names: &HashMap<PathBuf, String>,
+    ) {
         let dir = match (from_dev, to_dev) {
             (false, false) => return self.start_transfer(kind, sources, dest_dir),
             (true, true) if kind == Kind::Move => device::Dir::Move,
@@ -287,7 +302,9 @@ impl App {
             }
             let dst = match dir {
                 device::Dir::Upload if !is_dir => device::upload_target(&src, &dest_dir),
-                device::Dir::Download if !is_dir => dest_dir.join(device::wav_name(&name)),
+                device::Dir::Download if !is_dir => {
+                    dest_dir.join(device::wav_name(names.get(&src).unwrap_or(&name)))
+                }
                 _ => dest_dir.join(&name),
             };
             let conflict = if to_dev {
@@ -461,6 +478,20 @@ impl App {
                 if dir == device::Dir::Upload {
                     self.mark_committed(items.iter().map(|(s, _)| s.clone()));
                 }
+                // A download planned under another name keeps it.
+                let local_names: HashMap<PathBuf, String> = if dir == device::Dir::Download {
+                    plan.ops
+                        .iter()
+                        .filter(|o| !o.is_dir)
+                        .filter_map(|o| {
+                            let own = device::wav_name(&o.src.file_name()?.to_string_lossy());
+                            let planned = o.dst.file_name()?.to_string_lossy().into_owned();
+                            (planned != own).then(|| (o.src.clone(), planned))
+                        })
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
                 let total_bytes = plan.total_bytes();
                 let n = items.len();
                 let queued = items.clone();
@@ -471,6 +502,7 @@ impl App {
                         policy,
                         mono,
                         total_bytes,
+                        local_names,
                     },
                     "",
                     n,

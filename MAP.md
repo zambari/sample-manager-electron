@@ -110,7 +110,7 @@ is opened by a pending field on `App` and answered at the end of `App::ui`.
 | Accent colours | `ACCENT`, `ACCENT_BRIGHT`, `ON_ACCENT`; device yellow `DEVICE_ACCENT*` |
 | Anything device-related: wash, frame, dimming when unplugged, icon | `device_wash`, `device_frame`, `device_dimmed`, `device_group`, `DEVICE_ICON` in `theme.rs` |
 | Device-screen look (pixel font, OLED colours) | `oled_font`, `OLED*`, `install_fonts` in `theme.rs`; font is `assets/frucade.ttf` |
-| Shared widgets: pane titles, tabs, section headers, × buttons, show toggles | `pane_title`, `mode_title`, `pane_tab`, `device_tab`, `section_header`, `close_button`, `vis_toggle` in `theme.rs` |
+| Shared widgets: pane titles, tabs, section headers, × buttons, show toggles | `pane_title`, `mode_title`, `pane_tab`, `device_tab`, `section_header`, `close_button`, `vis_toggle`, `progress_bar` (square corners, use for every bar) in `theme.rs` |
 | Editor colours (in/out, playhead, clip, limit, mono, marker) and sizes | consts at the top of `src/ui/editor_view/mod.rs` |
 | File row height, device row text | `ROW_HEIGHT`, `OLED_TEXT` in `src/ui/file_table.rs` |
 | Pattern list colours and metrics | consts at the top of `src/ui/elek_project_view.rs` |

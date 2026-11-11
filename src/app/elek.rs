@@ -462,6 +462,7 @@ impl App {
             policy: Policy::KeepBoth,
             mono: None,
             total_bytes: bytes,
+            local_names: Default::default(),
         };
         let n = upload.len();
         let id = self.run_device(task, &format!("Uploading {n} file(s) for the pool"), n, bytes);
@@ -550,6 +551,7 @@ impl App {
                 policy: Policy::Replace,
                 mono: None,
                 total_bytes: k.1 as u64,
+                local_names: Default::default(),
             };
             let id = self.run_device(task, &format!("Fetching {short} for preview"), 1, k.1 as u64);
             self.pool_fetch.running = Some((id, k));
@@ -952,6 +954,7 @@ impl App {
             policy: Policy::KeepBoth,
             mono: None,
             total_bytes: bytes,
+            local_names: Default::default(),
         };
         let id = self.run_device(task, &format!("Uploading {short} for the pool"), 1, bytes);
         crate::log::line(format!("elek: {short} not on the device; uploading to {}", device::dev_str(&dir)));
