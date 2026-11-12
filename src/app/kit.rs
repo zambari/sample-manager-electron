@@ -30,11 +30,16 @@ fn slot_name(ed: &Editor) -> Option<String> {
     )
 }
 
-/// A file that already is a kit: named "[N] name", or carrying slice cues.
-/// Anything else is a plain sample and is never saved over as a kit.
+/// A file that already is a kit this app made: carrying our slice names
+/// chunk, or named "[N] name" with slice cues. Anything else (a loop from a
+/// library with its own cue markers included) is source material and is
+/// never saved over as a kit.
 pub(super) fn is_collection(p: &Path) -> bool {
+    if crate::audio::cues::is_ours(p) {
+        return true;
+    }
     let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-    crate::editor::slot_prefix(&stem).is_some() || !crate::audio::cues::read(p).is_empty()
+    crate::editor::slot_prefix(&stem).is_some() && !crate::audio::cues::read(p).is_empty()
 }
 
 /// A kit opened by browsing onto a sliced file (see [`App::open_browsed_kit`]).
@@ -509,11 +514,13 @@ impl App {
         // Case-only renames point at the same file on case-insensitive disks.
         let same_file =
             old.to_string_lossy().to_lowercase() == new.to_string_lossy().to_lowercase();
-        if new.exists() && !same_file {
+        if new.exists() && !(same_file && old.is_file() && !self.kit().path_is_source()) {
             self.status = format!("{file} already exists there — pick another name");
             return;
         }
-        let on_disk = old.is_file();
+        // A kit still pointing at a file its slices came from has no file
+        // of its own: rename only the name it will be saved under.
+        let on_disk = old.is_file() && !self.kit().path_is_source();
         if on_disk {
             if let Err(e) = std::fs::rename(&old, &new) {
                 self.status = format!("Couldn't rename the kit: {e}");
@@ -535,7 +542,7 @@ impl App {
         }
     }
 
-    /// "Start kit": open `p` as a kit and make it the one K adds to. The
+    /// "Start New Grid Kit": open `p` as a kit and make it the one K adds to. The
     /// kit open before stays in the kit list.
     pub(super) fn use_as_kit(&mut self, p: &Path) {
         let name = p

@@ -110,7 +110,7 @@ impl Link {
     }
 }
 
-fn stamp(p: &Path) -> Option<(u64, u64)> {
+pub fn stamp(p: &Path) -> Option<(u64, u64)> {
     let md = std::fs::metadata(p).ok()?;
     let ms = md
         .modified()
@@ -138,6 +138,12 @@ pub fn pool_cache_dir() -> Option<PathBuf> {
 }
 
 fn path() -> Option<PathBuf> {
+    Some(data_dir()?.join("device_links.tsv"))
+}
+
+/// The app's own data folder (links, fingerprints): one per user, not per
+/// drive, so files on any volume are known wherever they're used from.
+pub fn data_dir() -> Option<PathBuf> {
     let dir = if cfg!(target_os = "windows") {
         PathBuf::from(std::env::var_os("APPDATA")?).join("sample_manager")
     } else {
@@ -148,7 +154,7 @@ fn path() -> Option<PathBuf> {
             home.join(".local/share/sample_manager")
         }
     };
-    Some(dir.join("device_links.tsv"))
+    Some(dir)
 }
 
 /// Note a link on disk. Called from the device worker, off the UI thread.
@@ -291,6 +297,12 @@ impl Links {
             return None;
         }
         mine().find(|l| l.local.is_file())
+    }
+
+    /// Links of this device file to files downloaded from it (preview
+    /// cache or the user's own downloads), newest first. No disk access.
+    pub fn downloads(&self, hash: u32, size: u32) -> impl Iterator<Item = &Link> {
+        self.candidates(hash, size).filter(|l| !l.uploaded)
     }
 
     /// A link whose local file is still there and unchanged. Touches the

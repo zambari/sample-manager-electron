@@ -259,6 +259,35 @@ pub fn confirm_duplicates(ctx: &Context, groups: &[crate::jobs::DupGroup]) -> Op
     answer
 }
 
+/// Reading the device's factory samples failed: it doesn't allow copying
+/// them off. `true` once dismissed.
+pub fn factory_locked(ctx: &Context) -> bool {
+    let mut done = false;
+    Modal::new(Id::unique("factory_locked_modal")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.heading("Failed: copying factory samples is not allowed");
+        ui.add_space(6.0);
+        ui.label(
+            "The device won't hand out the files under /factory, so they were skipped. \
+             Anything else in the request is handled as usual.",
+        );
+        ui.add_space(10.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("OK").on_hover_text("↩").clicked() {
+                done = true;
+            }
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+        {
+            done = true;
+        }
+    });
+    done
+}
+
 /// Confirm reading a sample off the device into the editor. Over USB MIDI
 /// that is slow, so say so first. `Some(true)` = go, `Some(false)` =
 /// cancelled, `None` = still open.
@@ -335,6 +364,44 @@ pub fn rename_local(ctx: &Context, from: &std::path::Path, to: &std::path::Path)
             answer = Some(false);
         } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
             answer = Some(true);
+        }
+    });
+    answer
+}
+
+/// Ask before a save overwrites something that isn't the open file (the
+/// original a device copy came from, a filled pool slot). Enter is not a
+/// yes here: overwriting takes a click. `Some(true)` = go.
+pub fn confirm_overwrite(ctx: &Context, title: &str, lines: &[String], ok: &str) -> Option<bool> {
+    let mut answer = None;
+    Modal::new(Id::unique("confirm_overwrite_modal")).show(ctx, |ui| {
+        ui.set_width(480.0);
+        ui.heading(title);
+        ui.add_space(6.0);
+        for (i, l) in lines.iter().enumerate() {
+            if i == 0 {
+                ui.label(l);
+            } else {
+                ui.label(RichText::new(l).weak());
+            }
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let b = egui::Button::new(RichText::new(ok).color(crate::ui::theme::ON_ACCENT))
+                    .fill(crate::ui::theme::ACCENT);
+                if ui.add(b).clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(false);
         }
     });
     answer
@@ -727,7 +794,7 @@ pub fn name_kit(
                 answer = Some(false);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Start kit").on_hover_text("↩").clicked() {
+                if ui.button("Start New Grid Kit").on_hover_text("↩").clicked() {
                     answer = Some(true);
                 }
             });

@@ -758,6 +758,7 @@ impl App {
                     self.links.add(l);
                     self.refresh_elek_links();
                 }
+                Ev::Printed(found) => self.prints_landed(found),
                 Ev::DeviceStatus(s) => {
                     if let Err(e) = &s {
                         crate::log::line(format!("device status: {e}"));
@@ -842,6 +843,25 @@ impl App {
                         self.status += &format!(" · {} more job(s) to go", self.active_jobs.len());
                     }
                     let errors_empty = errors.is_empty();
+                    // Factory reads fail file by file: one line and one
+                    // popup per batch, not one per file.
+                    let (locked, mut errors): (Vec<_>, Vec<_>) = errors
+                        .into_iter()
+                        .partition(|e| e.ends_with(device::FACTORY_LOCKED));
+                    if !locked.is_empty() {
+                        errors.push(format!(
+                            "{} file(s) skipped: {}",
+                            locked.len(),
+                            device::FACTORY_LOCKED
+                        ));
+                        if !self.factory_warned {
+                            self.factory_warned = true;
+                            self.factory_popup = true;
+                        }
+                    }
+                    if self.active_jobs.is_empty() {
+                        self.factory_warned = false;
+                    }
                     self.errors.extend(errors);
                     for dir in touched {
                         // A transfer changes sizes up the whole chain, so the

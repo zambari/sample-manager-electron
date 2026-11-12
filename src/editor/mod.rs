@@ -26,6 +26,7 @@ pub use trim::{SliceEnd, TrimPlan};
 pub use grid::{AUTO_GRID, GRID_SIZES, TrimPreview, slot_prefix};
 mod selection;
 mod sel_gain;
+pub mod level_hist;
 
 use history::History;
 
@@ -70,17 +71,46 @@ pub struct Prefs {
     /// Grid kits: trim by level (each slice where it drops below
     /// `tail_db`) instead of by slot length.
     pub grid_trim_by_level: bool,
+    /// Histogram panel settings.
+    pub hist: HistPrefs,
+}
+
+/// Histogram panel settings (its tiny dropdowns).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq)]
+#[serde(default)]
+pub struct HistPrefs {
+    /// Column width, dB.
+    pub bucket_db: f32,
+    /// Left edge of the strip, dB after gain.
+    pub floor_db: f32,
+    /// "Reasonably zero": lead / tail frames under this (after gain) count
+    /// as silence in the stats box.
+    pub zero_db: f32,
+    /// A second, higher "nearly silent" threshold for the stats box.
+    pub zero2_db: f32,
+    /// Log column heights (else linear).
+    pub log: bool,
+}
+
+impl Default for HistPrefs {
+    fn default() -> Self {
+        Self { bucket_db: 2.0, floor_db: -60.0, zero_db: -48.0, zero2_db: -36.0, log: true }
+    }
 }
 
 /// Visibility of each editor panel, toggled from the header row.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 #[serde(default)]
 pub struct Panels {
+    /// Kit row: → add (K), slot fill, grid picker, Start New Grid Kit.
+    pub kit: bool,
     /// Play / loop / snap toggles.
     pub transport: bool,
     /// In / out / len / playhead readout, under the waveform.
     pub nums: bool,
     pub gain: bool,
+    /// Level histogram and the nerd stats box beside it.
+    pub histogram: bool,
     /// Undo, crop, loop scaling, export.
     pub tools: bool,
     /// The fixed 80 ms extreme-zoom strip.
@@ -97,9 +127,11 @@ pub struct Panels {
 impl Default for Panels {
     fn default() -> Self {
         Self {
+            kit: true,
             transport: true,
             nums: true,
             gain: true,
+            histogram: true,
             tools: true,
             scalpel: true,
             minimap: true,
@@ -145,6 +177,7 @@ impl Default for Prefs {
             trim_fade_ms: 20.0,
             trim_fade_k: 0.5,
             grid_trim_by_level: false,
+            hist: HistPrefs::default(),
         }
     }
 }
@@ -207,8 +240,12 @@ impl Memo {
 pub struct AudioClip {
     pub rate: u32,
     pub channels: Vec<Vec<f32>>,
-    /// File the audio came from, so a kit slice made of it can say so.
+    /// Where the audio came from (full path when known, see
+    /// `Editor::slice_source_at`), so a kit slice made of it can say so.
     pub name: Option<String>,
+    /// Full path of that file (a plain sample, not a kit): a kit that takes
+    /// this clip never saves over it.
+    pub src: Option<PathBuf>,
 }
 
 impl AudioClip {
@@ -336,6 +373,9 @@ pub struct Editor {
     pub drag: Option<Drag>,
     /// Where the waveform was last drawn, so keyboard zoom knows the width.
     pub wave_rect: Option<egui::Rect>,
+    /// Kit: the slice whose right-click menu is open (whole-file frame of
+    /// the click), drawn with a faint highlight while it is.
+    pub slice_menu: Option<usize>,
     pub exporting: bool,
     /// Start playing once the pending load lands.
     pub play_when_loaded: bool,
@@ -345,10 +385,14 @@ pub struct Editor {
     /// Kit slice starts, in whole-file frames, sorted, strictly inside the
     /// file (0 and the end are implied).
     markers: Vec<usize>,
-    /// Kit slice names (the file each slice came from), by slice: entry 0
-    /// is the slice before the first marker. May be shorter than the slice
-    /// count; empty means unknown.
+    /// Kit slice names (the file each slice came from: its full path, or
+    /// a bare file name in older kits), by slice: entry 0 is the slice
+    /// before the first marker. May be shorter than the slice count; empty
+    /// means unknown.
     names: Vec<String>,
+    /// Kit: every file a slice was taken from (or that seeded the kit), in
+    /// this session. Saving the kit never writes over one of these.
+    sources: Vec<PathBuf>,
     /// Fade-outs shaped on the wave but not applied yet, by slice.
     fades: HashMap<usize, fade::FadeShape>,
     /// Grid kit, trim by length: the slot length to cut every slot to,
@@ -380,6 +424,11 @@ pub struct Editor {
     pub clip: Option<AudioClip>,
     /// Kit gain being dialed in on the selection (see [`sel_gain`]).
     sel_gain: Option<sel_gain::SelGain>,
+    /// Cached level histogram for the gain panel, keyed by audio and range.
+    level_hist: Option<(level_hist::Key, Arc<level_hist::LevelHist>)>,
+    /// Cached lead / tail silence for the stats box, keyed by the same plus
+    /// the threshold.
+    edges: Vec<((level_hist::Key, u32), level_hist::Edges)>,
     stats: Stats,
     phase: Phase,
     file_stats: Stats,
@@ -411,11 +460,13 @@ impl Editor {
             },
             drag: None,
             wave_rect: None,
+            slice_menu: None,
             exporting: false,
             play_when_loaded: false,
             is_kit: false,
             markers: Vec::new(),
             names: Vec::new(),
+            sources: Vec::new(),
             fades: HashMap::new(),
             slot_cut: None,
             decay: Default::default(),
@@ -432,6 +483,8 @@ impl Editor {
             clean_rev: 0,
             clip: None,
             sel_gain: None,
+            level_hist: None,
+            edges: Vec::new(),
             stats: Stats::default(),
             phase: Phase::default(),
             file_stats: Stats::default(),
@@ -873,6 +926,19 @@ impl Editor {
             || self.gain_db.abs() > 0.001
             || self.mono_active()
             || (!self.is_kit && self.is_edited())
+    }
+
+    /// Remember `p` as a file this kit took audio from.
+    pub fn note_source(&mut self, p: Option<&Path>) {
+        if let Some(p) = p.filter(|p| !self.sources.iter().any(|s| s == p)) {
+            self.sources.push(p.to_path_buf());
+        }
+    }
+
+    /// The kit's own file is one of the files its slices came from: saving
+    /// in place would overwrite source material, so it must be exported.
+    pub fn path_is_source(&self) -> bool {
+        self.path().is_some_and(|p| self.sources.iter().any(|s| s == p))
     }
 
     /// Re-read the open file after a save replaced it. Its old in / out, gain

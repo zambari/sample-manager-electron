@@ -133,12 +133,43 @@ fn accent_title(label: &str, active: bool, focused: bool, fill: Color32, bright:
         if active {
             let r = resp.rect;
             ui.painter().hline(
-                r.x_range().shrink(4.0),
+                r.x_range().shrink(ui.spacing().button_padding.x - 2.0),
                 r.bottom(),
                 Stroke::new(2.0, fill),
             );
         }
         resp
+    }
+}
+
+/// One choice of the right column's FILES / SAMPLE POOL / +DRIVE switch,
+/// with room around the label like the Sample Editor title. `device`
+/// choices use the pixel font and the device yellow.
+pub fn column_switch(label: &str, active: bool, focused: bool, device: bool) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        ui.scope(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+            if !device {
+                return ui.add(mode_title(label, active, focused));
+            }
+            let color = if focused {
+                DEVICE_ACCENT_BRIGHT
+            } else if active {
+                ui.visuals().strong_text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let text = egui::RichText::new(label.to_uppercase())
+                .font(oled_font(12.0 + 2.0 / OLED_SIZE_SCALE))
+                .color(color);
+            let resp = device_dimmed(ui, |ui| ui.add(egui::Button::new(text).frame(false)));
+            if active {
+                let r = resp.rect;
+                ui.painter().hline(r.x_range().shrink(6.0), r.bottom(), Stroke::new(2.0, DEVICE_ACCENT));
+            }
+            resp
+        })
+        .inner
     }
 }
 
@@ -336,10 +367,55 @@ pub fn section_header(ui: &mut egui::Ui, label: &str) {
     }
 }
 
+/// A quiet on / off button for settings (Loop, Follow, Snap to 0 …), in
+/// place of egui's solid-accent `toggle_value`. On: bright text in a faint
+/// grey frame. Off: grey text, no frame. No accent, so the orange stays
+/// for actions and selection.
+pub fn soft_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + 'a {
+    move |ui: &mut egui::Ui| {
+        let pad = ui.spacing().button_padding;
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+        let size = egui::vec2(
+            galley.size().x + pad.x * 2.0,
+            (galley.size().y + pad.y * 2.0).max(ui.spacing().interact_size.y),
+        );
+        let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        if resp.clicked() {
+            *on = !*on;
+            resp.mark_changed();
+        }
+        if !ui.is_rect_visible(rect) {
+            return resp;
+        }
+        let v = ui.visuals();
+        let hovered = resp.hovered();
+        let text = match (*on, hovered) {
+            (true, _) => v.strong_text_color(),
+            (false, true) => v.text_color(),
+            (false, false) => v.weak_text_color(),
+        };
+        let p = ui.painter();
+        let r = CornerRadius::same(2);
+        if hovered {
+            p.rect_filled(rect, r, Color32::from_gray(34));
+        }
+        if *on {
+            let gray = if hovered { 92 } else { 70 };
+            p.rect_stroke(rect, r, Stroke::new(1.0, Color32::from_gray(gray)), egui::StrokeKind::Inside);
+        }
+        let pos = rect.center() - galley.size() / 2.0;
+        p.galley(pos, galley, text);
+        resp
+    }
+}
+
 /// Show / hide switch for a panel: a flat, square-cornered pixel-font label
 /// whose background is the indicator. On: low-alpha accent fill, normal text.
-/// Off: no fill, dim text. Quieter than the solid orange chips used for
-/// Loop / Snap etc., so the Show bar reads as its own thing.
+/// Off: no fill, dim text. Different from [`soft_toggle`] so the Show bar
+/// reads as its own thing.
 pub fn vis_toggle<'a>(on: &'a mut bool, label: &'a str) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
         let font = oled_font(12.0);
@@ -399,12 +475,12 @@ pub fn device_tab(label: &str, selected: bool) -> impl egui::Widget + '_ {
 }
 
 /// A row of [`device_tab`]s with side margins. `tabs` is (value, label,
-/// hover text); `selected` is the tab shown, or `None` when none is (e.g. a
+/// hover text); `selected` says which are shown (none, e.g. from a
 /// shortcut into another view). Returns the value of the tab clicked.
-pub fn device_tab_strip<T: PartialEq + Copy>(
+pub fn device_tab_strip<T: Copy>(
     ui: &mut egui::Ui,
     tabs: &[(T, &str, &str)],
-    selected: Option<T>,
+    selected: impl Fn(T) -> bool,
 ) -> Option<T> {
     const MARGIN: f32 = 10.0;
     const GAP: f32 = 8.0;
@@ -414,7 +490,7 @@ pub fn device_tab_strip<T: PartialEq + Copy>(
         if i > 0 {
             ui.add_space(GAP);
         }
-        let resp = ui.add(device_tab(label, selected == Some(value)));
+        let resp = ui.add(device_tab(label, selected(value)));
         let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip) };
         if resp.clicked() {
             picked = Some(value);
@@ -478,4 +554,68 @@ pub fn always_show_scrollbar(ui: &mut egui::Ui) {
     let scroll = &mut ui.spacing_mut().scroll;
     scroll.dormant_handle_opacity = 0.5;
     scroll.dormant_background_opacity = 0.0;
+}
+
+/// Text size for the geek control rows (`tiny_pick`) and readouts.
+pub const TINY: f32 = 9.0;
+
+/// A row of [`tiny_pick`]s: tight spacing, small row height.
+pub fn tiny_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.set_min_height(13.0);
+        add(ui)
+    })
+    .inner
+}
+
+/// Geek dropdown: a dim lowercase key and the current value in a hairline
+/// box with a caret, monospace at [`TINY`] size; click opens the choices.
+/// Returns true when the value changed.
+pub fn tiny_pick<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    key: &str,
+    value: &mut T,
+    options: &[(T, &str)],
+) -> bool {
+    let font = egui::FontId::monospace(TINY);
+    let cur = options
+        .iter()
+        .find(|(v, _)| v == value)
+        .map_or("?", |(_, s)| *s);
+    let v = ui.visuals();
+    let (dim, text) = (v.weak_text_color(), v.text_color());
+    let key_g = ui.painter().layout_no_wrap(key.to_owned(), font.clone(), dim);
+    let val_g = ui.painter().layout_no_wrap(format!("{cur} ▾"), font.clone(), text);
+    let h = 13.0;
+    let gap = 4.0;
+    let box_w = val_g.size().x + 6.0;
+    let size = egui::vec2(key_g.size().x + gap + box_w, h);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let y = rect.center().y;
+        p.galley(egui::pos2(rect.left(), y - key_g.size().y / 2.0), key_g, dim);
+        let br = egui::Rect::from_min_max(egui::pos2(rect.right() - box_w, rect.top()), rect.max);
+        let gray = if resp.hovered() { 90 } else { 52 };
+        if resp.hovered() {
+            p.rect_filled(br, 0.0, Color32::from_gray(30));
+        }
+        p.rect_stroke(br, 0.0, Stroke::new(1.0, Color32::from_gray(gray)), egui::StrokeKind::Inside);
+        p.galley(egui::pos2(br.left() + 3.0, y - val_g.size().y / 2.0), val_g, text);
+    }
+    let mut changed = false;
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+        for (v, label) in options {
+            let on = v == value;
+            let t = egui::RichText::new(*label).font(font.clone());
+            if ui.selectable_label(on, t).clicked() && !on {
+                *value = *v;
+                changed = true;
+            }
+        }
+    });
+    changed
 }

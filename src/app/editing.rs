@@ -151,7 +151,8 @@ impl App {
         if self.editor.current.is_none() {
             return;
         }
-        // Opened from a pool slot: export means "update the slot".
+        // Opened from a pool slot: its destination is that slot (the
+        // button says "Export → slot …").
         if self.saves_to_pool() {
             return self.update_on_device();
         }
@@ -236,6 +237,10 @@ impl App {
         if let Some(p) = self.editor.path().map(Path::to_path_buf) {
             self.mark_committed([p]);
         }
+        // A kit still pointing at source material: the export is its file now.
+        if self.editor.is_kit && self.editor.path_is_source() && self.editor.path() != Some(dst.as_path()) {
+            self.editor.set_path(dst.clone());
+        }
         self.status = format!(
             "Exporting{} to {}…",
             mono.map_or(String::new(), |f| format!(" (mono {})", f.short())),
@@ -257,8 +262,9 @@ impl App {
         if self.saves_to_pool() {
             return self.update_on_device();
         }
-        // A new kit has no file yet: its first save is the export.
-        if self.showing_kit && !self.editor.path().is_some_and(Path::is_file) {
+        // A new kit has no file yet: its first save is the export. Same for
+        // a kit whose file is one its slices came from: never written over.
+        if self.showing_kit && (!self.editor.path().is_some_and(Path::is_file) || self.editor.path_is_source()) {
             self.export();
             return;
         }
@@ -492,18 +498,26 @@ impl App {
         let cache = crate::links::pool_cache_dir();
         let in_cache = cache.as_ref().is_some_and(|c| path.starts_with(c));
         let link = self.links.for_local(&path);
+        let pm = self.pool_match(&path);
+        let pool = pm.as_ref().map(|m| (m.slot.clone(), m.same, m.by_name));
         let o = |kind, warn, tip: &str, original| editor_view::Origin {
             path: path.clone(),
             kind,
             warn,
             tip: tip.to_owned(),
             original,
+            pool: pool.clone(),
         };
         let Some(l) = link else {
-            return Some(if in_cache {
-                o("Preview cache", false, "A file in the preview cache, not linked to a device file", None)
-            } else {
-                o("Local file", false, "Not known to be on the device", None)
+            return Some(match (in_cache, pm.as_ref().and_then(|m| m.same)) {
+                (_, Some(true)) => o(
+                    "Same audio as on device",
+                    false,
+                    "Never transferred by this app, but a pool sample holds the same audio (matched by fingerprint)",
+                    None,
+                ),
+                (true, _) => o("Preview cache", false, "A file in the preview cache, not linked to a device file", None),
+                (false, _) => o("Local file", false, "Not known to be on the device", None),
             });
         };
         let fresh = l.fresh();
@@ -541,6 +555,85 @@ impl App {
             self.elek.hide_files = false;
         }
         self.show_file(Role::Source, false, p);
+    }
+
+    /// Where each slice of the shown kit came from, for its right-click
+    /// menu. A slice keeps the full path of its source file; older kits kept
+    /// only a file name, which counts only when it names a file this kit
+    /// took audio from in this session. The pool slot is matched by the
+    /// +Drive content hash of a link to that file, never by name. No disk
+    /// access: a missing file is caught when it's revealed.
+    pub(super) fn slice_homes(&self) -> Vec<editor_view::SliceHome> {
+        let (names, sources) = self.kit().slice_sources();
+        let cache = crate::links::pool_cache_dir();
+        names
+            .into_iter()
+            .map(|n| {
+                if n.is_empty() {
+                    return editor_view::SliceHome::default();
+                }
+                let p = Path::new(&n);
+                let local = if p.is_absolute() {
+                    Some(p.to_path_buf())
+                } else {
+                    sources.iter().find(|s| s.file_name() == Some(p.as_os_str())).cloned()
+                };
+                let Some(local) = local else {
+                    return editor_view::SliceHome { saved_as: Some(n), ..Default::default() };
+                };
+                let link = self.links.for_local(&local);
+                // A preview cache copy: point at its original when known.
+                let in_cache = cache.as_ref().is_some_and(|c| local.starts_with(c));
+                let shown = link
+                    .filter(|_| in_cache)
+                    .and_then(|l| self.links.original(l.hash, l.size))
+                    .map_or_else(|| local.clone(), |o| o.local.clone());
+                let m = self.pool_match(&local);
+                editor_view::SliceHome {
+                    local: Some(shown),
+                    pool_same: m.as_ref().and_then(|m| m.same),
+                    pool_by_name: m.as_ref().is_some_and(|m| m.by_name),
+                    pool: m.map(|m| m.slot),
+                    saved_as: None,
+                }
+            })
+            .collect()
+    }
+
+    /// Kit slice `i`'s right-click **Reveal in sample pool**: bring the pool
+    /// into the right column and flash the slot holding its source.
+    pub(super) fn slice_in_pool(&mut self, i: usize) {
+        let (names, sources) = self.kit().slice_sources();
+        let local = names.get(i).filter(|n| !n.is_empty()).and_then(|n| {
+            let p = Path::new(n);
+            if p.is_absolute() {
+                Some(p.to_path_buf())
+            } else {
+                sources.iter().find(|s| s.file_name() == Some(p.as_os_str())).cloned()
+            }
+        });
+        let Some(m) = local.and_then(|p| self.pool_match(&p)) else {
+            self.status = "No pool slot holds that slice's file".into();
+            return;
+        };
+        self.reveal_slot(m.key);
+    }
+
+    /// The editor's file in the pool (the origin line's slot).
+    pub(super) fn origin_in_pool(&mut self) {
+        let Some(m) = self.browser().path().map(Path::to_path_buf).and_then(|p| self.pool_match(&p)) else {
+            return;
+        };
+        self.reveal_slot(m.key);
+    }
+
+    fn reveal_slot(&mut self, key: (u32, u32)) {
+        if !self.pool_in_col() && !self.elek_mode {
+            self.dock_elek();
+        }
+        if !self.elek.ping_key(|k| k == key) {
+            self.status = "No pool slot holds that file".into();
+        }
     }
 
     pub(super) fn device_home(&self) -> Option<PathBuf> {
@@ -707,11 +800,23 @@ impl App {
                         self.pitch = 0.0;
                     }
                     if is_kit && self.editor.path().is_some() {
-                        if let Some((_, new)) = self
+                        let seed = self
                             .kit_seed
-                            .take_if(|(seed, _)| self.editor.path() == Some(seed.as_path()))
-                        {
+                            .take_if(|(seed, _)| self.editor.path() == Some(seed.as_path()));
+                        if let Some((seed, new)) = seed {
+                            // A plain sample seeded the kit: it's source
+                            // material, the kit gets a file of its own.
                             self.editor.detach(new);
+                            self.editor.note_source(Some(&seed));
+                        } else if let Some(p) = self
+                            .editor
+                            .path()
+                            .filter(|p| p.is_file() && !super::kit::is_collection(p))
+                            .map(Path::to_path_buf)
+                        {
+                            // Opened as a kit some other way, but not a kit
+                            // file of ours: never saved over either.
+                            self.editor.note_source(Some(&p));
                         }
                     }
                     if let (true, Some((clip, grid))) = (is_kit, self.kit_pending.take()) {
@@ -839,13 +944,14 @@ impl App {
         };
         let can_export = !self.pane(Role::Dest).active_tab().loading;
         let slots = editor_view::Slots {
+            drive_shown: self.drive_in_col(),
             showing_kit: self.showing_kit,
             kit_name: self.kit_name(),
             kit_dirty: self.kit().is_dirty(),
             kit_grid: self.kit().grid_mode(),
             kit_fill: (self.kit().kit_fill(), self.kit().grid),
             kits: self.kit_list(),
-            kit_on_disk: self.kit().path().is_some_and(Path::is_file),
+            kit_on_disk: self.kit().path().is_some_and(Path::is_file) && !self.kit().path_is_source(),
             sample_name: self
                 .browser()
                 .path()
@@ -853,8 +959,14 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned()),
             device_home: self.device_home().map(|p| device::dev_str(&p)),
             pool_slot: self.pool_edit_label(),
-            empty_slot: self.slot_save_label(),
+            pool: self.pool_targets(),
+            export_drive: {
+                let tab = self.pane(Role::Dest).active_tab();
+                tab.device.then(|| device::dev_str(&tab.cwd))
+            },
             origin: self.editor_origin(),
+            // Only while a slice's right-click menu is open.
+            slice_homes: if self.showing_kit && self.editor.slice_menu.is_some() { self.slice_homes() } else { Vec::new() },
         };
         let intents = editor_view::show(
             ui,
@@ -899,6 +1011,7 @@ impl App {
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
                 EdIntent::ElekMode => self.enter_full_elek(),
+                EdIntent::ShowDrive => self.show_drive(),
                 EdIntent::DevicePage(page) => {
                     self.elek.page = page;
                     self.enter_full_elek();
@@ -921,8 +1034,11 @@ impl App {
                 EdIntent::SetGrid(n) => self.set_kit_grid(n),
                 EdIntent::RenameKit(name) => self.rename_kit(&name),
                 EdIntent::SendToDevice => self.begin_send_back(),
-                EdIntent::SaveToSlot => self.save_to_slot(),
+                EdIntent::SaveToSlot(pick) => self.save_to_slot(pick),
+                EdIntent::SaveOverOriginal => self.ask_overwrite_original(),
                 EdIntent::ShowInSource(p) => self.show_in_source(&p),
+                EdIntent::SliceInPool(i) => self.slice_in_pool(i),
+                EdIntent::OriginInPool => self.origin_in_pool(),
             }
         }
     }

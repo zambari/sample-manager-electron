@@ -85,6 +85,8 @@ pub enum Ev {
     Note { job: u64, text: String },
     /// A device file and a local file now known to hold the same sample.
     Linked(crate::links::Link),
+    /// Fingerprints made off the UI thread (see [`crate::prints`]).
+    Printed(crate::prints::Found),
 }
 
 /// Files with identical contents: `keep` has the shortest name.

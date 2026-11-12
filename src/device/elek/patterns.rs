@@ -12,7 +12,7 @@
 //! hold. See `project_management_discovery.md` §8.
 
 use super::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const PATTERNS: usize = 128;
 
@@ -260,22 +260,26 @@ pub struct Cell {
     pub src: Option<u8>,
     /// New kit name, if renamed.
     pub name: Option<String>,
-    /// Tracks taken from another pattern: track → pattern (as `src`; `None`
-    /// = an empty pattern's track). Same track number on both sides.
+    /// Track events (trigs, length, p-locks) taken from another pattern:
+    /// track → pattern (as `src`; `None` = an empty pattern's track). Same
+    /// track number on both sides.
     pub tracks: BTreeMap<u8, Option<u8>>,
+    /// Track sounds (kit sound, MIDI-track bit) taken from another pattern,
+    /// the same way.
+    pub sounds: BTreeMap<u8, Option<u8>>,
 }
 
 impl Cell {
     pub fn as_read(slot: usize) -> Self {
-        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new() }
+        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new() }
     }
 
     pub fn empty() -> Self {
-        Self { src: None, name: None, tracks: BTreeMap::new() }
+        Self { src: None, name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new() }
     }
 
     pub fn with_src(src: u8) -> Self {
-        Self { src: Some(src), name: None, tracks: BTreeMap::new() }
+        Self { src: Some(src), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new() }
     }
 
     /// The pattern track `t` comes from (`None`: an empty pattern).
@@ -293,9 +297,28 @@ impl Cell {
         }
     }
 
+    /// The pattern track `t`'s sound comes from (`None`: an empty pattern).
+    pub fn sound_src(&self, t: usize) -> Option<u8> {
+        self.sounds.get(&(t as u8)).copied().unwrap_or(self.src)
+    }
+
+    /// Take track `t`'s sound from pattern `from`, like `set_track`.
+    pub fn set_sound(&mut self, t: usize, from: Option<u8>) {
+        if from == self.src {
+            self.sounds.remove(&(t as u8));
+        } else {
+            self.sounds.insert(t as u8, from);
+        }
+    }
+
+    /// Tracks with pasted events or sound.
+    pub fn pasted_tracks(&self) -> BTreeSet<u8> {
+        self.tracks.keys().chain(self.sounds.keys()).copied().collect()
+    }
+
     /// Every pattern this cell reads from.
     pub fn sources(&self) -> impl Iterator<Item = u8> + '_ {
-        self.src.into_iter().chain(self.tracks.values().flatten().copied())
+        self.src.into_iter().chain(self.tracks.values().chain(self.sounds.values()).flatten().copied())
     }
 }
 
@@ -691,13 +714,15 @@ impl Patterns {
             Some(s) => src_data(s as usize),
             None => self.blank.clone()?,
         };
-        for (&t, from) in &cell.tracks {
+        let parts = cell.tracks.iter().map(|(t, f)| (*t, *f, true)).chain(cell.sounds.iter().map(|(t, f)| (*t, *f, false)));
+        for (t, from, events) in parts {
             let s = match from {
-                Some(s) => src_data(*s as usize),
+                Some(s) => src_data(s as usize),
                 None => self.blank.clone()?,
             };
-            if let Err(e) = self.splice_track(&mut d, &s, t as usize) {
-                log(format!("{}: track {} not copied: {e}", label(i), t + 1));
+            if let Err(e) = self.splice_track(&mut d, &s, t as usize, events) {
+                let what = if events { "events" } else { "sound" };
+                log(format!("{}: track {} {what} not copied: {e}", label(i), t + 1));
                 return None;
             }
         }
@@ -733,11 +758,11 @@ impl Patterns {
         None
     }
 
-    /// Copy track `t` of payload `s` over track `t` of `d`: its sequencer
-    /// track (trigs, notes, length, scale…), its p-lock rows and, for kit
-    /// tracks, its sound (sample, parameters) and MIDI-track bit. The p-lock
-    /// rows are packed to the front afterwards, in their old order.
-    pub(super) fn splice_track(&self, d: &mut [u8], s: &[u8], t: usize) -> Result<(), String> {
+    /// Copy track `t` of payload `s` over track `t` of `d`. `events`: its
+    /// sequencer track (trigs, notes, length, scale…) and its p-lock rows,
+    /// packed to the front afterwards in their old order. Else, for kit
+    /// tracks, its sound (sample, parameters) and MIDI-track bit.
+    pub(super) fn splice_track(&self, d: &mut [u8], s: &[u8], t: usize, events: bool) -> Result<(), String> {
         if let Some(why) = self.track_copy_blocked() {
             return Err(why);
         }
@@ -746,17 +771,21 @@ impl Patterns {
         if t >= SEQ_TRACKS || d.len() != s.len() || d.len() != g.len {
             return Err("track or payload size out of range".into());
         }
-        let mut copy = |at: usize, n: usize| d[at..at + n].copy_from_slice(&s[at..at + n]);
-        copy(4 + t * stride, stride);
-        if t < g.model.kit_tracks() {
-            let (Some(s0), Some(sz)) = (g.sounds, g.ssize) else { unreachable!() };
-            copy(g.kit + s0 + t * sz, sz);
-            if let Some(m) = g.midi_mask {
-                let bit = 1u16 << t;
-                let v = (be16(d, m).unwrap_or(0) & !bit) | (be16(s, m).unwrap_or(0) & bit);
-                d[m..m + 2].copy_from_slice(&v.to_be_bytes());
+        if !events {
+            if t < g.model.kit_tracks() {
+                let (Some(s0), Some(sz)) = (g.sounds, g.ssize) else { unreachable!() };
+                let at = g.kit + s0 + t * sz;
+                d[at..at + sz].copy_from_slice(&s[at..at + sz]);
+                if let Some(m) = g.midi_mask {
+                    let bit = 1u16 << t;
+                    let v = (be16(d, m).unwrap_or(0) & !bit) | (be16(s, m).unwrap_or(0) & bit);
+                    d[m..m + 2].copy_from_slice(&v.to_be_bytes());
+                }
             }
+            return Ok(());
         }
+        let at = 4 + t * stride;
+        d[at..at + stride].copy_from_slice(&s[at..at + stride]);
         let row = empty.len();
         let rows = |x: &[u8]| -> Vec<Vec<u8>> { (0..PLOCK_ROWS).map(|r| x[pl + r * row..pl + (r + 1) * row].to_vec()).collect() };
         let mut keep: Vec<Vec<u8>> = rows(d).into_iter().filter(|r| r != empty && r[1] as usize != t).collect();

@@ -17,7 +17,7 @@ pub use elek::{file, patterns, Cell, ElekCmd, ElekEv, ElekProject, PatState, Poo
 mod presence;
 pub use presence::{Presence, presence, start as watch_presence};
 mod proto;
-mod sample;
+pub(crate) mod sample;
 mod transfer;
 mod worker;
 
@@ -164,6 +164,18 @@ fn refused<T>(what: impl Into<String>) -> R<T> {
 /// A device path as the device (and the user) expect it: rooted, with `/`
 /// separators. On Windows, `Path::join` inserts `\`, which the device
 /// would read as part of a file name.
+/// Error suffix for a read of the device's factory content, which it
+/// won't let anything copy off. The app spots it to explain once per batch.
+pub const FACTORY_LOCKED: &str = "factory samples can't be copied off the device";
+
+/// Under the device's `/factory` folder.
+pub fn is_factory(p: &Path) -> bool {
+    dev_str(p)
+        .split('/')
+        .find(|s| !s.is_empty())
+        .is_some_and(|s| s.eq_ignore_ascii_case("factory"))
+}
+
 pub fn dev_str(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
     if s.starts_with('/') {

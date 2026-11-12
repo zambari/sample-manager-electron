@@ -408,6 +408,10 @@ impl App {
         self.errors_logged = self.errors.len();
 
         let waiting = self.active_jobs.len().saturating_sub(1);
+        // The ETA clock starts when the first job of the run starts moving.
+        if self.batch.started_at.is_none() && self.active_jobs.iter().any(|j| j.started) {
+            self.batch.started_at = Some(std::time::Instant::now());
+        }
         if let Some(a) = self.shown_job() {
             // The whole queue as one run: finished jobs plus every live one.
             // A waiting device job counts its top-level items until it starts
@@ -454,8 +458,24 @@ impl App {
             } else {
                 "Starting…"
             };
+            // Average rate over the run so far times the bytes still to go.
+            // Wait a few seconds so the first file's ramp-up doesn't skew it.
+            let eta = b
+                .started_at
+                .map(|t| t.elapsed().as_secs_f64())
+                .filter(|&secs| bytes_known && secs >= 3.0 && done_bytes > 0)
+                .map(|secs| {
+                    let left = total_bytes.saturating_sub(done_bytes) as f64;
+                    let mins = (left * secs / done_bytes as f64 / 60.0).ceil() as u64;
+                    if mins <= 1 {
+                        " · <1 min left".to_owned()
+                    } else {
+                        format!(" · ~{mins} min left")
+                    }
+                })
+                .unwrap_or_default();
             let text = format!(
-                "{}/{} files · {bytes} · {label}",
+                "{}/{} files · {bytes}{eta} · {label}",
                 done_items.min(total_items),
                 total_items
             );

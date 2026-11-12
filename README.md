@@ -64,13 +64,35 @@ tempo together, ±50 %) for previewing. Shift-drag for fine moves,
 double-click to recentre. It never changes the file, and resets on each
 new sample.
 
-*Export → Destination* writes the selection, with the chosen channel mode,
-into the folder open on the right. If the name is taken you can pick
-another or overwrite.
+**Saving.** The File row has three controls, and each names where it writes:
 
-**Destination (right).** The target folder, with the same tabs and
-browsing tools as the source. It can be a local folder or the +Drive of a
-Digitakt (or another Elektron sampler) over USB.
+- **Save over *file*** (⌘S) writes what you hear back over the one thing the
+  open sample belongs to. For a sample opened from a pool slot that is the
+  slot (**⬆ Save → slot 012**: uploaded next to the +Drive original, put in
+  the slot, pushed). For a kit it is the kit's own file, once it has one;
+  until then it reads *Save (export first)*. A kit never saves over a sample
+  its slices came from, even when it was started from one.
+- **Export → …** (↩) writes the selection, with the chosen channel mode, as
+  a new file into the folder open on the right. If the name is taken you
+  can pick another or overwrite. The button names the target when it isn't
+  a local folder: **Export → +Drive /samples/…** for a destination tab on
+  the device, **Export → slot 012** for a sample opened from a pool slot
+  (same as its Save).
+- **Save to ⏷** lists every other place: over the local original a device
+  copy came from, into the slot selected in the sample pool (empty, or
+  replacing what's there after a question), into the first empty slot, or
+  as a new file next to its device original on the +Drive.
+- With a kit showing, **Export and close** is the highlighted button (the
+  usual way to finish a kit); plain **Export kit** keeps it open. Save to ⏷
+  has both, plus the pool slots: the whole kit goes into a slot as one
+  sample, and the kit stays as it is in the editor.
+
+**Destination (right).** A switch at the top picks what the right column
+shows: **Files** (local folders, with the same tabs and browsing tools as
+the source), **Sample pool** (the slots of the project loaded on the
+device) or **+Drive** (the device's storage over USB). The **+Drive** tab
+next to Samples / Patterns in the Device group does the same. Commit and
+drops land in Files or the +Drive, whichever was shown last.
 
 **Commit to destination** (top right) copies the source selection into the
 active destination tab. If a single file is open in the editor, it is
@@ -248,8 +270,8 @@ afford to lose.
   device. While the local file is unchanged, the device file opens and
   plays straight from it. Right-click for *Open local copy in editor*,
   *Show local copy in other pane* or *Show on device*.
-- **Send to device as…** uploads an edited sample as a new file next to
-  the device file it came from, never over it.
+- **Save to ⏷ → New file next to …** uploads an edited sample as a new file
+  next to the device file it came from, never over it.
 - Transfers to and from the Digitakt run in a queue. Creating and renaming
   folders jumps ahead of queued file transfers, so the folder is ready
   before the files arrive.

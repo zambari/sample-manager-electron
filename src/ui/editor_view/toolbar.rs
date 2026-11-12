@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<EdIntent>) {
+pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, drive_shown: bool, out: &mut Vec<EdIntent>) {
     ui.horizontal(|ui| {
         if ui.add(crate::ui::theme::mode_title("Sample Editor", true, focused)).clicked() {
             out.push(EdIntent::TookFocus);
@@ -16,8 +16,11 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
                 out.push(EdIntent::ElekMode);
             }
             if crate::device::presence().available() {
-                if let Some(page) = crate::ui::elek_view::device_pages(ui, None) {
-                    out.push(EdIntent::DevicePage(page));
+                use crate::ui::elek_view::DevicePick;
+                match crate::ui::elek_view::device_pages(ui, None, drive_shown) {
+                    Some(DevicePick::Page(page)) => out.push(EdIntent::DevicePage(page)),
+                    Some(DevicePick::Drive) => out.push(EdIntent::ShowDrive),
+                    None => {}
                 }
             }
         });
@@ -33,9 +36,75 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, out: &mut Vec<
     panel_toggles(ui, &mut ed.prefs.panels, ed.is_kit);
 }
 
-/// Sample / Kit switch, plus the kit's own buttons.
+/// Sample / Kit tabs (drawn like the file panes' tabs), then the Kit
+/// section with the kit's own controls.
 pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
+    ui.add_space(4.0);
+    slot_tabs(ui, ed, s, out);
+    if ed.prefs.panels.kit {
+        kit_section(ui, ed, s, out);
+    }
+}
+
+/// The Kit section: → add (K), slot fill boxes, grid picker, Start New Grid Kit.
+fn kit_section(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
+    let show_start = !s.showing_kit && ed.current.is_some();
+    if s.kit_name.is_none() {
+        // No kit open: only the Start button, highlighted.
+        if show_start {
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    RichText::new("Start New Grid Kit").color(crate::ui::theme::ON_ACCENT),
+                )
+                .fill(crate::ui::theme::ACCENT);
+                if ui
+                    .add(btn)
+                    .on_hover_text("Make this file the slice kit, to add slices to its end")
+                    .clicked()
+                {
+                    out.push(EdIntent::UseAsKit);
+                }
+            });
+        }
+        return;
+    }
+    section_header(ui, "Kit");
     ui.horizontal(|ui| {
+        if let Some(k) = &s.kit_name {
+            let fill_total = match s.kit_fill {
+                (n, Some(g)) if !s.showing_kit || n > 1 => {
+                    Some(if s.kit_grid == Some(crate::editor::AUTO_GRID) { g.max(8) } else { g })
+                }
+                _ => None,
+            };
+            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
+                out.push(EdIntent::AddSlice);
+            }
+            if let (n, Some(total)) = (s.kit_fill.0, fill_total) {
+                fill_boxes(ui, n, total);
+            }
+            grid_picker(ui, s.kit_grid, out);
+        }
+        if show_start {
+            // Pinned to the right edge; the rest of the row flows from the left.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Start New Grid Kit")
+                    .on_hover_text("Make this file the slice kit, to add slices to its end")
+                    .clicked()
+                {
+                    out.push(EdIntent::UseAsKit);
+                }
+            });
+        }
+    });
+}
+
+/// Sample tab, kit tab(s) and the ▾ kit menu, with a hairline under the
+/// row that breaks under the selected tab, like the file panes' tab strip.
+fn slot_tabs(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
+    let mut active_rect = None;
+    let row = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         let sample = s.sample_name.as_deref().unwrap_or("—");
         let mut label = crate::app::short_name(sample, 28);
@@ -50,42 +119,22 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
                 tip = format!("{}\n{tip}", p.display());
             }
         }
-        if ui
-            .selectable_label(!s.showing_kit, label)
-            .on_hover_text(tip)
-            .clicked()
-        {
+        let resp = ui
+            .add(crate::ui::theme::pane_tab(&label, !s.showing_kit))
+            .on_hover_text(tip);
+        if !s.showing_kit {
+            active_rect = Some(resp.rect);
+        }
+        if resp.clicked() {
             out.push(EdIntent::ShowKit(false));
         }
-        let show_start = !s.showing_kit && ed.current.is_some();
         // No kit yet: nothing to show until K starts one.
         if let Some(k) = &s.kit_name {
-            // Order: → add, slot boxes, slot picker, kit tabs, ▾ menu, Start kit.
-            let fill_total = match s.kit_fill {
-                (n, Some(g)) if !s.showing_kit || n > 1 => {
-                    Some(if s.kit_grid == Some(crate::editor::AUTO_GRID) { g.max(8) } else { g })
-                }
-                _ => None,
-            };
-            if !s.showing_kit && add_slice_button(ui, ed.current.is_some(), k) {
-                out.push(EdIntent::AddSlice);
-            }
-            if let (n, Some(total)) = (s.kit_fill.0, fill_total) {
-                fill_boxes(ui, n, total);
-            }
-            grid_picker(ui, s.kit_grid, out);
-            ui.separator();
-            // Room the controls after the kit tabs need.
+            // Room the ▾ menu after the kit tabs needs.
             let gap = ui.spacing().item_spacing.x;
-            let reserve = 30.0 // ▾ menu
-                + if show_start {
-                    button_text_width(ui, "Start kit") + 2.0 * ui.spacing().button_padding.x + gap
-                } else {
-                    0.0
-                }
-                + 4.0 * gap;
+            let reserve = 30.0 + 4.0 * gap;
             let all_fit = s.kits.len() > 1 && {
-                let tab_w = |t: &str| button_text_width(ui, t) + 2.0 * ui.spacing().button_padding.x + gap;
+                let tab_w = |t: &str| button_text_width(ui, t) + 2.0 * TAB_PAD_X + gap;
                 let active = tab_w(&format!("[00/00] {}      ●", crate::app::short_name(k, 28)));
                 let parked: f32 = s
                     .kits
@@ -99,10 +148,14 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
                 // Every open kit as its own tab, in name order.
                 for e in &s.kits {
                     match e.parked {
-                        None => kit_tab(ui, k, s, out),
+                        None => {
+                            if let Some(r) = kit_tab(ui, k, s, out) {
+                                active_rect = Some(r);
+                            }
+                        }
                         Some(i) => {
                             if ui
-                                .selectable_label(false, parked_label(e))
+                                .add(crate::ui::theme::pane_tab(&parked_label(e), false))
                                 .on_hover_text(format!("{} — click to make it the kit K adds to", e.name))
                                 .clicked()
                             {
@@ -111,28 +164,30 @@ pub(super) fn slot_bar(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdInte
                         }
                     }
                 }
-            } else {
-                kit_tab(ui, k, s, out);
+            } else if let Some(r) = kit_tab(ui, k, s, out) {
+                active_rect = Some(r);
             }
             kit_switcher(ui, ed, s, !all_fit, out);
         }
-        if show_start {
-            if s.kit_name.is_none() {
-                ui.separator();
-            }
-            // Pinned to the right edge; the rest of the row flows from the left.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("Start kit")
-                    .on_hover_text("Make this file the slice kit, to add slices to its end")
-                    .clicked()
-                {
-                    out.push(EdIntent::UseAsKit);
-                }
-            });
-        }
     });
+    // Hairline under the strip, open under the selected tab.
+    let row = row.response.rect;
+    if let Some(a) = active_rect {
+        let y = a.bottom() - 0.5;
+        let stroke = egui::Stroke::new(1.0, Color32::from_gray(52));
+        let right = ui.max_rect().right();
+        let p = ui.painter();
+        if a.left() > row.left() {
+            p.hline(row.left()..=a.left(), y, stroke);
+        }
+        if a.right() < right {
+            p.hline(a.right()..=right, y, stroke);
+        }
+    }
 }
+
+/// Horizontal padding inside a `theme::pane_tab`, for fitting tabs.
+const TAB_PAD_X: f32 = 10.0;
 
 /// A parked kit's tab text.
 fn parked_label(e: &KitEntry) -> String {
@@ -158,14 +213,15 @@ fn add_slice_button(ui: &mut Ui, enabled: bool, kit: &str) -> bool {
     let resp = ui
         .add_enabled(
             enabled,
-            egui::Button::new("").min_size(egui::vec2(h * 1.6, h)),
+            egui::Button::new("")
+                .fill(crate::ui::theme::ACCENT)
+                .min_size(egui::vec2(h * 1.6, h)),
         )
         .on_hover_text(format!(
             "K — add the selection (as you hear it) to the end of {kit}"
         ));
-    let color = ui.style().interact(&resp).fg_stroke.color;
     let color = if enabled {
-        color
+        crate::ui::theme::ON_ACCENT
     } else {
         ui.visuals().weak_text_color()
     };
@@ -208,7 +264,8 @@ fn fill_boxes(ui: &mut Ui, filled: usize, total: usize) {
         }
         let r = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - side / 2.0), egui::vec2(side, side));
         if i < filled {
-            let c = if full { crate::ui::theme::ON_ACCENT } else { crate::ui::theme::ACCENT_BRIGHT };
+            // A full kit is done (nothing more to add): drawn muted, not bright.
+            let c = if full { Color32::from_gray(78) } else { crate::ui::theme::ACCENT_BRIGHT };
             ui.painter().rect_filled(r, 1.0, c);
         } else {
             ui.painter().rect_stroke(
@@ -265,7 +322,8 @@ fn close_x(ui: &mut Ui, tab: egui::Rect, dirty: bool) -> bool {
 
 /// The Kit tab. Clicking it while the kit is showing (or double-clicking it)
 /// turns it into a name field: ↩ or clicking away renames, Esc cancels.
-fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
+fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) -> Option<egui::Rect> {
+    let mut rect = None;
     let buf_id = egui::Id::unique("kit_rename_buf");
     let field_id = egui::Id::unique("kit_rename_field");
     let mut buf: Option<String> = ui.data(|d| d.get_temp(buf_id));
@@ -305,11 +363,14 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
         }
         // Room on the right for the × painted inside the tab.
         label.push_str("     ");
-        let resp = ui.selectable_label(s.showing_kit, label).on_hover_text(
+        let resp = ui.add(crate::ui::theme::pane_tab(&label, s.showing_kit)).on_hover_text(
             "B — the slice kit. [n] = slices so far; [n/8] = slots used of the grid's 8.\n\
              K adds the sample's selection to its end. ⌘S here saves the whole kit.\n\
              Click again (or double-click) to rename it — a saved kit's file is renamed too.",
         );
+        if s.showing_kit {
+            rect = Some(resp.rect);
+        }
         close_all_menu(&resp, s, out);
         if close_x(ui, resp.rect, s.kit_dirty) {
             out.push(EdIntent::CloseKit);
@@ -332,6 +393,7 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) {
             d.remove::<String>(buf_id);
         }
     });
+    rect
 }
 
 /// ▾ menu next to the Kit tab: the open kits, to pick which one K adds to,
@@ -431,11 +493,21 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
         ui.spacing_mut().item_spacing.x = 8.0;
         let items: Vec<(&mut bool, &str, &str)> = vec![
             (
+                &mut p.kit,
+                "Kit",
+                "Slice kit row: → add (K), slot fill, grid, Start kit",
+            ),
+            (
                 &mut p.transport,
                 "Transport",
                 "Play, loop, follow, snap and auto-load / auto-play",
             ),
             (&mut p.gain, "Gain", "Gain and normalize"),
+            (
+                &mut p.histogram,
+                "Histogram",
+                "Level histogram of the region with the gain applied, and lead / tail silence stats",
+            ),
             (&mut p.tools, "Tools", "Undo, cut / paste, crop, loop scaling"),
             (
                 &mut p.nums,
@@ -509,6 +581,35 @@ fn origin_line(ui: &mut Ui, o: &super::Origin, out: &mut Vec<EdIntent>) {
                 out.push(EdIntent::ShowInSource(orig.clone()));
             }
         }
+        if let Some((slot, same, by_name)) = &o.pool {
+            ui.label("·");
+            let (text, tip, bad) = match (same, by_name) {
+                (Some(true), _) => (format!("pool {slot}"), format!("Slot {slot} holds this audio"), false),
+                (Some(false), true) => (
+                    format!("pool {slot}: not identical"),
+                    format!("Slot {slot} has a file of the same name, but its audio differs from this file"),
+                    true,
+                ),
+                (Some(false), false) => (
+                    format!("pool {slot}: not identical"),
+                    format!("Slot {slot} came from this file, but the file changed since"),
+                    true,
+                ),
+                (None, _) => (
+                    format!("pool {slot}? (same name)"),
+                    format!("Slot {slot} has a file of the same name. Not compared yet: fetch it for preview to check the audio"),
+                    false,
+                ),
+            };
+            let t = RichText::new(text);
+            if ui
+                .link(if bad { t.color(warn) } else { t })
+                .on_hover_text(format!("{tip}\nClick: show the slot in the sample pool"))
+                .clicked()
+            {
+                out.push(EdIntent::OriginInPool);
+            }
+        }
     });
 }
 
@@ -540,107 +641,110 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
         } else {
             ""
         };
-        // Save: over the open file. A kit only has one once it's been exported.
-        let (can, tip) = if showing_kit {
-            if !slots.kit_on_disk {
-                (false, "Not saved yet — Export kit names it and writes it into the destination. After that, Save in place writes over that file. (⌘S on an unsaved kit runs Export.)".to_owned())
-            } else {
-                (ed.can_save(), "⌘S — write the whole kit back over its own file (the kit file, not the samples it came from)".to_owned())
-            }
-        } else {
-            (ed.can_save(), "⌘S — write what you hear (with gain) back over the original file; asks whether to trim when in / out don't span the whole file".to_owned())
-        };
-        // Opened from a device pool slot: one button saves it back there.
-        if let Some(slot) = slots.pool_slot.as_ref().filter(|_| !showing_kit) {
-            let label = if ed.exporting { "Updating…".to_owned() } else { format!("⬆ Update on device{mono} (slot {slot})") };
+        let busy = ed.exporting;
+        let pool_slot = slots.pool_slot.as_ref().filter(|_| !showing_kit);
+        // Save: always over the one thing this file belongs to, named on
+        // the button. A pool sample's is its slot; a kit's is its own file,
+        // once it has one; a sample's is the file itself.
+        let short = |n: &str| crate::app::short_name(n, 28);
+        if let Some(slot) = pool_slot {
+            let label = if busy { "Updating…".to_owned() } else { format!("⬆ Save → slot {slot}{mono}") };
             let tip = format!(
-                "⌘S / ↩ — send what you hear (trimmed, with gain) to slot {slot} and push, so the device plays it right away. \
-                 The first update is uploaded as a new file next to the original (which stays, other projects may use it); \
-                 later ones replace that copy."
+                "⌘S — send what you hear (trimmed, with gain) to slot {slot} and push, so the device plays it right away. \
+                 The first save uploads a new file next to the +Drive original (which stays: other projects may use it); \
+                 later saves replace that copy. Your local files aren't touched."
             );
-            let button = egui::Button::new(egui::RichText::new(label).color(crate::ui::theme::ON_ACCENT))
+            let button = egui::Button::new(RichText::new(label).color(crate::ui::theme::ON_ACCENT))
                 .fill(crate::ui::theme::ACCENT);
             if ui
-                .add_enabled(has && can && !ed.exporting, button)
+                .add_enabled(has && ed.can_save() && !busy, button)
                 .on_hover_text(&tip)
                 .on_disabled_hover_text(format!("Nothing changed yet. {tip}"))
                 .clicked()
             {
                 out.push(EdIntent::SaveInPlace);
             }
-            return;
+        } else {
+            let (label, enabled, tip) = if showing_kit {
+                match slots.kit_name.as_deref().filter(|_| slots.kit_on_disk) {
+                    Some(k) => (
+                        format!("💾 Save over {}{mono}", short(k)),
+                        ed.can_save(),
+                        format!("⌘S — write the whole kit back over its own file, {k}. The samples its slices came from are never touched."),
+                    ),
+                    None => (
+                        "💾 Save (export first)".to_owned(),
+                        false,
+                        "This kit has no file of its own yet: Export kit writes it into the destination, and Save writes over that file from then on. \
+                         The samples its slices came from are never saved over. (⌘S on it runs Export.)"
+                            .to_owned(),
+                    ),
+                }
+            } else {
+                let name = slots.sample_name.as_deref().unwrap_or("the file");
+                (
+                    format!("💾 Save over {}{mono}", short(name)),
+                    ed.can_save(),
+                    format!("⌘S — write what you hear (with gain) back over {name}, the file that's open; asks whether to trim when in / out don't span the whole file"),
+                )
+            };
+            let label = if busy { "Saving…".to_owned() } else { label };
+            if ui
+                .add_enabled(has && enabled && !busy, egui::Button::new(label))
+                .on_hover_text(&tip)
+                .on_disabled_hover_text(&tip)
+                .clicked()
+            {
+                out.push(EdIntent::SaveInPlace);
+            }
         }
-        let label = if ed.exporting { "Saving…".to_owned() } else { format!("💾 Save in place{mono}") };
-        let enabled = has && can && !ed.exporting;
-        if ui
-            .add_enabled(enabled, egui::Button::new(label))
-            .on_hover_text(&tip)
-            .on_disabled_hover_text(&tip)
-            .clicked()
-        {
-            out.push(EdIntent::SaveInPlace);
-        }
-        // Export: always a new file in the destination ("save as").
+        // Export: a new file in the destination ("save as"), named on the
+        // button when it isn't a local folder. A pool sample's destination
+        // is its slot. The main action is solid accent: Export for a sample
+        // (unless Save already is, for a slot), Export and close for a kit.
+        let to = match (pool_slot, &slots.export_drive) {
+            (Some(slot), _) => format!("slot {slot}"),
+            (None, Some(dir)) => format!("+Drive {}", crate::app::short_name(dir, 28)),
+            (None, None) => "Destination".to_owned(),
+        };
         let (label, tip) = if showing_kit {
             (
-                format!("Export kit{mono} → Destination"),
-                "↩ — write the whole kit (in / out ignored), with its slice markers, as a new file in the active destination tab. A taken name asks for another one.",
+                format!("Export kit{mono} → {to}"),
+                "↩ — write the whole kit (in / out ignored), with its slice markers, as a new file in the active destination tab, and keep it open. A taken name asks for another one.".to_owned(),
+            )
+        } else if let Some(slot) = pool_slot {
+            (
+                format!("Export{mono} → slot {slot}"),
+                format!("↩ — same as Save here: this sample's destination is its slot {slot}. Save to ⏷ has the other places."),
             )
         } else {
             (
-                format!("Export{mono} → Destination"),
-                "↩ — write the trimmed, gained region as a new WAV into the active destination tab",
+                format!("Export{mono} → {to}"),
+                match &slots.export_drive {
+                    Some(dir) => format!("↩ — upload the trimmed, gained region as a new file into {dir} on the device (the active destination tab)"),
+                    None => "↩ — write the trimmed, gained region as a new WAV into the active destination tab".to_owned(),
+                },
             )
         };
-        // Export is the main action in both sample and kit mode: always solid
-        // accent. Save in place overwrites the original, so it stays plain.
-        let button = egui::Button::new(egui::RichText::new(label).color(crate::ui::theme::ON_ACCENT))
-            .fill(crate::ui::theme::ACCENT);
-        if ui
-            .add_enabled(has && can_export && !ed.exporting, button)
-            .on_hover_text(tip)
-            .clicked()
-        {
+        let accent = |label: String| egui::Button::new(RichText::new(label).color(crate::ui::theme::ON_ACCENT)).fill(crate::ui::theme::ACCENT);
+        // A pool sample's Export does what its (accent) Save does: plain.
+        let button = if showing_kit || pool_slot.is_some() { egui::Button::new(label) } else { accent(label) };
+        let enabled = has && !busy && if pool_slot.is_some() { ed.can_save() } else { can_export };
+        if ui.add_enabled(enabled, button).on_hover_text(tip).clicked() {
             out.push(EdIntent::Export);
         }
         if showing_kit
             && ui
-                .add_enabled(has && can_export && !ed.exporting, egui::Button::new("Export and close"))
-                .on_hover_text(
-                    "Export the kit as above, then close it once it's written. \
-                     Nothing closes if the export is cancelled or fails.",
-                )
+                .add_enabled(has && can_export && !busy, accent(format!("Export{mono} and close")))
+                .on_hover_text(format!(
+                    "Export the kit into {to} as above, then close it once it's written: the usual way to finish a kit. \
+                     Nothing closes if the export is cancelled or fails."
+                ))
                 .clicked()
         {
             out.push(EdIntent::ExportAndClose);
         }
-        // One empty slot selected in the device view: fill it from here.
-        if let Some(slot) = slots.empty_slot.as_ref().filter(|_| !showing_kit) {
-            let tip = format!(
-                "Send what you hear (trimmed, with gain) to the device as a new file, put it in empty slot {slot} and push, \
-                 so the device plays it right away. After that, saving updates that slot."
-            );
-            if ui
-                .add_enabled(has && !ed.exporting, egui::Button::new(format!("⬆ Save to slot{mono} ({slot})")))
-                .on_hover_text(tip)
-                .clicked()
-            {
-                out.push(EdIntent::SaveToSlot);
-            }
-        }
-        if let Some(home) = slots.device_home.as_ref().filter(|_| !showing_kit) {
-            let tip = format!(
-                "Upload what you hear as a new file next to {home} on the device, \
-                 with a name you pick. The original stays."
-            );
-            if ui
-                .add_enabled(has && !ed.exporting, egui::Button::new("⬆ To device as…"))
-                .on_hover_text(tip)
-                .clicked()
-            {
-                out.push(EdIntent::SendToDevice);
-            }
-        }
+        save_to_menu(ui, has && !busy, showing_kit, slots, &mono, out);
         if let Some(f) = ed.fold() {
             // Pinned to the right edge of the row.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -649,6 +753,104 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
                     .on_hover_text("Playing folded to mono. M toggles.");
             });
         }
+    });
+}
+
+/// "Save to ▾": every other place what you hear can go, each saying
+/// where. Overwrites ask first.
+fn save_to_menu(ui: &mut Ui, enabled: bool, kit: bool, slots: &Slots, mono: &str, out: &mut Vec<EdIntent>) {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.menu_button("Save to ⏷", |ui| {
+            ui.set_min_width(300.0);
+            let head = |ui: &mut Ui, t: &str| {
+                ui.label(RichText::new(t).small().weak());
+            };
+            let item = |ui: &mut Ui, on: bool, label: String, tip: &str| {
+                ui.add_enabled(on, egui::Button::new(label)).on_hover_text(tip).on_disabled_hover_text(tip).clicked()
+            };
+            head(ui, "THIS COMPUTER");
+            if let Some((orig, _)) = slots.origin.as_ref().filter(|_| !kit).and_then(|o| o.original.as_ref()) {
+                let name = orig.file_name().unwrap_or_default().to_string_lossy();
+                if item(
+                    ui,
+                    true,
+                    format!("Over the original, {}{mono}…", crate::app::short_name(&name, 32)),
+                    &format!("Write what you hear over {}, the local file this device sample was uploaded from. Asks first.", orig.display()),
+                ) {
+                    out.push(EdIntent::SaveOverOriginal);
+                }
+            }
+            let to = match &slots.export_drive {
+                Some(dir) => format!("+Drive {}", crate::app::short_name(dir, 28)),
+                None => "Destination".to_owned(),
+            };
+            if kit {
+                if item(ui, true, format!("New file in {to}, keep the kit open{mono}"), "Same as Export kit (↩)") {
+                    out.push(EdIntent::Export);
+                }
+                if item(ui, true, format!("New file in {to}, then close the kit{mono}"), "Same as Export and close") {
+                    out.push(EdIntent::ExportAndClose);
+                }
+            } else if slots.pool_slot.is_none() {
+                if item(ui, true, format!("New file in {to}{mono}"), "Same as Export (↩)") {
+                    out.push(EdIntent::Export);
+                }
+            }
+            ui.separator();
+            head(ui, "SAMPLE POOL (device memory)");
+            match &slots.pool {
+                None => {
+                    ui.label(RichText::new("Read the device's project first (Device view → Load current project)").weak());
+                }
+                Some(p) => {
+                    if let Some(n) = p.note {
+                        ui.label(RichText::new(n).weak());
+                    }
+                    let sel_tip = "Select one slot in the Samples page (or the docked pool) to aim at it";
+                    let clicked = match &p.selected {
+                        Some((slot, None)) => item(
+                            ui,
+                            true,
+                            format!("Into selected slot {slot} (empty){mono}"),
+                            "Upload what you hear as a new +Drive file, put it in this slot and push. Saving after that updates the slot.",
+                        ),
+                        Some((slot, Some(name))) => item(
+                            ui,
+                            true,
+                            format!("Replace selected slot {slot} ({}){mono}…", crate::app::short_name(name, 24)),
+                            "Put what you hear into this slot in place of what it holds; patterns using the slot play it. Asks first.",
+                        ),
+                        None => item(ui, false, "Into the selected slot".to_owned(), sel_tip),
+                    };
+                    if clicked {
+                        out.push(EdIntent::SaveToSlot(SlotPick::Selected));
+                    }
+                    let (on, label) = match &p.first_free {
+                        Some(slot) => (true, format!("Into first empty slot ({slot}){mono}")),
+                        None => (false, "Into first empty slot (none left)".to_owned()),
+                    };
+                    if item(ui, on, label, "Upload what you hear as a new +Drive file, put it in the first empty slot and push.") {
+                        out.push(EdIntent::SaveToSlot(SlotPick::FirstFree));
+                    }
+                }
+            }
+            if kit {
+                return;
+            }
+            ui.separator();
+            head(ui, "+DRIVE (device files)");
+            match &slots.device_home {
+                Some(home) => {
+                    let tip = format!("Upload what you hear as a new file next to {home}, with a name you pick. The original stays.");
+                    if item(ui, true, format!("New file next to {}{mono}…", crate::app::short_name(home, 32)), &tip) {
+                        out.push(EdIntent::SendToDevice);
+                    }
+                }
+                None => {
+                    item(ui, false, "New file next to its device original…".to_owned(), "Only for samples that came from the device or went to it");
+                }
+            }
+        });
     });
 }
 
@@ -682,11 +884,11 @@ pub(super) fn toolbar(
             ed.prefs.play_from_in = !ed.prefs.play_from_in;
         }
         ui.separator();
-        ui.toggle_value(&mut ed.prefs.looping, "🔁 Loop").on_hover_text("L — loop the in/out region");
-        ui.toggle_value(&mut ed.prefs.follow_playback, "Follow")
+        ui.add(crate::ui::theme::soft_toggle(&mut ed.prefs.looping, "🔁 Loop")).on_hover_text("L — loop the in/out region");
+        ui.add(crate::ui::theme::soft_toggle(&mut ed.prefs.follow_playback, "Follow"))
             .on_hover_text("V — scroll the view along with the play cursor. Turn off to stay put while zoomed in on a loop end.");
         if ui
-            .toggle_value(&mut ed.prefs.snap_zero, "Snap to 0")
+            .add(crate::ui::theme::soft_toggle(&mut ed.prefs.snap_zero, "Snap to 0"))
             .on_hover_text("S — snap in/out points to the nearest zero crossing. Turning it on snaps the current selection.")
             .changed()
             && ed.prefs.snap_zero
@@ -696,9 +898,9 @@ pub(super) fn toolbar(
         // Nothing auto-loads into the kit, so these only matter for the sample.
         if !showing_kit {
             ui.separator();
-            ui.toggle_value(&mut ed.prefs.auto_load, "Auto-load")
+            ui.add(crate::ui::theme::soft_toggle(&mut ed.prefs.auto_load, "Auto-load"))
                 .on_hover_text("Load the sample under the file cursor");
-            ui.toggle_value(&mut ed.prefs.auto_play, "Auto-play")
+            ui.add(crate::ui::theme::soft_toggle(&mut ed.prefs.auto_play, "Auto-play"))
                 .on_hover_text("Play each sample as the cursor lands on it");
         }
     });
@@ -768,6 +970,9 @@ pub(super) fn toolbar(
             });
         });
     }
+    if pn.histogram && has {
+        super::level_strip::histogram_panel(ui, ed);
+    }
     if pn.tools {
         section_header(ui, "Tools");
         ui.horizontal_wrapped(|ui| {
@@ -807,14 +1012,14 @@ pub(super) fn toolbar(
             }
             ui.separator();
             if ui
-                .button("✂ Crop")
+                .button("✂ Trim")
                 .on_hover_text("C — load only the selected region, to zoom and fine-tune inside it. The file isn't changed.")
                 .clicked()
             {
                 ed.crop_to_selection();
             }
             if ui
-                .add_enabled(ed.crop.is_some(), egui::Button::new("Uncrop"))
+                .add_enabled(ed.crop.is_some(), egui::Button::new("UnTrim"))
                 .on_hover_text("⇧C — show the whole file again, keeping the selection")
                 .clicked()
             {

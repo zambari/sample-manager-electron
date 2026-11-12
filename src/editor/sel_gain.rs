@@ -16,7 +16,7 @@ pub(super) struct SelGain {
 
 impl Editor {
     /// The selection in whole-file frames.
-    fn sel_whole(&self) -> (usize, usize) {
+    pub(super) fn sel_whole(&self) -> (usize, usize) {
         let off = self.crop_offset();
         (self.sel.0 + off, self.sel.1 + off)
     }
@@ -31,7 +31,7 @@ impl Editor {
     }
 
     /// The base audio for a gain on the current selection.
-    fn sel_gain_base(&self) -> Option<Loaded> {
+    pub(super) fn sel_gain_base(&self) -> Option<Loaded> {
         match &self.sel_gain {
             Some(g) if g.rev == self.rev && g.range == self.sel_whole() => Some(g.base.clone()),
             _ => self.full.clone(),

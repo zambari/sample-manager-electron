@@ -454,22 +454,32 @@ impl App {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
         }
 
+        // The Destination's +Drive is a mode of the right column (its
+        // +DRIVE switch), not tabs: there the strip shows only local tabs,
+        // and none at all while the +Drive shows.
+        let local_only = role == Role::Dest;
+        if local_only && self.pane(role).active_tab().device {
+            return;
+        }
+        let shown = |t: &DirTab| !(local_only && t.device);
+
         // One row: tabs scroll sideways when they outgrow the pane, while the
         // + / device / × buttons stay pinned on the right.
-        let n_tabs = self.pane(role).tabs.len();
+        let n_tabs = self.pane(role).tabs.iter().filter(|t| shown(t)).count();
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if n_tabs > 1 && ui.add(crate::ui::theme::close_button(None, true)).on_hover_text("Close tab").clicked() {
                     close = Some(self.pane(role).active);
                 }
-                let mut dev_btn = theme::device_dimmed(ui, |ui| ui.small_button(theme::DEVICE_ICON))
-                    .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)");
-                if let Some(why) = crate::device::presence().problem() {
-                    dev_btn = dev_btn.on_hover_text(why);
-                }
-                if dev_btn.clicked()
-                {
-                    new_device_tab = true;
+                if !local_only {
+                    let mut dev_btn = theme::device_dimmed(ui, |ui| ui.small_button(theme::DEVICE_ICON))
+                        .on_hover_text("Open the Elektron device's +Drive in a new tab (USB MIDI)");
+                    if let Some(why) = crate::device::presence().problem() {
+                        dev_btn = dev_btn.on_hover_text(why);
+                    }
+                    if dev_btn.clicked() {
+                        new_device_tab = true;
+                    }
                 }
                 if ui.small_button("+").on_hover_text("New tab").clicked() {
                     new_tab = true;
@@ -518,6 +528,7 @@ impl App {
                                 .tabs
                                 .iter()
                                 .enumerate()
+                                .filter(|(_, t)| shown(t))
                                 .map(|(i, t)| (i, t.title(), t.loading, t.device))
                                 .collect();
 

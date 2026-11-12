@@ -140,6 +140,8 @@ pub enum ElekPage {
 
 pub enum ElekIntent {
     BackToEditor,
+    /// The +Drive tab next to Patterns: show the +Drive in the right column.
+    ShowDrive,
     ListProjects,
     Read,
     /// `force`: send even if the device's project changed since the read.
@@ -221,16 +223,29 @@ impl ElekState {
         self.entry(old as usize).is_empty() && !self.filling.contains_key(&old)
     }
 
-    /// The one selected slot, when it's empty and the pool can take a file:
-    /// `(position now, slot as read)`.
-    pub(crate) fn lone_empty_sel(&self) -> Option<(usize, u16)> {
-        let p = self.project.as_ref()?;
-        if self.sel.len() != 1 || p.read_only.is_some() || p.from_file.is_some() || self.edit_locked() {
+    /// The pool can take a file now: a project read from the device (not a
+    /// file, not read-only) and no device work in the way.
+    pub(crate) fn takes_files(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| p.read_only.is_none() && p.from_file.is_none()) && !self.edit_locked()
+    }
+
+    /// The one selected slot, empty or not, when the pool can take a file:
+    /// `(position now, slot as read)`. Slot 0 is never a target.
+    pub(crate) fn lone_sel(&self) -> Option<(usize, u16)> {
+        if self.sel.len() != 1 || !self.takes_files() {
             return None;
         }
         let pos = *self.sel.first()?;
         let old = *self.order.get(pos)?;
-        (pos > 0 && self.free(old)).then_some((pos, old))
+        (pos > 0 && !self.filling.contains_key(&old)).then_some((pos, old))
+    }
+
+    /// The first empty slot in the pool's current order.
+    pub(crate) fn first_free(&self) -> Option<(usize, u16)> {
+        if !self.takes_files() {
+            return None;
+        }
+        (1..self.order.len()).map(|pos| (pos, self.order[pos])).find(|&(_, old)| self.free(old))
     }
 
     /// Uses of entry `old` (as read) with the edits so far: an emptied slot
@@ -500,6 +515,14 @@ impl ElekState {
         let side = (0..panes).find(|&side| self.bank[side] == pos / BANK);
         self.ping_scroll = Some(side.unwrap_or(if self.docked { 0 } else { self.active }));
         true
+    }
+
+    /// The label of the first slot holding device file `key` (`A012`),
+    /// without touching the view.
+    pub fn slot_holding(&self, matches: impl Fn((u32, u32)) -> bool) -> Option<String> {
+        (1..self.order.len())
+            .find(|&s| self.key_at(s).is_some_and(&matches))
+            .map(|s| self.label(s))
     }
 
     fn key_at(&self, slot: usize) -> Option<(u32, u32)> {
@@ -942,8 +965,12 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
     theme::device_group(ui, |ui| {
         theme::device_switch(ui, true, true);
         if crate::device::presence().available() || st.project.is_some() {
-            if let Some(page) = device_pages(ui, Some(st.page)) {
-                st.page = page;
+            // The top tabs pick one place at a time: here a page is, so
+            // +Drive isn't lit even when the right column shows it.
+            match device_pages(ui, Some(st.page), false) {
+                Some(DevicePick::Page(page)) => st.page = page,
+                Some(DevicePick::Drive) => out.push(ElekIntent::ShowDrive),
+                None => {}
             }
         }
     });
@@ -969,17 +996,30 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
     });
 }
 
-/// Samples / Patterns: the Device's sub-pages, drawn small right after the
-/// Device switch. `active` is the page shown (`None` from the editor, where
-/// neither is). Returns the page clicked.
-pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>) -> Option<ElekPage> {
+/// What the Device group's small tabs pick: a centre page, or the +Drive
+/// in the right column.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum DevicePick {
+    Page(ElekPage),
+    Drive,
+}
+
+/// Samples / Patterns / +Drive: the Device's sub-pages, drawn small right
+/// after the Device switch. `active` is the page shown (`None` from the
+/// editor, where neither is); `drive` is whether the right column shows
+/// the +Drive. Returns what was clicked.
+pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>, drive: bool) -> Option<DevicePick> {
     theme::device_tab_strip(
         ui,
         &[
-            (ElekPage::Order, "Samples", "The sample pool in two side-by-side panes"),
-            (ElekPage::Project, "Patterns", "Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)"),
+            (DevicePick::Page(ElekPage::Order), "Samples", "The sample pool in two side-by-side panes"),
+            (DevicePick::Page(ElekPage::Project), "Patterns", "Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)"),
+            (DevicePick::Drive, "+Drive", "The device's file storage, in the right column"),
         ],
-        active,
+        |v| match v {
+            DevicePick::Page(p) => active == Some(p),
+            DevicePick::Drive => drive,
+        },
     )
 }
 

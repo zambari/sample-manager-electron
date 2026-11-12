@@ -19,10 +19,12 @@ impl Editor {
             .map(|c| c[a..b].iter().map(|x| g.apply(*x)).collect())
             .collect();
         let name = self.source_name(a);
+        let src = self.source_path();
         self.clip = Some(AudioClip {
             rate: s.rate,
             channels,
             name,
+            src,
         });
         true
     }
@@ -77,12 +79,14 @@ impl Editor {
             rate: s.rate,
             channels,
             name: self.source_name(a),
+            src: self.source_path(),
         })
     }
 
     /// Add `clip` after the end of the whole file (uncropping first), then
     /// show all of it. A grid kit puts it in its next free slot instead.
     pub fn append(&mut self, clip: &AudioClip) -> Result<(), String> {
+        self.note_source(clip.src.as_deref());
         if let Some(n) = self.grid {
             return self.append_on_grid(clip, n);
         }
@@ -126,6 +130,7 @@ impl Editor {
         };
         self.install(Loaded::new(sample), Vec::new(), Vec::new());
         self.name_slice_at(0, clip.name.as_deref());
+        self.note_source(clip.src.as_deref());
         if grid.is_some() && self.set_grid(grid).is_ok() {
             self.sel = (0, self.markers.first().copied().unwrap_or(self.frames()));
             self.playhead = 0;
@@ -192,6 +197,8 @@ impl Editor {
             self.add_marker(fa + n);
             let name = self.clip.as_ref().and_then(|c| c.name.clone());
             self.name_slice_at(fa, name.as_deref());
+            let src = self.clip.as_ref().and_then(|c| c.src.clone());
+            self.note_source(src.as_deref());
         }
         self.settle_grid();
         true
@@ -247,25 +254,49 @@ impl Editor {
     }
 
     /// The kit slice under shown-sample frame `frame`: its 1-based number
-    /// and the file it came from, when known.
+    /// and the name of the file it came from, when known.
     pub fn slice_name_at(&self, frame: usize) -> Option<(usize, &str)> {
+        self.slice_source_at(frame)
+            .map(|(n, s)| (n, s.rsplit(['/', '\\']).next().unwrap_or(s)))
+    }
+
+    /// The 0-based kit slice holding shown-sample frame `frame`.
+    pub fn slice_index_at(&self, frame: usize) -> usize {
         let f = frame + self.crop_offset();
-        let i = self.markers.partition_point(|&m| m <= f);
+        self.markers.partition_point(|&m| m <= f)
+    }
+
+    /// The kit slice under shown-sample frame `frame`: its 1-based number
+    /// and where it came from as saved: a full path, or a bare file name in
+    /// kits saved before slices kept their path.
+    pub fn slice_source_at(&self, frame: usize) -> Option<(usize, &str)> {
+        let i = self.slice_index_at(frame);
         self.names
             .get(i)
             .filter(|n| !n.is_empty())
             .map(|n| (i + 1, n.as_str()))
     }
 
-    /// What a clip taken from shown-sample frame `a` should be called: in a
-    /// kit, the slice it starts in; otherwise this file's name.
+    /// Where each kit slice came from, one per slice (see
+    /// [`Self::slice_source_at`]), and every file this kit took audio from
+    /// in this session, to resolve bare names against.
+    pub fn slice_sources(&self) -> (Vec<String>, &[PathBuf]) {
+        (self.slice_names(), &self.sources)
+    }
+
+    /// The open file, when it's a plain sample a kit could take audio from.
+    fn source_path(&self) -> Option<PathBuf> {
+        (!self.is_kit).then(|| self.path().map(Path::to_path_buf)).flatten()
+    }
+
+    /// Where a clip taken from shown-sample frame `a` came from: in a kit,
+    /// what the slice it starts in came from; otherwise this file's full
+    /// path, so a kit slice made of it can find its way back.
     fn source_name(&self, a: usize) -> Option<String> {
         if self.is_kit {
-            return self.slice_name_at(a).map(|(_, n)| n.to_owned());
+            return self.slice_source_at(a).map(|(_, n)| n.to_owned());
         }
-        self.path()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+        self.path().map(|p| p.to_string_lossy().into_owned())
     }
 
     /// Slice markers in shown-sample frames (inside the crop, if any).

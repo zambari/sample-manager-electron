@@ -19,6 +19,7 @@ mod strip;
 mod stats_view;
 mod overview;
 mod scope;
+mod level_strip;
 mod toolbar;
 mod trim;
 mod waveform;
@@ -48,6 +49,10 @@ pub enum EdIntent {
     /// Select this local file in the source pane (the open file, or the
     /// original it was uploaded from).
     ShowInSource(std::path::PathBuf),
+    /// Kit slice (0-based): flash the pool slot holding its source.
+    SliceInPool(usize),
+    /// Flash the pool slot the open file is on the device as.
+    OriginInPool,
     /// Show the slice kit (`true`) or the browsed sample.
     ShowKit(bool),
     AddSlice,
@@ -68,12 +73,36 @@ pub enum EdIntent {
     ElekMode,
     /// Open the Device view on this page (Samples / Patterns).
     DevicePage(crate::ui::elek_view::ElekPage),
+    /// The +Drive tab next to Patterns: show the +Drive in the right column.
+    ShowDrive,
     /// Fade and cut every kit slice's tail below the threshold.
     TrimTails,
     /// Upload what you hear as a new file next to its device original.
     SendToDevice,
-    /// Put what you hear into the empty pool slot selected in the device view.
-    SaveToSlot,
+    /// Put what you hear into a pool slot (a filled one asks first).
+    SaveToSlot(SlotPick),
+    /// Write what you hear over the local original of a device copy (asks first).
+    SaveOverOriginal,
+}
+
+/// Which pool slot "Save to" aims at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SlotPick {
+    /// The one slot selected in the device view, empty or filled.
+    Selected,
+    /// The first empty slot in the pool.
+    FirstFree,
+}
+
+/// Pool slots the editor's sample could be saved into.
+pub struct PoolTargets {
+    /// The one selected slot: its label, and the name of what it holds
+    /// (`None` when empty).
+    pub selected: Option<(String, Option<String>)>,
+    /// The first empty slot's label.
+    pub first_free: Option<String>,
+    /// Why nothing can go in right now.
+    pub note: Option<&'static str>,
 }
 
 /// One open kit, for the kit switcher.
@@ -86,6 +115,8 @@ pub struct KitEntry {
 
 /// What the header needs to know about the two editor slots.
 pub struct Slots {
+    /// The right column shows the +Drive (lights its Device tab).
+    pub drive_shown: bool,
     pub showing_kit: bool,
     pub kit_name: Option<String>,
     pub kit_dirty: bool,
@@ -93,7 +124,9 @@ pub struct Slots {
     pub kit_grid: Option<usize>,
     /// Slices so far (free) or slots used (grid), and the slot count.
     pub kit_fill: (usize, Option<usize>),
-    /// The kit's file exists (it was exported or opened from disk).
+    /// The kit has a file of its own to save over: exported, or opened from
+    /// a kit file. False while it still points at a sample its slices came
+    /// from.
     pub kit_on_disk: bool,
     /// Every open kit, sorted by name.
     pub kits: Vec<KitEntry>,
@@ -103,10 +136,33 @@ pub struct Slots {
     pub device_home: Option<String>,
     /// The sample came from this device pool slot: saving updates it there.
     pub pool_slot: Option<String>,
-    /// The one empty pool slot selected in the device view: "Save to slot".
-    pub empty_slot: Option<String>,
+    /// The active destination tab is on the +Drive: this folder there.
+    pub export_drive: Option<String>,
+    /// Pool slots "Save to" can aim at; None without a device project.
+    pub pool: Option<PoolTargets>,
     /// Which file the editor has open, in words (sample slot only).
     pub origin: Option<Origin>,
+    /// Kit: where each slice can be found, by 0-based slice (empty when
+    /// no kit is shown).
+    pub slice_homes: Vec<SliceHome>,
+}
+
+/// Where a kit slice's source can be shown, for its right-click menu.
+#[derive(Clone, Default)]
+pub struct SliceHome {
+    /// The local file it came from (an original rather than a preview
+    /// cache copy, when known).
+    pub local: Option<std::path::PathBuf>,
+    /// The pool slot holding the same device file, e.g. `A012`: by a
+    /// transfer link or audio fingerprint, else by file name.
+    pub pool: Option<String>,
+    /// That slot's audio is the source's (`Some(true)`), differs
+    /// (`Some(false)`), or wasn't compared (found by name, never fetched).
+    pub pool_same: Option<bool>,
+    /// Found only by file name.
+    pub pool_by_name: bool,
+    /// What the kit recorded, when nothing could be resolved from it.
+    pub saved_as: Option<String>,
 }
 
 /// What the open file is, relative to the device: the line under **File**.
@@ -122,6 +178,9 @@ pub struct Origin {
     /// A cache or fetched copy whose original we know: `(path, unchanged
     /// since upload)`.
     pub original: Option<(std::path::PathBuf, bool)>,
+    /// The pool slot holding it (see [`SliceHome`]): `(slot, same audio,
+    /// found by name only)`.
+    pub pool: Option<(String, Option<bool>, bool)>,
 }
 
 const RULER_H: f32 = 18.0;
@@ -156,7 +215,7 @@ pub fn show(
 ) -> Vec<EdIntent> {
     let mut out = Vec::new();
 
-    header(ui, ed, focused, &mut out);
+    header(ui, ed, focused, slots.drive_shown, &mut out);
     slot_bar(ui, ed, slots, &mut out);
     toolbar(ui, ed, &pv, can_export, slots, &mut out);
 
@@ -240,7 +299,7 @@ pub fn show(
     section_header(ui, "Wave");
     let wave_h = (avail.y - reserved - 12.0).max(80.0);
     let (rect, _) = ui.allocate_exact_size(vec2(avail.x, wave_h), Sense::hover());
-    waveform(ui, ed, &pv, rect, focused, &fades, trim.as_ref(), &mut out);
+    waveform(ui, ed, &pv, rect, focused, &fades, trim.as_ref(), &slots.slice_homes, &mut out);
 
     if pn.nums {
         section_header(ui, "Nums");

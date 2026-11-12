@@ -396,6 +396,13 @@ impl Worker {
                     std::thread::sleep(Duration::from_millis(300));
                 }
                 res => {
+                    // The device hands back nothing usable for its write-
+                    // protected factory content rather than an error.
+                    if let Ok(raw) = &res {
+                        if raw.len() < sample::HEADER_LEN && is_factory(src) {
+                            return Err(format!("{}: {FACTORY_LOCKED}", dev_str(src)));
+                        }
+                    }
                     if res.is_ok() && attempt > 1 {
                         crate::log::line(format!(
                             "device: {} read fine on attempt {attempt}",

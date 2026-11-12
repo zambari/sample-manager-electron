@@ -10,6 +10,7 @@ pub(super) fn waveform(
     focused: bool,
     abrupt: &[crate::editor::FadeEnd],
     trim: Option<&crate::editor::TrimPlan>,
+    homes: &[super::SliceHome],
     out: &mut Vec<EdIntent>,
 ) {
     // When the pane is resized, keep the same stretch of time on screen
@@ -311,6 +312,19 @@ pub(super) fn waveform(
     }
     if resp.secondary_clicked() {
         out.push(EdIntent::TookFocus);
+        ed.slice_menu = resp
+            .interact_pointer_pos()
+            .filter(|_| ed.is_kit)
+            .map(|p| m.frame(p.x) + ed.crop.map_or(0, |c| c.0));
+    }
+    // Kit: right-click a slice to find where it came from.
+    let menu = if ed.is_kit && ed.slice_menu.is_some() {
+        resp.context_menu(|ui| slice_menu(ui, ed, homes, out))
+    } else {
+        None
+    };
+    if menu.is_none() {
+        ed.slice_menu = None;
     }
 
     // ---- paint ----
@@ -386,6 +400,21 @@ pub(super) fn waveform(
     if let Some(tp) = ed.trim_preview() {
         let rate = ed.sample().map_or(1, |s| s.rate);
         trim_overlay(&painter, &m, lanes, &tp, rate, &vis);
+    }
+
+    // The slice whose menu is open: a faint wash so it's clear which one.
+    if let Some(f) = ed.slice_menu {
+        let off = ed.crop.map_or(0, |c| c.0);
+        if f >= off {
+            let (a, b) = ed.slice_at(f - off);
+            let r = Rect::from_x_y_ranges(
+                m.x(a as f64).max(rect.left())..=m.x(b as f64).min(rect.right()),
+                lanes.y_range(),
+            );
+            if r.width() > 0.0 {
+                painter.rect_filled(r, 0.0, vis.strong_text_color().gamma_multiply(0.05));
+            }
+        }
     }
 
     slice_marks(&painter, &m, rect, RULER_H, &marks);
@@ -1072,5 +1101,59 @@ pub(super) fn draw_ruler(
             );
         }
         t += step;
+    }
+}
+
+/// A kit slice's right-click menu: show the file it came from in the source
+/// pane, or the pool slot holding the same device file.
+fn slice_menu(ui: &mut Ui, ed: &Editor, homes: &[super::SliceHome], out: &mut Vec<EdIntent>) {
+    let Some(f) = ed.slice_menu else { return };
+    let off = ed.crop.map_or(0, |c| c.0);
+    let shown = f.saturating_sub(off);
+    let i = ed.slice_index_at(shown);
+    let home = homes.get(i).cloned().unwrap_or_default();
+    let title = match ed.slice_name_at(shown) {
+        Some((n, name)) => format!("Slice {n}: {name}"),
+        None => format!("Slice {}", i + 1),
+    };
+    ui.label(RichText::new(title).weak());
+    ui.separator();
+    let tip = match (&home.local, &home.saved_as) {
+        (Some(p), _) => p.display().to_string(),
+        (None, Some(s)) => format!("Saved as \"{s}\" only: the full path wasn't kept, so it can't be found"),
+        (None, None) => "This slice doesn't say where it came from".to_owned(),
+    };
+    let src = ui
+        .add_enabled(home.local.is_some(), egui::Button::new("Reveal in source pane"))
+        .on_hover_text(&tip)
+        .on_disabled_hover_text(&tip);
+    if src.clicked() {
+        if let Some(p) = home.local {
+            out.push(EdIntent::ShowInSource(p));
+        }
+        ui.close();
+    }
+    let pool_tip = match (&home.pool, home.pool_same, home.pool_by_name) {
+        (Some(slot), Some(true), _) => format!("Slot {slot} holds the same audio (matched by content, not name)"),
+        (Some(slot), Some(false), true) => {
+            format!("Slot {slot} has a file of the same name, but its audio differs from this slice's source")
+        }
+        (Some(slot), Some(false), false) => format!("Slot {slot} came from this slice's source, but the source changed since"),
+        (Some(slot), None, _) => format!("Slot {slot} has a file of the same name. Not compared yet: fetch it for preview to check"),
+        (None, ..) => "No pool slot holds this file: it was never sent to or fetched from the device, it changed since, or no project is loaded".to_owned(),
+    };
+    let label = match (&home.pool, home.pool_same) {
+        (Some(slot), Some(true)) => format!("Reveal in sample pool ({slot})"),
+        (Some(slot), Some(false)) => format!("Reveal in sample pool ({slot}, not identical)"),
+        (Some(slot), None) => format!("Reveal in sample pool ({slot}?, by name)"),
+        (None, _) => "Reveal in sample pool".to_owned(),
+    };
+    let pool = ui
+        .add_enabled(home.pool.is_some(), egui::Button::new(label))
+        .on_hover_text(&pool_tip)
+        .on_disabled_hover_text(&pool_tip);
+    if pool.clicked() {
+        out.push(EdIntent::SliceInPool(i));
+        ui.close();
     }
 }

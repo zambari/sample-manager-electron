@@ -2,6 +2,10 @@
 //! saving it ("Update on device") uploads the edit next to the original on
 //! the +Drive, puts it in the same slot and pushes, so the device plays it.
 //!
+//! "Save to → pool slot" ([`SlotSave`]) renders the editor's sample into
+//! the selected slot (asking first when it's filled) or the first empty
+//! one; once it lands, it becomes a pool edit of that slot.
+//!
 //! The slot is found again by the sample in it, so reordering the pool while
 //! editing doesn't lose it. The original +Drive file is never overwritten
 //! (other projects may use it); the first save makes `name 2`, later saves
@@ -55,6 +59,51 @@ pub(super) struct SlotSave {
     dir: PathBuf,
     /// Rendered and on its way to the device.
     sent: bool,
+    /// Replacing a filled slot: the sample it held when the user said yes.
+    /// `None`: the slot was empty and must still be.
+    expect: Option<(u32, u32)>,
+    /// A kit went in: it lands and is pushed, but doesn't become a pool edit
+    /// (the editor keeps the kit's own file).
+    kit: bool,
+}
+
+/// Which pool slot "Save to" aims at.
+pub use crate::ui::editor_view::SlotPick;
+
+/// A save that overwrites something other than the open file, waiting on
+/// the user's yes.
+pub(super) enum SaveConfirm {
+    /// The local original a device copy came from.
+    Original(PathBuf),
+    /// A filled pool slot: what you hear goes up as a new +Drive file and
+    /// takes the slot's place.
+    ReplaceSlot { old: u16, key: (u32, u32), label: String, name: String },
+}
+
+impl SaveConfirm {
+    /// Title, lines (the first one plain, the rest quiet) and the yes button.
+    pub(super) fn text(&self) -> (String, Vec<String>, String) {
+        match self {
+            SaveConfirm::Original(p) => (
+                "Overwrite the original file?".to_owned(),
+                vec![
+                    format!("What you hear replaces {}.", p.display()),
+                    "Its slice markers and other WAV metadata are lost (the device copy never had them).                      The device keeps playing its own copy until you update it (the slot turns amber)."
+                        .to_owned(),
+                ],
+                "Overwrite original".to_owned(),
+            ),
+            SaveConfirm::ReplaceSlot { label, name, .. } => (
+                format!("Replace slot {label}?"),
+                vec![
+                    format!("Slot {label} holds \"{name}\". What you hear goes into it instead."),
+                    "Every pattern step using this slot plays the new sample. The old file stays on the +Drive;                      the new one is uploaded next to it. Undo in the Samples page puts the old one back until you push."
+                        .to_owned(),
+                ],
+                format!("Replace slot {label}"),
+            ),
+        }
+    }
 }
 
 impl App {
@@ -219,46 +268,122 @@ impl App {
         }
     }
 
-    /// The empty slot "Save to slot" would fill: `(position now, slot as
-    /// read)`. None for a kit, a pool sample (that one updates its own slot)
-    /// or without exactly one empty slot selected.
-    fn slot_save_target(&self) -> Option<(usize, u16)> {
-        if self.showing_kit || self.editor.current.is_none() || self.saves_to_pool() {
+    /// The slot "Save to" would fill: `(position now, slot as read)`. None
+    /// for the slot the sample already belongs to (that one is Save). A kit
+    /// goes in whole, like its export.
+    fn slot_target(&self, pick: SlotPick) -> Option<(usize, u16)> {
+        if self.editor.current.is_none() {
             return None;
         }
-        self.elek.lone_empty_sel()
+        let t = match pick {
+            SlotPick::Selected => self.elek.lone_sel(),
+            SlotPick::FirstFree => self.elek.first_free(),
+        }?;
+        let own = self.pool_edit_slot().is_some_and(|(_, old)| old == t.1);
+        (!own).then_some(t)
     }
 
-    /// Label for the editor's "Save to slot" button.
-    pub(super) fn slot_save_label(&self) -> Option<String> {
-        let (pos, _) = self.slot_save_target()?;
-        let len = self.elek.project.as_ref().map_or(0, |p| p.pool.len());
-        Some(slot_label(pos, len))
+    /// The pool targets for the editor's "Save to" menu. None for a kit or
+    /// without a project read from the device.
+    pub(super) fn pool_targets(&self) -> Option<crate::ui::editor_view::PoolTargets> {
+        let p = self.elek.project.as_ref()?;
+        let len = p.pool.len();
+        let note = if p.read_only.is_some() || p.from_file.is_some() {
+            Some("This project was loaded from a file or can't be edited: read the device's project first")
+        } else if self.elek.edit_locked() {
+            Some("The device is busy: try again once it's done")
+        } else {
+            None
+        };
+        let selected = self.slot_target(SlotPick::Selected).map(|(pos, old)| {
+            let e = self.elek.entry(old as usize);
+            let name = (!e.is_empty()).then(|| self.elek.names.get(&e.key()).map_or_else(|| "a sample".to_owned(), |n| {
+                Path::new(n).file_name().map_or_else(|| n.clone(), |f| f.to_string_lossy().into_owned())
+            }));
+            (slot_label(pos, len), name)
+        });
+        let first_free = self.slot_target(SlotPick::FirstFree).map(|(pos, _)| slot_label(pos, len));
+        Some(crate::ui::editor_view::PoolTargets { selected, first_free, note })
     }
 
-    /// Render what you hear and put it into the selected empty slot.
-    pub(super) fn save_to_slot(&mut self) {
+    /// Render what you hear into a pool slot: an empty one right away, a
+    /// filled one after asking.
+    pub(super) fn save_to_slot(&mut self, pick: SlotPick) {
         if self.editor.exporting {
             return;
         }
-        let Some((pos, old)) = self.slot_save_target() else { return };
+        let Some((pos, old)) = self.slot_target(pick) else {
+            self.status = "No pool slot to save into".to_owned();
+            return;
+        };
+        let e = self.elek.entry(old as usize);
+        if !e.is_empty() {
+            let len = self.elek.project.as_ref().map_or(0, |p| p.pool.len());
+            let name = self.elek.names.get(&e.key()).cloned().unwrap_or_else(|| "a sample".to_owned());
+            self.save_confirm = Some(SaveConfirm::ReplaceSlot { old, key: e.key(), label: slot_label(pos, len), name });
+            return;
+        }
+        self.save_into_slot(pos, old, None);
+    }
+
+    /// The user said yes to an overwrite.
+    pub(super) fn confirmed_save(&mut self, c: SaveConfirm) {
+        match c {
+            SaveConfirm::Original(p) => self.overwrite_original(p),
+            SaveConfirm::ReplaceSlot { old, key, .. } => {
+                let st = &self.elek;
+                let Some(pos) = st.order.iter().position(|&o| o == old) else { return };
+                let e = st.entry(old as usize);
+                if e.is_empty() || e.key() != key || st.filling.contains_key(&old) {
+                    self.status = "The slot changed meanwhile; nothing saved".to_owned();
+                    return;
+                }
+                self.save_into_slot(pos, old, Some(key));
+            }
+        }
+    }
+
+    /// "Save to → over the original": ask first.
+    pub(super) fn ask_overwrite_original(&mut self) {
+        if let Some((orig, _)) = self.editor_origin().and_then(|o| o.original) {
+            self.save_confirm = Some(SaveConfirm::Original(orig));
+        }
+    }
+
+    /// Render what you hear over `orig`, the local file a device copy came
+    /// from. The editor stays on the copy.
+    fn overwrite_original(&mut self, orig: PathBuf) {
+        if self.editor.exporting || self.editor.current.is_none() {
+            return;
+        }
+        self.status = format!("Saving over {}…", orig.display());
+        self.saving.insert(orig.clone(), None);
+        let mono = self.editor.fold();
+        self.editor.export(orig, mono);
+    }
+
+    /// Render what you hear and put it into slot `old` (at `pos`).
+    /// `expect`: the sample a filled slot must still hold.
+    fn save_into_slot(&mut self, pos: usize, old: u16, expect: Option<(u32, u32)>) {
         // A failed upload drops the slot from `filling`: not waiting any more.
         if self.slot_save.as_ref().is_some_and(|s| s.sent && self.elek.filling.contains_key(&s.old)) {
             self.status = "The last save is still on its way to the device".to_owned();
             return;
         }
         // Next to its device original when it has one, else the +Drive tab.
-        let dir = self
-            .device_home()
+        // A kit's device home would be the browsed sample's: not used.
+        let home = if self.showing_kit { None } else { self.device_home() };
+        let dir = home
             .and_then(|h| h.parent().map(Path::to_path_buf))
             .or_else(|| self.pool_upload_dir());
         let Some(dir) = dir else {
             self.status = "Open the device's +Drive in a file tab first, at the folder new samples should go to".to_owned();
             return;
         };
-        let stem = self
-            .editor
-            .path()
+        // A grid kit carries its slot count, as its export would.
+        let named = self.editor.path().map(|p| self.export_name(p));
+        let stem = named
+            .as_deref()
             .and_then(|p| p.file_stem())
             .map_or_else(|| "sample".to_owned(), |s| s.to_string_lossy().into_owned());
         let name = if self.device_has(&dir.join(&stem)) {
@@ -275,8 +400,9 @@ impl App {
             return;
         }
         let staged = cache.join(device::wav_name(&name));
-        self.slot_save = Some(SlotSave { old, pos, staged: staged.clone(), dir, sent: false });
-        self.status = format!("Rendering {name} for slot {}…", self.slot_save_label().unwrap_or_default());
+        self.slot_save = Some(SlotSave { old, pos, staged: staged.clone(), dir, sent: false, expect, kit: self.showing_kit });
+        let len = self.elek.project.as_ref().map_or(0, |p| p.pool.len());
+        self.status = format!("Rendering {name} for slot {}…", slot_label(pos, len));
         let mono = self.editor.fold();
         self.editor.export(staged, mono);
     }
@@ -295,12 +421,21 @@ impl App {
     /// go on editing what was sent.
     pub(super) fn slot_save_upload(&mut self, p: PathBuf) {
         let Some(s) = self.slot_save.as_mut() else { return };
-        let (old, staged, dir) = (s.old, s.staged.clone(), s.dir.clone());
-        if self.elek.project.is_none() || !self.elek.free(old) {
+        let (old, staged, dir, expect) = (s.old, s.staged.clone(), s.dir.clone(), s.expect);
+        let st = &self.elek;
+        let still = match expect {
+            None => st.free(old),
+            Some(k) => {
+                let e = st.entry(old as usize);
+                !st.filling.contains_key(&old) && !e.is_empty() && e.key() == k
+            }
+        };
+        if st.project.is_none() || !still {
             self.slot_save = None;
-            self.status = "The slot was filled or the project closed meanwhile; nothing sent".to_owned();
+            self.status = "The slot changed or the project closed meanwhile; nothing sent".to_owned();
             return;
         }
+        let s = self.slot_save.as_mut().expect("checked above");
         s.sent = true;
         let name = staged.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let bytes = std::fs::metadata(&staged).map_or(0, |m| m.len());
@@ -316,6 +451,10 @@ impl App {
         self.pool_fetch.uploads.insert(job, vec![(old, staged)]);
         self.elek.filling.insert(old, name.clone());
         self.status = format!("Sending {name} to {}…", device::dev_str(&dir));
+        // A kit stays the kit; a sample goes on with what was sent.
+        if self.showing_kit {
+            return;
+        }
         if self.voice_path.as_deref() == Some(p.as_path()) {
             self.engine.stop();
         }
@@ -327,6 +466,10 @@ impl App {
     pub(super) fn pool_edit_filled(&mut self, old: u16, key: (u32, u32), path: &str) {
         // A "Save to slot" landed: from now on it's that slot's sample.
         if let Some(s) = self.slot_save.take_if(|s| s.sent && s.old == old) {
+            if s.kit {
+                let label = slot_label(s.pos, self.elek.project.as_ref().map_or(0, |p| p.pool.len()));
+                return self.push_filled(label);
+            }
             let path = PathBuf::from(path);
             self.pool_edit = Some(PoolEdit {
                 local: s.staged,
@@ -342,8 +485,14 @@ impl App {
         pe.waiting = None;
         pe.key = key;
         pe.ours = Some(PathBuf::from(path));
+        let label = slot_label(pe.pos, self.elek.project.as_ref().map_or(0, |p| p.pool.len()));
+        self.push_filled(label);
+    }
+
+    /// Slot `label` was just filled from the editor: push, so the device
+    /// plays it, unless other edits or the device say wait.
+    fn push_filled(&mut self, label: String) {
         let st = &mut self.elek;
-        let label = slot_label(pe.pos, st.project.as_ref().map_or(0, |p| p.pool.len()));
         if st.live {
             // Live mode pushes it once the edits pause.
             st.status = format!("Updated slot {label}; going to the device");

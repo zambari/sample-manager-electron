@@ -27,7 +27,7 @@ impl App {
         }
         // The Elek Sample Order view (full window, or docked and clicked
         // into) drives its own keys.
-        if self.elek_mode || (self.elek_docked && self.dock_pool && self.pool_focused) {
+        if self.elek_mode || (self.pool_in_col() && self.pool_focused) {
             return;
         }
 

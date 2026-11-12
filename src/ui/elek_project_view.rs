@@ -32,7 +32,34 @@ const TRACK_SEL: Color32 = Color32::from_rgb(110, 58, 18);
 /// A track paste waiting for the user: what it would overwrite.
 struct TrackPaste {
     into: Vec<usize>,
+    part: Part,
     lost: Vec<String>,
+}
+
+/// What of a track is copied or pasted: all of it (pasting: whatever is
+/// copied), its sound (kit sound, MIDI bit) or its events (trigs, p-locks).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Track,
+    Sound,
+    Events,
+}
+
+impl Part {
+    fn events(self) -> bool {
+        self != Part::Sound
+    }
+    fn sound(self) -> bool {
+        self != Part::Events
+    }
+}
+
+/// Copied tracks: track → the pattern it comes from (`None`: empty), and the
+/// slot they were copied from.
+#[derive(Clone)]
+struct TrackClip {
+    tracks: Vec<(u8, Option<u8>)>,
+    from: usize,
 }
 
 #[derive(Default)]
@@ -49,10 +76,10 @@ pub struct ProjEd {
     tsel_pat: Option<usize>,
     tsel: BTreeSet<u8>,
     tanchor: Option<u8>,
-    /// Copied tracks: track → the pattern it comes from (`None`: empty), and
-    /// the slot they were copied from. Either this or `clip` is set.
-    tclip: Vec<(u8, Option<u8>)>,
-    tclip_from: usize,
+    /// Copied track events and track sounds. These or `clip` are set; copying
+    /// events alone drops the copied sounds.
+    tclip_ev: Option<TrackClip>,
+    tclip_snd: Option<TrackClip>,
     /// A track paste that would lose trigs, until confirmed.
     confirm: Option<TrackPaste>,
     /// Row a drag started on.
@@ -259,7 +286,7 @@ fn view(p: &Patterns, c: &Cell) -> (PatState, String) {
         None => (PatState::Blank, c.name.clone().unwrap_or_default()),
     };
     // Pasted tracks: the pattern is at least as used as what they came from.
-    for s in c.tracks.values().flatten() {
+    for s in c.tracks.values().chain(c.sounds.values()).flatten() {
         let st = p.info[*s as usize].state;
         if rank(st) > rank(state) {
             state = st;
@@ -279,30 +306,72 @@ fn track_name(t: usize, audio: usize) -> String {
     if t < audio { format!("TRACK {}", t + 1) } else { format!("MIDI {}", t - audio + 1) }
 }
 
-/// The copied tracks, for menus and status lines.
-fn tclip_desc(ed: &ProjEd, audio: usize) -> String {
-    match ed.tclip.as_slice() {
-        [(t, _)] => format!("{} of {}", track_name(*t as usize, audio), patterns::label(ed.tclip_from)),
-        c => format!("{} tracks of {}", c.len(), patterns::label(ed.tclip_from)),
+impl ProjEd {
+    fn has_tclip(&self) -> bool {
+        self.tclip_ev.is_some() || self.tclip_snd.is_some()
+    }
+
+    /// Whether `part` has something copied to paste.
+    fn can_paste(&self, part: Part) -> bool {
+        match part {
+            Part::Track => self.tclip_ev.is_some() && self.tclip_snd.is_some(),
+            Part::Sound => self.tclip_snd.is_some(),
+            Part::Events => self.tclip_ev.is_some(),
+        }
+    }
+
+    /// The copied parts `part` pastes (`Track`: whatever is copied).
+    fn clips(&self, part: Part) -> (Option<&TrackClip>, Option<&TrackClip>) {
+        (self.tclip_ev.as_ref().filter(|_| part.events()), self.tclip_snd.as_ref().filter(|_| part.sound()))
     }
 }
 
-fn copy_tracks(ed: &mut ProjEd, audio: usize) -> String {
+/// Copied tracks, for menus and status lines: "TRACK 3 of A01".
+fn clip_desc(c: &TrackClip, audio: usize) -> String {
+    match c.tracks.as_slice() {
+        [(t, _)] => format!("{} of {}", track_name(*t as usize, audio), patterns::label(c.from)),
+        t => format!("{} tracks of {}", t.len(), patterns::label(c.from)),
+    }
+}
+
+/// What pasting `part` would paste: "TRACK 3 of A01", "sound of …", "events of … + sound of …".
+fn tclip_desc(ed: &ProjEd, part: Part, audio: usize) -> String {
+    match ed.clips(part) {
+        (Some(e), Some(s)) if e.tracks == s.tracks && e.from == s.from => clip_desc(e, audio),
+        (Some(e), Some(s)) => format!("events of {} + sound of {}", clip_desc(e, audio), clip_desc(s, audio)),
+        (Some(e), None) => format!("events of {}", clip_desc(e, audio)),
+        (None, Some(s)) => format!("sound of {}", clip_desc(s, audio)),
+        (None, None) => "tracks".into(),
+    }
+}
+
+fn copy_tracks(ed: &mut ProjEd, part: Part, audio: usize) -> String {
     let Some(i) = ed.tsel_pat.filter(|_| !ed.tsel.is_empty()) else {
         return "Select tracks first (click a track name in a folded-out pattern)".into();
     };
     let c = &ed.cells[i];
-    ed.tclip = ed.tsel.iter().map(|&t| (t, c.track_src(t as usize))).collect();
-    ed.tclip_from = i;
+    let ev = TrackClip { tracks: ed.tsel.iter().map(|&t| (t, c.track_src(t as usize))).collect(), from: i };
+    let snd = TrackClip { tracks: ed.tsel.iter().map(|&t| (t, c.sound_src(t as usize))).collect(), from: i };
+    match part {
+        Part::Track => (ed.tclip_ev, ed.tclip_snd) = (Some(ev), Some(snd)),
+        Part::Sound => ed.tclip_snd = Some(snd),
+        Part::Events => (ed.tclip_ev, ed.tclip_snd) = (Some(ev), None),
+    }
     ed.clip.clear();
-    format!("Copied {}; select a pattern and paste (⌘V or right-click)", tclip_desc(ed, audio))
+    format!("Copied {}; select a pattern and paste (⌘V or right-click)", tclip_desc(ed, part, audio))
 }
 
-/// Paste the copied tracks into `into` (same track numbers). Asks first
-/// when that would overwrite tracks with something on them.
-fn paste_tracks(ed: &mut ProjEd, p: &Patterns, into: Vec<usize>, audio: usize) -> String {
-    if ed.tclip.is_empty() {
-        return "No tracks copied yet".into();
+/// Paste the copied `part` into `into` (same track numbers). Asks first
+/// when pasting events would overwrite tracks with something on them.
+fn paste_tracks(ed: &mut ProjEd, p: &Patterns, into: Vec<usize>, part: Part, audio: usize) -> String {
+    let (ev, snd) = ed.clips(part);
+    if ev.is_none() && snd.is_none() {
+        return match part {
+            Part::Track => "No tracks copied yet",
+            Part::Sound => "No track sound copied yet",
+            Part::Events => "No track events copied yet",
+        }
+        .into();
     }
     if into.is_empty() {
         return "Select a pattern to paste the tracks into".into();
@@ -310,14 +379,14 @@ fn paste_tracks(ed: &mut ProjEd, p: &Patterns, into: Vec<usize>, audio: usize) -
     if let Some(why) = p.track_copy_blocked() {
         return format!("Can't paste tracks: {why}");
     }
-    if ed.tclip.iter().any(|(_, s)| s.is_none()) && !p.can_clear() {
+    if ev.into_iter().chain(snd).flat_map(|c| &c.tracks).any(|(_, s)| s.is_none()) && !p.can_clear() {
         return "Can't paste an empty pattern's track: no empty pattern found in this project to copy (see the log)".into();
     }
     let blank = blank_seq(p);
     let mut lost = Vec::new();
     for &i in &into {
         let c = &ed.cells[i];
-        for &(t, from) in &ed.tclip {
+        for &(t, from) in ev.iter().flat_map(|c| &c.tracks) {
             if c.track_src(t as usize) == from {
                 continue;
             }
@@ -335,20 +404,24 @@ fn paste_tracks(ed: &mut ProjEd, p: &Patterns, into: Vec<usize>, audio: usize) -
         }
     }
     if lost.is_empty() {
-        apply_tracks(ed, &into, audio)
+        apply_tracks(ed, &into, part, audio)
     } else {
         let n = lost.len();
-        ed.confirm = Some(TrackPaste { into, lost });
+        ed.confirm = Some(TrackPaste { into, part, lost });
         format!("Pasting would overwrite {n} track(s) with trigs on them: confirm or cancel")
     }
 }
 
-fn apply_tracks(ed: &mut ProjEd, into: &[usize], audio: usize) -> String {
-    let clip = ed.tclip.clone();
+fn apply_tracks(ed: &mut ProjEd, into: &[usize], part: Part, audio: usize) -> String {
+    let (ev, snd) = ed.clips(part);
+    let (ev, snd) = (ev.cloned(), snd.cloned());
     ed.edit(|cells| {
         for &i in into {
-            for &(t, from) in &clip {
+            for &(t, from) in ev.iter().flat_map(|c| &c.tracks) {
                 cells[i].set_track(t as usize, from);
+            }
+            for &(t, from) in snd.iter().flat_map(|c| &c.tracks) {
+                cells[i].set_sound(t as usize, from);
             }
         }
     });
@@ -356,7 +429,39 @@ fn apply_tracks(ed: &mut ProjEd, into: &[usize], audio: usize) -> String {
         [i] => patterns::label(*i),
         _ => format!("{} patterns", into.len()),
     };
-    format!("Pasted {} into {at}", tclip_desc(ed, audio))
+    format!("Pasted {} into {at}", tclip_desc(ed, part, audio))
+}
+
+/// The Copy track / sound / events items of a track's menu.
+fn copy_items(ui: &mut egui::Ui, ed: &mut ProjEd, audio: usize) -> Option<String> {
+    let mut status = None;
+    for (part, text) in [(Part::Track, "Copy track  ⌘C"), (Part::Sound, "Copy track sound"), (Part::Events, "Copy track events")] {
+        let tip = match part {
+            Part::Track => "Its trigs, p-locks and sound",
+            Part::Sound => "The kit sound (sample, parameters); copied events stay",
+            Part::Events => "Trigs, length, scale and p-locks; drops a copied sound",
+        };
+        if ui.button(text).on_hover_text(tip).clicked() {
+            status = Some(copy_tracks(ed, part, audio));
+            ui.close();
+        }
+    }
+    status
+}
+
+/// The Paste track / sound / events items, each greyed out until copied.
+fn paste_items(ui: &mut egui::Ui, ed: &mut ProjEd, p: &Patterns, into: &[usize], editable: bool, audio: usize) -> Option<String> {
+    let mut status = None;
+    for (part, text) in [(Part::Track, "Paste track"), (Part::Sound, "Paste track sound"), (Part::Events, "Paste track events")] {
+        let ok = ed.can_paste(part);
+        let label = if part == Part::Track { format!("{text}  ⌘V") } else { text.to_owned() };
+        let tip = if ok { format!("Paste {} into the same track numbers", tclip_desc(ed, part, audio)) } else { "Nothing copied for this yet".to_owned() };
+        if ui.add_enabled(editable && ok, egui::Button::new(label)).on_hover_text(tip.clone()).on_disabled_hover_text(tip).clicked() {
+            status = Some(paste_tracks(ed, p, into.to_vec(), part, audio));
+            ui.close();
+        }
+    }
+    status
 }
 
 /// An empty track, for tracks of an empty pattern.
@@ -461,7 +566,8 @@ fn clear(ed: &mut ProjEd, p: &Patterns) -> String {
 fn copy(ed: &mut ProjEd) -> String {
     let t = ed.targets();
     ed.clip = t.iter().map(|&i| ed.cells[i].clone()).collect();
-    ed.tclip.clear();
+    ed.tclip_ev = None;
+    ed.tclip_snd = None;
     format!("Copied {} pattern(s); select a slot and paste (⌘V)", ed.clip.len())
 }
 
@@ -591,7 +697,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     if let Some(c) = &st.proj.confirm {
         if let Some(yes) = confirm_tracks(ui.ctx(), c) {
             let c = st.proj.confirm.take().expect("checked above");
-            st.status = if yes && !busy { apply_tracks(&mut st.proj, &c.into, audio) } else { "Paste cancelled".into() };
+            st.status = if yes && !busy { apply_tracks(&mut st.proj, &c.into, c.part, audio) } else { "Paste cancelled".into() };
         }
     }
     keys(ui.ctx(), st);
@@ -656,14 +762,14 @@ fn keys(ctx: &egui::Context, st: &mut ElekState) {
         status = Some(clear(ed, p));
     }
     if ev_copy || (m.command && c) {
-        status = Some(if tracks_on { copy_tracks(ed, audio) } else { copy(ed) });
+        status = Some(if tracks_on { copy_tracks(ed, Part::Track, audio) } else { copy(ed) });
     }
     if ev_paste || (m.command && v) {
-        status = Some(if ed.tclip.is_empty() {
+        status = Some(if !ed.has_tclip() {
             paste(ed)
         } else {
             let into = ed.track_targets();
-            paste_tracks(ed, p, into, audio)
+            paste_tracks(ed, p, into, Part::Track, audio)
         });
     }
     if enter && !tracks_on {
@@ -750,9 +856,17 @@ fn action_bar(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
         if ui.add_enabled(editable && !ed.clip.is_empty(), egui::Button::new(format!("Paste ({})", ed.clip.len()))).clicked() {
             status = Some(paste(ed));
         }
-        if !ed.tclip.is_empty() && ui.add_enabled(editable, egui::Button::new(format!("Paste tracks ({})", ed.tclip.len()))).on_hover_text(format!("Paste {} into the selected pattern(s)", tclip_desc(ed, audio))).clicked() {
+        if ed.has_tclip() {
             let into = ed.track_targets();
-            status = Some(paste_tracks(ed, p, into, audio));
+            ui.add_enabled_ui(editable, |ui| {
+                ui.menu_button("Paste tracks ▾", |ui| {
+                    if let Some(s) = paste_items(ui, ed, p, &into, editable, audio) {
+                        status = Some(s);
+                    }
+                })
+                .response
+                .on_hover_text("Paste copied tracks into the selected pattern(s)");
+            });
         }
         if ui.add_enabled(editable && any && p.can_clear(), egui::Button::new("Clear")).clicked() {
             status = Some(clear(ed, p));
@@ -915,7 +1029,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 let (state, name) = view(p, cell);
                 // Pattern-level things (and the track layout) come from the
                 // pattern itself, else from where its pasted tracks came from.
-                let info = cell.src.or_else(|| cell.tracks.values().flatten().next().copied()).map(|s| &p.info[s as usize]);
+                let info = cell.src.or_else(|| cell.tracks.values().chain(cell.sounds.values()).flatten().next().copied()).map(|s| &p.info[s as usize]);
                 let open = ed.open.contains(&i);
                 let tracks = info.map(|n| shown_tracks(n.seq.len(), audio, |t| seq_of(p, cell, t, &blank).is_empty())).unwrap_or_default();
                 let mut step_hover: Option<String> = None;
@@ -982,7 +1096,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     Some(s) if s as usize != i => Some(format!("{}{}", if src_count[s as usize] > 1 { "⧉" } else { "←" }, patterns::label(s as usize))),
                     _ => None,
                 };
-                let pasted = (!cell.tracks.is_empty()).then(|| format!("+{} trk", cell.tracks.len()));
+                let pasted_n = cell.pasted_tracks().len();
+                let pasted = (pasted_n > 0).then(|| format!("+{pasted_n} trk"));
                 for bt in badge.into_iter().chain(pasted).chain(cell.name.is_some().then(|| "✎".to_owned())) {
                     let r = painter.text(egui::pos2(bx, y), egui::Align2::LEFT_CENTER, bt, oled_font(11.0), theme::DEVICE_ACCENT_BRIGHT);
                     bx = r.right() + 6.0;
@@ -1038,6 +1153,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                             let cy = ty + TRACK_H / 2.0;
                             let tt = *t as u8;
                             let from = cell.tracks.get(&tt).copied();
+                            let snd_from = cell.sounds.get(&tt).copied();
                             let line = Rect::from_min_max(egui::pos2(x0 + 18.0, ty), egui::pos2(rect.right() - 4.0, ty + TRACK_H));
                             let t_selected = ed.tsel_pat == Some(i) && ed.tsel.contains(&tt);
                             if t_selected {
@@ -1046,7 +1162,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                             // The name and sample part of the line selects the track.
                             let hit = Rect::from_min_max(line.min, egui::pos2(x0 + DOTS_X - 8.0, line.max.y));
                             let tresp = ui.interact(hit, ui.scope_id().with(("ptrack", i, tt)), Sense::click());
-                            let label_col = if from.is_some() {
+                            let label_col = if from.is_some() || snd_from.is_some() {
                                 theme::DEVICE_ACCENT_BRIGHT
                             } else if t_selected || tresp.hovered() {
                                 OLED
@@ -1054,10 +1170,19 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                                 OLED_DIM
                             };
                             painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, label, oled_font(11.0), label_col);
-                            let tip = match from {
-                                Some(Some(s)) => format!("{label}: pasted from {}\n", patterns::label(s as usize)),
-                                Some(None) => format!("{label}: pasted from an empty pattern\n"),
-                                None => String::new(),
+                            let src_name = |f: Option<u8>| f.map_or("an empty pattern".to_owned(), |s| patterns::label(s as usize));
+                            let tip = match (from, snd_from) {
+                                (Some(e), Some(s)) if e == s => format!("{label}: pasted from {}\n", src_name(e)),
+                                (e, s) => {
+                                    let mut t = String::new();
+                                    if let Some(e) = e {
+                                        t += &format!("{label}: events pasted from {}\n", src_name(e));
+                                    }
+                                    if let Some(s) = s {
+                                        t += &format!("{label}: sound pasted from {}\n", src_name(s));
+                                    }
+                                    t
+                                }
                             };
                             let tresp = tresp.on_hover_text(format!("{tip}Click to select (⌘ / ⇧ for more) · right-click to copy or paste tracks"));
                             if tresp.clicked() {
@@ -1071,17 +1196,20 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                                     1 => label.clone(),
                                     n => format!("{n} tracks"),
                                 };
-                                if ui.button(format!("Copy {what}  ⌘C")).clicked() {
-                                    status = Some(copy_tracks(ed, audio));
-                                    ui.close();
-                                }
-                                let paste_label = if ed.tclip.is_empty() { "Paste tracks here  ⌘V".to_owned() } else { format!("Paste {} here  ⌘V", tclip_desc(ed, audio)) };
-                                if ui.add_enabled(editable && !ed.tclip.is_empty(), egui::Button::new(paste_label)).on_hover_text("Into the same track numbers of this pattern").clicked() {
-                                    status = Some(paste_tracks(ed, p, vec![i], audio));
-                                    ui.close();
-                                }
+                                ui.menu_button(format!("Copy {what}"), |ui| {
+                                    if let Some(s) = copy_items(ui, ed, audio) {
+                                        status = Some(s);
+                                    }
+                                });
+                                ui.add_enabled_ui(editable && ed.has_tclip(), |ui| {
+                                    ui.menu_button("Paste here", |ui| {
+                                        if let Some(s) = paste_items(ui, ed, p, &[i], editable, audio) {
+                                            status = Some(s);
+                                        }
+                                    });
+                                });
                             });
-                            let ti = cell.track_src(*t).and_then(|s| p.info[s as usize].tracks.get(*t));
+                            let ti = cell.sound_src(*t).and_then(|s| p.info[s as usize].tracks.get(*t));
                             if let Some(ti) = ti {
                                 // The sample, then the sound's own name when it isn't the default.
                                 let mut text = sample_name(ti.slot);
@@ -1201,17 +1329,16 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                         status = Some(paste(ed));
                         ui.close();
                     }
-                    if !ed.tclip.is_empty() {
+                    if ed.has_tclip() {
                         let into = ed.targets();
-                        let at = if into.len() > 1 { format!("into {} patterns", into.len()) } else { "here".to_owned() };
-                        if ui
-                            .add_enabled(editable, egui::Button::new(format!("Paste {} {at}  ⌘V", tclip_desc(ed, audio))))
-                            .on_hover_text("Into the same track numbers; asks first if that overwrites tracks with trigs")
-                            .clicked()
-                        {
-                            status = Some(paste_tracks(ed, p, into, audio));
-                            ui.close();
-                        }
+                        let at = if into.len() > 1 { format!("Paste tracks into {} patterns", into.len()) } else { "Paste tracks here".to_owned() };
+                        ui.add_enabled_ui(editable, |ui| {
+                            ui.menu_button(at, |ui| {
+                                if let Some(s) = paste_items(ui, ed, p, &into, editable, audio) {
+                                    status = Some(s);
+                                }
+                            });
+                        });
                     }
                     if ui.add_enabled(editable && p.can_clear(), egui::Button::new("Clear  ⌫")).clicked() {
                         status = Some(clear(ed, p));

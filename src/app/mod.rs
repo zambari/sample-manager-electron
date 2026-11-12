@@ -37,6 +37,7 @@ mod nav;
 mod os_dnd;
 mod pane_view;
 mod pool_edit;
+mod prints;
 mod relaunch;
 mod transfers;
 mod undo;
@@ -148,6 +149,8 @@ struct Batch {
     bytes_unknown: bool,
     /// Some finished job showed a per-file bar.
     file_bar: bool,
+    /// When the first job of this run started moving bytes, for the ETA.
+    started_at: Option<std::time::Instant>,
 }
 
 pub struct App {
@@ -163,6 +166,9 @@ pub struct App {
     pool_edit: Option<pool_edit::PoolEdit>,
     /// The editor's sample on its way into an empty pool slot.
     slot_save: Option<pool_edit::SlotSave>,
+    /// A save that overwrites something other than the open file, waiting
+    /// on the user's yes.
+    save_confirm: Option<pool_edit::SaveConfirm>,
     keymap: Keymap,
     sizes: SizeCache,
     preview: Preview,
@@ -287,6 +293,10 @@ pub struct App {
     /// The window had focus last frame; regaining it re-lists local folders.
     window_focused: bool,
     /// Device file waiting on the "load to editor?" confirmation, with its size.
+    /// Show the "factory samples can't be copied" popup.
+    factory_popup: bool,
+    /// Already shown during this run of queued jobs.
+    factory_warned: bool,
     device_load_pending: Option<(PathBuf, u64)>,
     /// Download job fetching a device file for the editor, and where it lands.
     device_load: Option<(u64, PathBuf)>,
@@ -327,13 +337,12 @@ pub struct App {
     changed_at: Option<std::time::Instant>,
     /// Slots (as read) taking an edited file: push once the last lands.
     update_push: std::collections::HashSet<u16>,
-    /// The pool is docked into the right column (see [`elek`]).
-    elek_docked: bool,
-    /// `elek_docked` as of last frame: the frame it turns on, the right
-    /// column snaps to its docked width.
-    was_docked: bool,
-    /// While docked: the right column shows the pool, not the files.
+    /// The right column shows the sample pool (SAMPLE POOL in its switch),
+    /// not the Destination pane (FILES, or +DRIVE when that pane's active
+    /// tab is on the device). See [`Self::pool_in_col`].
     dock_pool: bool,
+    /// The right column already snapped to the pool's width once this run.
+    pool_snapped: bool,
     /// The docked pool has the keyboard.
     pool_focused: bool,
     /// Where the docked pool was drawn last frame, to tell clicks into it.
@@ -347,6 +356,10 @@ pub struct App {
     pool_fetch: elek::PoolFetch,
     /// Device files we have a local copy of (see [`crate::links`]).
     links: crate::links::Links,
+    /// Audio fingerprints of local files and device samples (see
+    /// [`crate::prints`]), and the background run making more.
+    prints: crate::prints::Prints,
+    print_run: prints::PrintRun,
     /// Last device file opened through a local copy or a fetch:
     /// `(local file, device path)`, for "send to device as".
     device_origin: Option<(PathBuf, PathBuf)>,
@@ -456,6 +469,7 @@ impl App {
             staged_upload: None,
             pool_edit: None,
             slot_save: None,
+            save_confirm: None,
             engine,
             editor,
             other,
@@ -498,6 +512,8 @@ impl App {
             meter: [0.0; 2],
             meter_hold: [0.0; 2],
             window_focused: true,
+            factory_popup: false,
+            factory_warned: false,
             device_load_pending: None,
             device_load: None,
             leave_pending: None,
@@ -511,6 +527,8 @@ impl App {
             close_when_idle: false,
             build_watch: relaunch::BuildWatch::new(),
             links: crate::links::Links::load(),
+            prints: crate::prints::Prints::load(),
+            print_run: Default::default(),
             device_origin: None,
             send_back: None,
             relaunch: false,
@@ -521,9 +539,8 @@ impl App {
             changed_paths: Default::default(),
             changed_at: None,
             update_push: Default::default(),
-            elek_docked: false,
-            was_docked: false,
             dock_pool: false,
+            pool_snapped: false,
             pool_focused: false,
             pool_rect: None,
             elek_greeted: false,
@@ -698,6 +715,7 @@ impl eframe::App for App {
         self.track_presence();
         self.live_push_tick(ctx);
         self.check_changed(ctx);
+        self.print_tick(ctx);
 
         // Back from another app: files may have changed under us.
         let focused = ctx.input(|i| i.focused);
@@ -773,33 +791,23 @@ impl eframe::App for App {
                 .size_range(MIN_SIDE_W..=max_for(prev_r))
                 .show(ui, |ui| self.show_pane(ui, Role::Source));
             self.side_widths[0] = left.response.rect.width();
-            // Docking the pool snaps the right column to DOCK_W once, and
-            // caps it at DOCK_MAX_W while the dock shows.
+            // The pool in the right column snaps it to DOCK_W the first
+            // time this run, and caps it at DOCK_MAX_W while it shows.
             const DOCK_W: f32 = 420.0;
             const DOCK_MAX_W: f32 = 680.0;
             let mut max_r = max_for(self.side_widths[0]);
-            if self.dock_col_shown() {
+            if self.pool_in_col() {
                 max_r = max_r.min(DOCK_MAX_W).max(MIN_SIDE_W);
             }
             let mut right = egui::Panel::right("dest_col")
                 .resizable(true)
                 .default_size(default_w)
                 .size_range(MIN_SIDE_W..=max_r);
-            if self.elek_docked && !self.was_docked && self.dock_col_shown() {
+            if self.pool_in_col() && !self.pool_snapped {
+                self.pool_snapped = true;
                 right = right.exact_size(DOCK_W.clamp(MIN_SIDE_W, max_r));
             }
-            if self.dock_col_shown() || !self.elek_docked {
-                self.was_docked = self.elek_docked;
-            }
-            let right = right.show(ui, |ui| {
-                    // The Samples page already is the pool: no second one here.
-                    if self.dock_col_shown() {
-                        self.show_dock_col(ui);
-                    } else {
-                        self.pool_rect = None;
-                        self.show_pane(ui, Role::Dest);
-                    }
-                });
+            let right = right.show(ui, |ui| self.show_dest_col(ui));
             self.side_widths[1] = right.response.rect.width();
             draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
             draw_divider(
@@ -817,7 +825,7 @@ impl eframe::App for App {
             // A click anywhere decides whether the docked pool keeps the keyboard.
             let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
             if let Some(pos) = press {
-                let inside = self.elek_docked && self.dock_pool && self.pool_rect.is_some_and(|r| r.contains(pos));
+                let inside = self.pool_in_col() && self.pool_rect.is_some_and(|r| r.contains(pos));
                 self.pool_focused = inside;
                 if inside {
                     self.editor_focused = false;
@@ -883,6 +891,10 @@ impl eframe::App for App {
                 let p = self.slot_prefix_pending.take().expect("checked above");
                 self.answer_slot_prefix(p, choice);
             }
+        }
+
+        if self.factory_popup && dialogs::factory_locked(ui.ctx()) {
+            self.factory_popup = false;
         }
 
         if let Some((path, bytes)) = &self.device_load_pending {
@@ -972,6 +984,16 @@ impl eframe::App for App {
             if let Some(c) = dialogs::leave_editor(ui.ctx(), &name, why, dest.as_deref()) {
                 self.leave_pending = None;
                 self.answer_leave(leave, c);
+            }
+        }
+
+        if let Some(c) = &self.save_confirm {
+            let (title, lines, ok) = c.text();
+            if let Some(yes) = dialogs::confirm_overwrite(ui.ctx(), &title, &lines, &ok) {
+                let c = self.save_confirm.take().expect("checked above");
+                if yes {
+                    self.confirmed_save(c);
+                }
             }
         }
 

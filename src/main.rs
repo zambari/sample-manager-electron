@@ -9,6 +9,7 @@ mod fs_model;
 mod jobs;
 mod keymap;
 mod links;
+mod prints;
 mod log;
 mod ops;
 mod pane;

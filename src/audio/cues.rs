@@ -64,9 +64,10 @@ pub fn append(path: &Path, frames: &[usize]) -> Result<(), String> {
 /// slice (the first is the slice before the first cue). Players skip it.
 const NAMES_ID: &[u8; 4] = b"slnm";
 
-/// Append the slice names chunk; nothing is written when none are known.
+/// Append the slice names chunk. Every kit gets one, even with no names
+/// known: it marks the file as a kit this app wrote ([`is_ours`]).
 pub fn append_names(path: &Path, names: &[String]) -> Result<(), String> {
-    if names.iter().all(String::is_empty) {
+    if names.is_empty() {
         return Ok(());
     }
     let text = names
@@ -76,6 +77,11 @@ pub fn append_names(path: &Path, names: &[String]) -> Result<(), String> {
         .join("\n");
     append_chunk(path, NAMES_ID, text.as_bytes())
         .map_err(|e| format!("writing slice names: {e}"))
+}
+
+/// The file carries our slice names chunk: a kit this app wrote.
+pub fn is_ours(path: &Path) -> bool {
+    read_names_inner(path).is_some()
 }
 
 /// Slice names saved by [`append_names`], or empty.

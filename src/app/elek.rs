@@ -86,12 +86,9 @@ enum Stage {
 
 impl App {
     /// A device page in the centre. Samples is the pool itself, so the
-    /// right column shows the files meanwhile; Patterns keeps the docked
-    /// pool beside it.
+    /// right column shows the files meanwhile ([`Self::pool_in_col`]);
+    /// Patterns keeps the pool beside it.
     pub(super) fn enter_full_elek(&mut self) {
-        if self.elek.page == elek_view::ElekPage::Order {
-            self.dock_pool = false;
-        }
         self.pool_focused = false;
         self.enter_elek();
     }
@@ -134,7 +131,6 @@ impl App {
     /// the user is still on a device page), the pool docked on the right.
     fn first_dock_now(&mut self) {
         self.first_dock = false;
-        self.elek_docked = true;
         self.dock_pool = true;
         self.pool_focused = false;
         // The docked pool lives in the right column, which this hides.
@@ -143,20 +139,34 @@ impl App {
             self.elek.page = elek_view::ElekPage::Project;
         }
         self.status = "Project loaded: patterns in the middle, the sample pool docked on the right. \
-            Switch the right column with Files / Sample pool, or × to undock."
+            Switch the right column with Files / Sample pool / +Drive."
             .into();
     }
 
-    /// Whether the right column shows the dock (Files / Sample pool switch).
-    pub(super) fn dock_col_shown(&self) -> bool {
-        self.elek_docked && (!self.elek_mode || self.elek.page == elek_view::ElekPage::Project)
+    /// The right column shows the pool: SAMPLE POOL is picked, and the
+    /// centre is not the Samples page (which already is the pool).
+    pub(super) fn pool_in_col(&self) -> bool {
+        self.dock_pool && self.pool_offered()
     }
 
-    /// Optional home of the pool: docked in the right column, beside the
-    /// files and the editor. (The Device button opens the center view.)
+    /// SAMPLE POOL is in the right column's switch: the device was talked
+    /// to this run (or a project is loaded), and the centre is not the
+    /// Samples page, which already is the pool.
+    fn pool_offered(&self) -> bool {
+        (self.elek_greeted || self.elek.project.is_some())
+            && !(self.elek_mode && self.elek.page == elek_view::ElekPage::Order)
+    }
+
+    /// The right column shows the +Drive (the Destination pane on its
+    /// device tab).
+    pub(super) fn drive_in_col(&self) -> bool {
+        !self.pool_in_col() && !(self.elek_mode && self.elek.hide_files) && self.pane(Role::Dest).active_tab().device
+    }
+
+    /// Back to the editor with the pool in the right column.
+    /// (The Device button opens the center view.)
     pub(super) fn dock_elek(&mut self) {
         self.elek_mode = false;
-        self.elek_docked = true;
         self.dock_pool = true;
         self.pool_focused = true;
         self.editor_focused = false;
@@ -170,7 +180,7 @@ impl App {
     pub(super) fn show_elek(&mut self, ui: &mut egui::Ui) {
         self.elek.docked = false;
         // The pool docked beside the Patterns page takes the keys once clicked.
-        self.elek.keys_on = !(self.dock_col_shown() && self.dock_pool && self.pool_focused);
+        self.elek.keys_on = !(self.pool_in_col() && self.pool_focused);
         let intents = match self.elek.page {
             elek_view::ElekPage::Order => elek_view::show(ui, &mut self.elek),
             elek_view::ElekPage::Project => crate::ui::elek_project_view::show(ui, &mut self.elek),
@@ -182,7 +192,7 @@ impl App {
     fn pool_shown(&self) -> bool {
         self.elek.project.is_some()
             && ((self.elek_mode && self.elek.page == elek_view::ElekPage::Order)
-                || (self.dock_col_shown() && self.dock_pool))
+                || self.pool_in_col())
     }
 
     /// While the pool is on screen, point from one side to the other
@@ -264,27 +274,44 @@ impl App {
         self.elek_intents(intents);
     }
 
-    /// The right column while docked: a Files / Sample pool switch above
-    /// either the destination pane or the pool.
-    pub(super) fn show_dock_col(&mut self, ui: &mut egui::Ui) {
+    /// The right column: a FILES / SAMPLE POOL / +DRIVE switch above the
+    /// Destination pane or the pool. FILES and +DRIVE are the same pane:
+    /// +DRIVE is its tab on the device, FILES its local tabs.
+    pub(super) fn show_dest_col(&mut self, ui: &mut egui::Ui) {
+        let pool = self.pool_in_col();
+        let drive = self.drive_in_col();
+        let pane_lit = self.focused == Role::Dest && !self.editor_focused && !self.pool_focused;
+        let pool_offered = self.pool_offered();
         ui.horizontal(|ui| {
-            if ui.add(theme::mode_title("Files", !self.dock_pool, false)).clicked() {
-                self.dock_pool = false;
-                self.pool_focused = false;
+            ui.spacing_mut().item_spacing.x = 12.0;
+            if ui
+                .add(theme::column_switch("Files", !pool && !drive, !pool && !drive && pane_lit, false))
+                .on_hover_text("Folders on this computer")
+                .clicked()
+            {
+                self.show_files();
             }
-            let lit = self.dock_pool && self.pool_focused;
-            if ui.add(theme::mode_title("Sample pool", self.dock_pool, lit)).clicked() {
+            if pool_offered
+                && ui
+                    .add(theme::column_switch("Sample pool", pool, pool && self.pool_focused, true))
+                    .on_hover_text("The sample slots of the project loaded on the device")
+                    .clicked()
+            {
                 self.dock_pool = true;
                 self.pool_focused = true;
+                self.editor_focused = false;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(theme::close_button(None, true)).on_hover_text("Close the docked pool (the project stays loaded; reopen it from the Device view's Dock button)").clicked() {
-                    self.elek_docked = false;
-                    self.pool_focused = false;
-                }
-            });
+            let mut resp = ui
+                .add(theme::column_switch("+Drive", drive, drive && pane_lit, true))
+                .on_hover_text("The device's +Drive storage. Commit and drops land here while it shows.");
+            if let Some(why) = crate::device::presence().problem() {
+                resp = resp.on_hover_text(why);
+            }
+            if resp.clicked() {
+                self.show_drive();
+            }
         });
-        if self.dock_pool {
+        if pool {
             let r = ui.max_rect();
             self.show_elek_docked(ui);
             self.pool_rect = Some(r);
@@ -294,18 +321,68 @@ impl App {
         }
     }
 
+    /// The right column on the Destination pane's local tabs (opening one
+    /// if it has none).
+    pub(super) fn show_files(&mut self) {
+        self.dock_pool = false;
+        self.pool_focused = false;
+        self.focused = Role::Dest;
+        self.editor_focused = false;
+        if self.pane_mut(Role::Dest).leave_device() {
+            return;
+        }
+        let src = self.pane(Role::Source);
+        let cwd = src
+            .tabs
+            .iter()
+            .find(|t| !t.device)
+            .map_or_else(crate::app::dirs_home, |t| t.cwd.clone());
+        let id = self.new_tab_id();
+        self.pane_mut(Role::Dest).add_tab(crate::tab::DirTab::new(id, cwd));
+        let i = self.pane(Role::Dest).active;
+        self.reload(Role::Dest, i);
+    }
+
+    /// The right column on the +Drive: the Destination pane's device tab,
+    /// opened at the root the first time. Also brings the file panes back
+    /// if the device view had hidden them.
+    pub(super) fn show_drive(&mut self) {
+        self.dock_pool = false;
+        self.pool_focused = false;
+        self.focused = Role::Dest;
+        self.editor_focused = false;
+        if self.elek_mode {
+            self.elek.hide_files = false;
+        }
+        let pane = self.pane_mut(Role::Dest);
+        if pane.active_tab().device {
+            return;
+        }
+        if let Some(i) = pane.tabs.iter().position(|t| t.device) {
+            pane.active = i;
+            return;
+        }
+        let id = self.new_tab_id();
+        self.pane_mut(Role::Dest).add_tab(crate::tab::DirTab::new_device(id, PathBuf::from("/")));
+        let i = self.pane(Role::Dest).active;
+        self.reload(Role::Dest, i);
+    }
+
     fn elek_intents(&mut self, intents: Vec<ElekIntent>) {
         self.sync_pool_fetch();
         for i in intents {
             match i {
                 ElekIntent::BackToEditor => {
                     self.elek_mode = false;
-                    // Back to where the pool lives by default.
-                    if self.elek_docked {
-                        self.dock_pool = true;
-                    }
                 }
                 ElekIntent::Dock => self.dock_elek(),
+                // Picked from the top tabs, +Drive is a place of its own
+                // like Samples / Patterns: the editor in the centre, the
+                // +Drive on the right.
+                ElekIntent::ShowDrive => {
+                    self.elek_mode = false;
+                    self.show_drive();
+                }
                 ElekIntent::Undock => {
                     self.elek.page = elek_view::ElekPage::Order;
                     self.enter_full_elek();
