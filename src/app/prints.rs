@@ -2,7 +2,7 @@
 //! open, and matching a local file to a pool slot with them.
 
 use super::*;
-use crate::prints::Ask;
+use crate::prints::{Ask, SliceId};
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::Path;
@@ -19,6 +19,10 @@ pub(super) struct PrintRun {
     failed: HashSet<PathBuf>,
     /// Downloaded copies already asked about: `(device sample, file, mtime)`.
     tried: HashSet<(Key, PathBuf, u64)>,
+    /// The kit slicing last asked about, and the prints of the last one
+    /// done: each slice's keys.
+    slices_asked: Option<SliceId>,
+    pub(super) slices: Option<(SliceId, Vec<Vec<u64>>)>,
 }
 
 /// The pool slot a local file is on the device as.
@@ -46,6 +50,7 @@ impl App {
         self.print_run.at = Some(std::time::Instant::now());
         ctx.request_repaint_after(EVERY);
 
+        let mut ask = Ask::default();
         let mut want: Vec<PathBuf> = Vec::new();
         if let Some(p) = self.browser().path() {
             want.push(p.to_path_buf());
@@ -58,10 +63,16 @@ impl App {
             let (names, sources) = kit.slice_sources();
             want.extend(names.iter().map(PathBuf::from).filter(|p| p.is_absolute()));
             want.extend(sources.iter().cloned());
+            if let Some(id) = self.kit_slice_id() {
+                let done = self.print_run.slices.as_ref().is_some_and(|(d, _)| *d == id);
+                if !done && self.print_run.slices_asked.as_ref() != Some(&id) {
+                    ask.slices = self.kit().sample().map(|s| (s.clone(), id.clone()));
+                    self.print_run.slices_asked = Some(id);
+                }
+            }
         }
         want.sort();
         want.dedup();
-        let mut ask = Ask::default();
         for p in want {
             if self.print_run.failed.contains(&p) {
                 continue;
@@ -92,10 +103,48 @@ impl App {
         std::thread::spawn(move || em.send(crate::jobs::Ev::Printed(ask.run())));
     }
 
-    pub(super) fn prints_landed(&mut self, found: crate::prints::Found) {
+    pub(super) fn prints_landed(&mut self, mut found: crate::prints::Found) {
         self.print_run.busy = false;
         self.print_run.failed.extend(found.failed.iter().cloned());
+        if let Some(sl) = found.slices.take() {
+            self.print_run.slices = Some(sl);
+        }
         self.prints.absorb(found);
+    }
+
+    /// Which audio and slicing the kit has now.
+    fn kit_slice_id(&self) -> Option<SliceId> {
+        let kit = self.kit();
+        let s = kit.sample()?;
+        Some(SliceId { sample: std::sync::Arc::as_ptr(s) as usize, bounds: kit.slice_bounds() })
+    }
+
+    /// The local file kit slice `i` came from: the path it was saved with
+    /// (a bare name counts when it names a source of this session), else a
+    /// local file holding the same audio (`true`), found by fingerprint.
+    /// That works for kits whose names were lost, e.g. fetched from the
+    /// device, as long as the source was opened here once.
+    pub(super) fn slice_local(&self, i: usize) -> Option<(PathBuf, bool)> {
+        let (names, sources) = self.kit().slice_sources();
+        let named = names.get(i).filter(|n| !n.is_empty()).and_then(|n| {
+            let p = Path::new(n);
+            if p.is_absolute() {
+                Some(p.to_path_buf())
+            } else {
+                sources.iter().find(|s| s.file_name() == Some(p.as_os_str())).cloned()
+            }
+        });
+        if let Some(p) = named {
+            return Some((p, false));
+        }
+        let (id, keys) = self.print_run.slices.as_ref()?;
+        // Only while the prints are of the kit as it is now.
+        if self.kit_slice_id().as_ref() != Some(id) {
+            return None;
+        }
+        let kit = self.kit().path();
+        let p = self.prints.files_with(keys.get(i)?).into_iter().find(|p| Some(p.as_path()) != kit)?;
+        Some((p.clone(), true))
     }
 
     /// The pool slot local file `p` is on the device as, with no disk

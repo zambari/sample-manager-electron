@@ -9,10 +9,10 @@
 //! the link quietly stops applying; the device file is fetched as before.
 //!
 //! Stored as one tab-separated line per link, appended by the device worker
-//! as transfers happen. Later lines win; the file is compacted on start.
+//! as transfers happen (see [`crate::store`]: version line, logging). Later
+//! lines win; the file is compacted on start.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -157,19 +157,13 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+const STORE: &str = "device_links";
+const VERSION: u32 = 1;
+
 /// Note a link on disk. Called from the device worker, off the UI thread.
 pub fn append(l: &Link) {
-    let Some(p) = path() else { return };
-    if let Some(d) = p.parent() {
-        let _ = std::fs::create_dir_all(d);
-    }
-    let res = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&p)
-        .and_then(|mut f| f.write_all(l.line().as_bytes()));
-    if let Err(e) = res {
-        crate::log::line(format!("links: could not write {}: {e}", p.display()));
+    if let Some(p) = path() {
+        crate::store::append(&p, STORE, VERSION, &l.line());
     }
 }
 
@@ -187,33 +181,44 @@ impl Links {
     pub fn load() -> Self {
         let mut out = Self::default();
         let Some(p) = path() else { return out };
-        let Ok(text) = std::fs::read_to_string(&p) else {
-            return out;
+        // Links can't be rebuilt (they come from transfers), so a file this
+        // version can't read is set aside, never overwritten.
+        let (text, unversioned) = match crate::store::read(&p, STORE, VERSION) {
+            crate::store::Read::Missing => return out,
+            crate::store::Read::Current(t) => (t, false),
+            crate::store::Read::Unversioned(t) => (t, true),
+            crate::store::Read::Other(first) => {
+                crate::store::set_aside(&p, STORE, &format!("unknown version ({first})"));
+                return out;
+            }
         };
-        let mut lines = 0;
+        let (mut lines, mut bad) = (0, 0);
         let cache = pool_cache_dir();
-        for l in text.lines() {
+        for l in text.lines().filter(|l| !l.is_empty()) {
             lines += 1;
-            if let Some(link) = Link::parse(l) {
-                // Preview cache emptied since: those links are gone for good.
-                let purged = cache.as_ref().is_some_and(|c| link.local.starts_with(c)) && !link.local.exists();
-                if !purged {
-                    out.add(link);
-                }
+            let Some(link) = Link::parse(l) else {
+                bad += 1;
+                continue;
+            };
+            // Preview cache emptied since: those links are gone for good.
+            let purged = cache.as_ref().is_some_and(|c| link.local.starts_with(c)) && !link.local.exists();
+            if !purged {
+                out.add(link);
             }
         }
+        if bad > 0 {
+            crate::log::line(format!("{STORE}: skipped {bad} of {lines} line(s) that couldn't be read"));
+        }
         let kept = out.len();
-        if lines > kept + kept / 4 + 100 || kept > CAP {
+        if unversioned || lines > kept + kept / 4 + 100 || kept > CAP {
+            if bad > 0 {
+                crate::store::back_up(&p, STORE);
+            }
             let mut all: Vec<&Link> = out.by_hash.values().flatten().collect();
             all.sort_by_key(|l| std::cmp::Reverse(l.mtime));
             all.truncate(CAP);
             let body: String = all.iter().rev().map(|l| l.line()).collect();
-            std::thread::spawn(move || {
-                let tmp = p.with_extension("tsv.tmp");
-                if std::fs::write(&tmp, body).is_ok() {
-                    let _ = std::fs::rename(&tmp, &p);
-                }
-            });
+            crate::store::rewrite(p, STORE, VERSION, body);
         }
         out
     }

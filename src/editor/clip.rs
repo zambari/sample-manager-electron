@@ -260,6 +260,16 @@ impl Editor {
             .map(|(n, s)| (n, s.rsplit(['/', '\\']).next().unwrap_or(s)))
     }
 
+    /// Each kit slice's frames in the whole file, `[start, end)`, by 0-based
+    /// slice (what [`Self::slice_index_at`] numbers).
+    pub fn slice_bounds(&self) -> Vec<(usize, usize)> {
+        let n = self.sample().map_or(0, |s| s.frames());
+        let mut edges = vec![0];
+        edges.extend(self.markers.iter().copied().filter(|&m| m < n));
+        edges.push(n);
+        edges.windows(2).map(|w| (w[0], w[1])).collect()
+    }
+
     /// The 0-based kit slice holding shown-sample frame `frame`.
     pub fn slice_index_at(&self, frame: usize) -> usize {
         let f = frame + self.crop_offset();

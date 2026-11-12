@@ -153,6 +153,8 @@ pub struct SliceHome {
     /// The local file it came from (an original rather than a preview
     /// cache copy, when known).
     pub local: Option<std::path::PathBuf>,
+    /// `local` was found by the slice's audio, not by a saved name.
+    pub by_audio: bool,
     /// The pool slot holding the same device file, e.g. `A012`: by a
     /// transfer link or audio fingerprint, else by file name.
     pub pool: Option<String>,

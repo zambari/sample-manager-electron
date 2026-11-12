@@ -564,22 +564,13 @@ impl App {
     /// +Drive content hash of a link to that file, never by name. No disk
     /// access: a missing file is caught when it's revealed.
     pub(super) fn slice_homes(&self) -> Vec<editor_view::SliceHome> {
-        let (names, sources) = self.kit().slice_sources();
+        let (names, _) = self.kit().slice_sources();
         let cache = crate::links::pool_cache_dir();
-        names
-            .into_iter()
-            .map(|n| {
-                if n.is_empty() {
-                    return editor_view::SliceHome::default();
-                }
-                let p = Path::new(&n);
-                let local = if p.is_absolute() {
-                    Some(p.to_path_buf())
-                } else {
-                    sources.iter().find(|s| s.file_name() == Some(p.as_os_str())).cloned()
-                };
-                let Some(local) = local else {
-                    return editor_view::SliceHome { saved_as: Some(n), ..Default::default() };
+        (0..names.len())
+            .map(|i| {
+                let Some((local, by_audio)) = self.slice_local(i) else {
+                    let n = &names[i];
+                    return editor_view::SliceHome { saved_as: (!n.is_empty()).then(|| n.clone()), ..Default::default() };
                 };
                 let link = self.links.for_local(&local);
                 // A preview cache copy: point at its original when known.
@@ -591,6 +582,7 @@ impl App {
                 let m = self.pool_match(&local);
                 editor_view::SliceHome {
                     local: Some(shown),
+                    by_audio,
                     pool_same: m.as_ref().and_then(|m| m.same),
                     pool_by_name: m.as_ref().is_some_and(|m| m.by_name),
                     pool: m.map(|m| m.slot),
@@ -603,15 +595,7 @@ impl App {
     /// Kit slice `i`'s right-click **Reveal in sample pool**: bring the pool
     /// into the right column and flash the slot holding its source.
     pub(super) fn slice_in_pool(&mut self, i: usize) {
-        let (names, sources) = self.kit().slice_sources();
-        let local = names.get(i).filter(|n| !n.is_empty()).and_then(|n| {
-            let p = Path::new(n);
-            if p.is_absolute() {
-                Some(p.to_path_buf())
-            } else {
-                sources.iter().find(|s| s.file_name() == Some(p.as_os_str())).cloned()
-            }
-        });
+        let local = self.slice_local(i).map(|(p, _)| p);
         let Some(m) = local.and_then(|p| self.pool_match(&p)) else {
             self.status = "No pool slot holds that slice's file".into();
             return;

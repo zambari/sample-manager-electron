@@ -21,13 +21,14 @@
 //!
 //! One store per user (next to `device_links.tsv`), not per folder or drive:
 //! kits on one volume find sources on another. Tab-separated lines appended
-//! as prints are made; later lines win; compacted on start.
+//! as prints are made; later lines win; compacted on start. Versioned and
+//! logged through [`crate::store`]; anything unreadable is set aside and
+//! rebuilt, since every print can be made again from the audio.
 
 use crate::audio::decode::Sample;
 use crate::audio::stats::Fold;
 use crate::device::sample::{to_device, HEADER_LEN};
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Same slack as links: a device size may or may not count the header.
@@ -51,6 +52,16 @@ pub struct Found {
     pub device: Vec<((u32, u32), u64)>,
     /// Asked about but unreadable (not audio, gone): don't ask again soon.
     pub failed: Vec<PathBuf>,
+    /// The kit's slices, when asked: `(which kit, keys by slice)`.
+    pub slices: Option<(SliceId, Vec<Vec<u64>>)>,
+}
+
+/// Which kit audio and slicing a set of slice prints belongs to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceId {
+    /// The decoded sample's address: a new load or an edit makes a new one.
+    pub sample: usize,
+    pub bounds: Vec<(usize, usize)>,
 }
 
 /// What to fingerprint, built on the UI thread from cheap lookups.
@@ -61,11 +72,13 @@ pub struct Ask {
     /// Device samples, each with a downloaded copy and the stamp it had when
     /// downloaded: only an unchanged copy speaks for the device.
     pub device: Vec<((u32, u32), PathBuf, (u64, u64))>,
+    /// The kit's audio and its slices, to fingerprint each slice.
+    pub slices: Option<(std::sync::Arc<Sample>, SliceId)>,
 }
 
 impl Ask {
     pub fn is_empty(&self) -> bool {
-        self.local.is_empty() && self.device.is_empty()
+        self.local.is_empty() && self.device.is_empty() && self.slices.is_none()
     }
 
     /// Do the work. Off the UI thread: decodes audio.
@@ -92,6 +105,10 @@ impl Ask {
                 out.device.push((k, native(&s)));
             }
         }
+        if let Some((s, id)) = self.slices {
+            let keys = id.bounds.iter().map(|&(a, b)| range_keys(&s, a, b)).collect();
+            out.slices = Some((id, keys));
+        }
         out
     }
 }
@@ -117,15 +134,35 @@ impl Fnv {
 
 /// The PCM as it is, rounded to 16 bits: what a 16-bit file holds exactly.
 fn native(s: &Sample) -> u64 {
-    let (ch, frames) = (s.channels.len(), s.frames());
-    let mut h = Fnv::new(ch, frames);
-    for f in 0..frames {
-        for c in &s.channels {
+    native_of(&s.channels, 0, s.frames())
+}
+
+/// [`native`] of frames `[a, b)` of these channels.
+fn native_of(channels: &[Vec<f32>], a: usize, b: usize) -> u64 {
+    let mut h = Fnv::new(channels.len(), b - a);
+    for f in a..b {
+        for c in channels {
             let v = (c[f] * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
             h.bytes(&v.to_be_bytes());
         }
     }
     h.0
+}
+
+/// Keys of a kit slice, frames `[a, b)`, to look up the file it came
+/// from. A kit downloaded from the device holds exactly what the upload
+/// put there, which a source file's upload keys describe. A mono source in
+/// a stereo kit sits on both sides alike: then it's keyed as mono too.
+pub fn range_keys(s: &Sample, a: usize, b: usize) -> Vec<u64> {
+    let b = b.min(s.frames());
+    if a >= b {
+        return Vec::new();
+    }
+    let mut keys = vec![native_of(&s.channels, a, b)];
+    if s.channels.len() == 2 && s.channels[0][a..b] == s.channels[1][a..b] {
+        keys.push(native_of(&s.channels[..1], a, b));
+    }
+    keys
 }
 
 /// What a device sample made by upload holds (header skipped).
@@ -163,6 +200,10 @@ fn keys_of(s: &Sample) -> Vec<u64> {
     keys
 }
 
+const STORE: &str = "fingerprints";
+/// Bump when the keys are computed differently: old ones would never match.
+const VERSION: u32 = 1;
+
 fn path() -> Option<PathBuf> {
     Some(crate::links::data_dir()?.join("fingerprints.tsv"))
 }
@@ -186,6 +227,8 @@ pub struct Prints {
     local: HashMap<PathBuf, Print>,
     /// Device prints by +Drive hash: `(size, key)`.
     device: HashMap<u32, Vec<(u32, u64)>>,
+    /// Local files by each of their keys.
+    by_key: HashMap<u64, Vec<PathBuf>>,
 }
 
 impl Prints {
@@ -194,28 +237,32 @@ impl Prints {
     pub fn load() -> Self {
         let mut out = Self::default();
         let Some(p) = path() else { return out };
-        let Ok(text) = std::fs::read_to_string(&p) else { return out };
-        let mut lines = 0;
-        for l in text.lines() {
+        // Everything here can be made again from the audio: anything this
+        // version can't read is set aside and rebuilt as files are opened.
+        let text = match crate::store::read(&p, STORE, VERSION) {
+            crate::store::Read::Missing => return out,
+            crate::store::Read::Current(t) => t,
+            crate::store::Read::Unversioned(_) => {
+                crate::store::set_aside(&p, STORE, "no version line");
+                return out;
+            }
+            crate::store::Read::Other(first) => {
+                crate::store::set_aside(&p, STORE, &format!("other version ({first})"));
+                return out;
+            }
+        };
+        let (mut lines, mut bad) = (0, 0);
+        for l in text.lines().filter(|l| !l.is_empty()) {
             lines += 1;
-            let f: Vec<&str> = l.splitn(5, '\t').collect();
-            match f.as_slice() {
-                ["L", len, mtime, keys, path] => {
-                    let keys: Vec<u64> = keys.split(',').filter_map(|k| u64::from_str_radix(k, 16).ok()).collect();
-                    if let (Ok(len), Ok(mtime), false) = (len.parse(), mtime.parse(), keys.is_empty()) {
-                        out.local.insert(PathBuf::from(path), Print { len, mtime, keys });
-                    }
-                }
-                ["D", hash, size, key] => {
-                    if let (Ok(h), Ok(s), Ok(k)) = (u32::from_str_radix(hash, 16), size.parse(), u64::from_str_radix(key, 16)) {
-                        out.put_device((h, s), k);
-                    }
-                }
-                _ => {}
+            if !out.parse(l) {
+                bad += 1;
             }
         }
+        if bad > 0 {
+            crate::log::line(format!("{STORE}: skipped {bad} of {lines} line(s) that couldn't be read"));
+        }
         let kept = out.local.len() + out.device.values().map(Vec::len).sum::<usize>();
-        if lines > kept + kept / 4 + 100 || out.local.len() > CAP {
+        if bad > 0 || lines > kept + kept / 4 + 100 || out.local.len() > CAP {
             let mut rows: Vec<(&PathBuf, &Print)> = out.local.iter().collect();
             rows.sort_by_key(|(_, r)| std::cmp::Reverse(r.mtime));
             rows.truncate(CAP);
@@ -225,13 +272,66 @@ impl Prints {
                     body.push_str(&device_line((*h, *s), *k));
                 }
             }
-            std::thread::spawn(move || {
-                let tmp = p.with_extension("tsv.tmp");
-                if std::fs::write(&tmp, body).is_ok() {
-                    let _ = std::fs::rename(&tmp, &p);
-                }
-            });
+            crate::store::rewrite(p, STORE, VERSION, body);
         }
+        out.reindex();
+        out
+    }
+
+    /// One stored line into memory; `false` if it isn't one.
+    fn parse(&mut self, l: &str) -> bool {
+        let f: Vec<&str> = l.splitn(5, '\t').collect();
+        match f.as_slice() {
+            ["L", len, mtime, keys, path] if !path.is_empty() => {
+                let keys: Option<Vec<u64>> = keys.split(',').map(|k| u64::from_str_radix(k, 16).ok()).collect();
+                match (len.parse(), mtime.parse(), keys) {
+                    (Ok(len), Ok(mtime), Some(keys)) if !keys.is_empty() => {
+                        self.local.insert(PathBuf::from(path), Print { len, mtime, keys });
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            ["D", hash, size, key] => match (u32::from_str_radix(hash, 16), size.parse(), u64::from_str_radix(key, 16)) {
+                (Ok(h), Ok(s), Ok(k)) => {
+                    self.put_device((h, s), k);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn reindex(&mut self) {
+        self.by_key.clear();
+        for (p, r) in &self.local {
+            for k in &r.keys {
+                self.by_key.entry(*k).or_default().push(p.clone());
+            }
+        }
+    }
+
+    fn put_local(&mut self, p: PathBuf, r: Print) {
+        if let Some(old) = self.local.get(&p) {
+            for k in &old.keys {
+                if let Some(v) = self.by_key.get_mut(k) {
+                    v.retain(|x| x != &p);
+                }
+            }
+        }
+        for k in &r.keys {
+            self.by_key.entry(*k).or_default().push(p.clone());
+        }
+        self.local.insert(p, r);
+    }
+
+    /// Local files holding audio with one of these keys, newest print
+    /// first. They may have changed or gone since: check on use.
+    pub fn files_with(&self, keys: &[u64]) -> Vec<&PathBuf> {
+        let mut out: Vec<&PathBuf> = keys.iter().filter_map(|k| self.by_key.get(k)).flatten().collect();
+        out.sort_by_key(|p| std::cmp::Reverse(self.local.get(*p).map_or(0, |r| r.mtime)));
+        out.dedup();
         out
     }
 
@@ -251,7 +351,7 @@ impl Prints {
         for (p, r) in found.local {
             if ok(&p) && self.local.get(&p) != Some(&r) {
                 body.push_str(&local_line(&p, &r));
-                self.local.insert(p, r);
+                self.put_local(p, r);
             }
         }
         for (k, key) in found.device {
@@ -262,17 +362,8 @@ impl Prints {
         if body.is_empty() {
             return;
         }
-        let Some(p) = path() else { return };
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let res = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&p)
-            .and_then(|mut f| f.write_all(body.as_bytes()));
-        if let Err(e) = res {
-            crate::log::line(format!("prints: could not write {}: {e}", p.display()));
+        if let Some(p) = path() {
+            crate::store::append(&p, STORE, VERSION, &body);
         }
     }
 

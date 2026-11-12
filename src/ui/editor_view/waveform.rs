@@ -1119,12 +1119,16 @@ fn slice_menu(ui: &mut Ui, ed: &Editor, homes: &[super::SliceHome], out: &mut Ve
     ui.label(RichText::new(title).weak());
     ui.separator();
     let tip = match (&home.local, &home.saved_as) {
+        (Some(p), _) if home.by_audio => format!("{}\nFound by its audio: the kit didn't say where this slice came from", p.display()),
         (Some(p), _) => p.display().to_string(),
         (None, Some(s)) => format!("Saved as \"{s}\" only: the full path wasn't kept, so it can't be found"),
         (None, None) => "This slice doesn't say where it came from".to_owned(),
     };
     let src = ui
-        .add_enabled(home.local.is_some(), egui::Button::new("Reveal in source pane"))
+        .add_enabled(
+            home.local.is_some(),
+            egui::Button::new(if home.by_audio { "Reveal in source pane (found by audio)" } else { "Reveal in source pane" }),
+        )
         .on_hover_text(&tip)
         .on_disabled_hover_text(&tip);
     if src.clicked() {

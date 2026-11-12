@@ -17,6 +17,7 @@ mod preview;
 mod rename;
 mod sizes;
 mod state;
+mod store;
 mod tab;
 mod ui;
 
