@@ -95,10 +95,15 @@ pub struct ElekState {
     pub hide_files: bool,
     /// The project editor's layout and selection.
     pub proj: crate::ui::elek_project_view::ProjEd,
+    /// The Sounds page: kits, samples, sound pool, +Drive data.
+    pub lib: crate::ui::elek_library_view::LibraryView,
     /// After a push with pattern edits: every pattern payload, by slot, the
     /// device should now hold.
     /// (`None`: a slot that wasn't loaded.)
     pub expect_patterns: Option<Vec<Option<Vec<u8>>>>,
+    /// After a push with sound pool edits: each pool sound's name the
+    /// device should now hold ("" = empty).
+    pub expect_sounds: Option<Vec<String>>,
     /// While a read runs: which banks to read first, and its stop flag.
     pub reading: Option<std::sync::Arc<crate::device::ReadCtl>>,
     /// The running read's pool has arrived and is what's shown.
@@ -136,6 +141,8 @@ pub enum ElekPage {
     #[default]
     Order,
     Project,
+    /// Sounds: kits, sample use, sound pool, +Drive presets (read-only).
+    Library,
 }
 
 pub enum ElekIntent {
@@ -189,18 +196,68 @@ pub enum ElekIntent {
     /// `SaveProject`) / load one into it.
     SavePattern(usize, String, bool),
     LoadPattern(usize),
+    /// Read the project's sound pool (Sounds page).
+    ReadSounds,
+    /// List a +Drive data folder (Sounds page).
+    ListData(String),
+    /// Read a sound preset on the +Drive (Sounds page).
+    ReadPreset(String),
 }
 
 impl ElekState {
     /// Pool changes can be pushed: every pattern they renumber has arrived,
     /// so none is left pointing at the wrong sample.
     pub fn pool_pushable(&self) -> bool {
-        self.project.as_ref().is_some_and(|p| !p.partial)
+        self.project.as_ref().is_some_and(|p| !p.partial && p.sounds_read)
     }
 
-    /// Pool slots plus pattern slots changed since the read.
+    /// Pool slots, pattern slots and pool sounds changed since the read.
     pub fn changed(&self) -> usize {
-        self.pool_changed() + self.proj.changed()
+        self.pool_changed() + self.proj.changed() + self.lib.sound_changed()
+    }
+
+    /// Put a sound preset read from the +Drive into empty pool sound `to`.
+    /// Its sample is found in the sample pool, or put into its first empty
+    /// slot (pushed with the rest).
+    pub fn place_preset(&mut self, to: usize, path: &str, pr: &crate::device::library::Preset) {
+        let Some(p) = &self.project else { return };
+        let (data, file) = match p.preset_sound(pr) {
+            Ok(x) => x,
+            Err(e) => {
+                self.status = format!("Can't put {path} into the sound pool: {e}");
+                return;
+            }
+        };
+        let name = pr.sound.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        let mut note = String::new();
+        let sample = match file {
+            None => 0,
+            Some(e) => {
+                let have = (1..self.order.len()).map(|pos| self.order[pos]).find(|&old| {
+                    let x = self.entry(old as usize);
+                    !x.is_empty() && x.key() == e.key()
+                });
+                match have.or_else(|| self.first_free().map(|(_, old)| old)) {
+                    Some(old) if have.is_some() => old,
+                    Some(old) => {
+                        self.fill(old, PoolEntry::new_file(e.hash, e.size.saturating_sub(16)));
+                        let pos = self.order.iter().position(|&o| o == old).unwrap_or(old as usize);
+                        note = format!("; its sample went into empty sample slot {pos:03}");
+                        old
+                    }
+                    None => {
+                        self.status = format!("Can't put “{name}” into the sound pool: its sample isn't in the sample pool and there's no empty slot for it");
+                        return;
+                    }
+                }
+            }
+        };
+        let cell = crate::device::library::SoundCell {
+            src: crate::device::library::SoundSrc::Preset { data: std::sync::Arc::new(data), sample, from: path.to_owned() },
+            name: None,
+        };
+        self.lib.set_sound(to, cell);
+        self.status = format!("“{name}” put into pool sound {:03}{note}. Push to send it.", to + 1);
     }
 
     pub fn pool_changed(&self) -> usize {
@@ -276,6 +333,10 @@ impl ElekState {
             } else {
                 self.proj.refresh(&p);
             }
+            if let Some(s) = p.pool_sounds() {
+                self.lib.pool_sounds = Some(Ok(s));
+            }
+            self.lib.patterns_changed();
             self.project = Some(p);
             return;
         }
@@ -292,6 +353,7 @@ impl ElekState {
 
     pub fn set_project(&mut self, p: Box<ElekProject>) {
         self.proj.reset(&p);
+        self.lib.project_changed(&p);
         self.order = (0..p.pool.len() as u16).collect();
         self.confirm_clear = None;
         self.fills.clear();
@@ -310,6 +372,8 @@ impl ElekState {
         self.project = None;
         self.proj = Default::default();
         self.expect_patterns = None;
+        self.expect_sounds = None;
+        self.lib.sounds.clear();
         if let Some(ctl) = &self.reading {
             ctl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1014,6 +1078,7 @@ pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>, drive: b
         &[
             (DevicePick::Page(ElekPage::Order), "Samples", "The sample pool in two side-by-side panes"),
             (DevicePick::Page(ElekPage::Project), "Patterns", "Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)"),
+            (DevicePick::Page(ElekPage::Library), "Sounds", "Kits, sample use, the sound pool and +Drive presets, to plan how to organise the project. Read-only"),
             (DevicePick::Drive, "+Drive", "The device's file storage, in the right column"),
         ],
         |v| match v {
@@ -1044,6 +1109,7 @@ pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekInten
         match st.page {
             ElekPage::Order => preview_tools(ui, st, out),
             ElekPage::Project => crate::ui::elek_project_view::view_tools(ui, st),
+            ElekPage::Library => crate::ui::elek_library_view::view_tools(ui, st),
         }
     });
     ui.separator();
@@ -1223,7 +1289,7 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<El
     let waiting = st.filling.len();
     let from_file = st.project.as_ref().is_some_and(|p| p.from_file.is_some());
     // A stopped read: pool changes rewrite every pattern, so they need them all.
-    let pool_blocked = !st.pool_pushable() && st.pool_changed() > 0;
+    let pool_blocked = !st.pool_pushable() && (st.pool_changed() > 0 || st.lib.sound_changed() > 0);
     let can_push = !busy && (changed > 0 || from_file) && waiting == 0 && !pool_blocked && st.project.as_ref().is_some_and(|p| p.read_only.is_none());
     let label = if wide { format!("⬆ Push to device ({changed})") } else { format!("⬆ {changed}") };
     let push = ui
@@ -1231,14 +1297,15 @@ pub(crate) fn device_bar(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<El
         .on_hover_text(if waiting > 0 {
             format!("Waiting for {waiting} file(s) to reach or be found on the +Drive")
         } else if pool_blocked && !busy {
-            "The read was stopped before every pattern arrived, and sample pool changes rewrite every pattern. Reload to push them, or reset the sample order to push just the pattern changes.".to_owned()
+            "The read was stopped before every pattern and pool sound arrived, and sample pool changes rewrite all of them. Reload to push them, or reset the sample order to push just the pattern changes.".to_owned()
         } else if from_file {
             "Write the whole project from the file into the device's memory, replacing the project loaded there (the saved copy on +Drive is not touched)".to_owned()
         } else {
             format!(
-                "Write {} pool and {} pattern change(s) into the project loaded on the device (its memory, not the saved copy on +Drive)",
+                "Write {} sample pool, {} pattern and {} sound pool change(s) into the project loaded on the device (its memory, not the saved copy on +Drive)",
                 st.pool_changed(),
-                st.proj.changed()
+                st.proj.changed(),
+                st.lib.sound_changed()
             )
         });
     if push.clicked() {
@@ -1528,7 +1595,7 @@ pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIn
     }
     if st.confirm_push {
         let whole = st.project.as_ref().is_some_and(|p| p.from_file.is_some());
-        if let Some(yes) = confirm_push(ui.ctx(), st.pool_changed(), st.proj.changed(), whole) {
+        if let Some(yes) = confirm_push(ui.ctx(), st.pool_changed(), st.proj.changed(), st.lib.sound_changed(), whole) {
             st.confirm_push = false;
             if yes {
                 out.push(ElekIntent::Push { force: false });
@@ -2252,16 +2319,21 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     }
 }
 
-fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize, whole: bool) -> Option<bool> {
+fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize, sounds: usize, whole: bool) -> Option<bool> {
     let mut answer = None;
     egui::Modal::new(egui::Id::unique("elek_push_modal")).show(ctx, |ui| {
         ui.set_width(440.0);
-        let what = match (pool, patterns) {
-            _ if whole => "the whole project from the file".to_owned(),
-            (0, n) => format!("{n} pattern slot(s)"),
-            (n, 0) => format!("new sample order, {n} slot(s)"),
-            (a, b) => format!("{a} sample slot(s) and {b} pattern slot(s)"),
-        };
+        let mut parts = Vec::new();
+        if pool > 0 {
+            parts.push(format!("{pool} sample slot(s)"));
+        }
+        if patterns > 0 {
+            parts.push(format!("{patterns} pattern slot(s)"));
+        }
+        if sounds > 0 {
+            parts.push(format!("{sounds} pool sound(s)"));
+        }
+        let what = if whole { "the whole project from the file".to_owned() } else { parts.join(", ") };
         ui.heading(format!("Push {what}?"));
         ui.add_space(6.0);
         if whole {
@@ -2281,6 +2353,14 @@ fn confirm_push(ctx: &egui::Context, pool: usize, patterns: usize, whole: bool) 
                 "This rewrites the project currently loaded on the device: only the patterns, kits and pool sounds \
                  that change are sent, plus the sample pool if it changed. Everything else on the device is left as is. \
                  The saved copy on +Drive is not touched.",
+            );
+        }
+        if sounds > 0 && !whole {
+            ui.add_space(4.0);
+            ui.colored_label(
+                Color32::from_rgb(230, 120, 90),
+                "Sound pool editing is experimental. Moved sounds take their sound locks with them in every pattern; \
+                 locks on a sound you deleted are removed. Kit tracks keep their own copies of sounds and don't change.",
             );
         }
         if patterns > 0 && !whole {

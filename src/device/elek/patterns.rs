@@ -175,7 +175,7 @@ const SEQ_TRACKS: usize = 16;
 /// `trackStorage_sizeof` for the tracks in pattern `v` (elk-herd). On the
 /// DT1 the tracks fill the space before the p-locks exactly, so that's used
 /// instead; on DT2 v3/v4 there's a gap after them.
-fn track_stride(m: Model, v: u32, plocks: usize) -> usize {
+pub(super) fn track_stride(m: Model, v: u32, plocks: usize) -> usize {
     match (m, v) {
         (DT2, 0) => 2207,
         (DT2, 3 | 4) => 1184,

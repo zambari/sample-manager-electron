@@ -13,7 +13,7 @@
 
 mod conn;
 mod elek;
-pub use elek::{file, patterns, Cell, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, ReadCtl, SavedProject};
+pub use elek::{file, library, patterns, Cell, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, ReadCtl, SavedProject};
 mod presence;
 pub use presence::{Presence, presence, start as watch_presence};
 mod proto;

@@ -223,6 +223,7 @@ impl ElekProject {
         order: &[u16],
         fills: &HashMap<u16, PoolEntry>,
         cells: &[Cell],
+        sounds: &[super::library::SoundCell],
         pool: &[PoolEntry],
         names: &HashMap<(u32, u32), String>,
     ) -> Result<SaveFile, String> {
@@ -234,7 +235,7 @@ impl ElekProject {
             Err(_) => HashMap::new(),
         };
         let messages = self
-            .edited_msgs(order, fills, cells)
+            .edited_msgs(order, fills, cells, sounds)
             .into_iter()
             .enumerate()
             .map(|(mi, (kind, index, data))| {
@@ -283,11 +284,12 @@ impl ElekProject {
         order: &[u16],
         fills: &HashMap<u16, PoolEntry>,
         cells: &[Cell],
+        sounds: &[super::library::SoundCell],
         pool: &[PoolEntry],
         names: &HashMap<(u32, u32), String>,
     ) -> Result<SaveFile, String> {
         let data = self
-            .expected_patterns(order, fills, cells)
+            .expected_patterns(order, fills, cells, sounds)
             .into_iter()
             .nth(slot)
             .flatten()

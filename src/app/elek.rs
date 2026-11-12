@@ -184,6 +184,7 @@ impl App {
         let intents = match self.elek.page {
             elek_view::ElekPage::Order => elek_view::show(ui, &mut self.elek),
             elek_view::ElekPage::Project => crate::ui::elek_project_view::show(ui, &mut self.elek),
+            elek_view::ElekPage::Library => crate::ui::elek_library_view::show(ui, &mut self.elek),
         };
         self.elek_intents(intents);
     }
@@ -411,6 +412,18 @@ impl App {
                     self.device.elek(ElekCmd::ListProjects);
                 }
                 ElekIntent::Read => self.elek_read(),
+                ElekIntent::ReadSounds => {
+                    self.elek.lib.sound_progress = Some((0, crate::device::library::SOUND_POOL));
+                    self.device.elek(ElekCmd::ReadSounds);
+                }
+                ElekIntent::ReadPreset(path) => {
+                    self.elek.lib.preset_pending.insert(path.clone());
+                    self.device.elek(ElekCmd::ReadPreset(path));
+                }
+                ElekIntent::ListData(path) => {
+                    self.elek.lib.data_pending.insert(path.clone());
+                    self.device.elek(ElekCmd::ListData(path));
+                }
                 ElekIntent::SaveDump => {
                     let Some(p) = &self.elek.project else { continue };
                     let Some(home) = std::env::var_os("HOME") else { continue };
@@ -476,14 +489,26 @@ impl App {
         let whole = p.from_file.is_some();
         let force = force || whole || live;
         let cells = &self.elek.proj.cells;
-        let msgs = p.build_push(&self.elek.order, &self.elek.fills, cells);
+        let sounds = &self.elek.lib.sounds;
+        let msgs = p.build_push(&self.elek.order, &self.elek.fills, cells, sounds);
         let pat_changed = self.elek.proj.changed();
         if pat_changed > 0 {
             for (i, c) in cells.iter().enumerate().filter(|(i, c)| **c != crate::device::Cell::as_read(*i)) {
                 crate::log::line(format!("elek-pat: pushing {}: {:?}", crate::device::patterns::label(i), c));
             }
         }
-        self.elek.expect_patterns = (pat_changed > 0 || whole).then(|| p.expected_patterns(&self.elek.order, &self.elek.fills, cells));
+        self.elek.expect_patterns = (pat_changed > 0 || whole).then(|| p.expected_patterns(&self.elek.order, &self.elek.fills, cells, sounds));
+        let snd_changed = crate::device::library::sounds_changed(sounds);
+        self.elek.expect_sounds = (snd_changed > 0).then(|| {
+            for (i, c) in sounds.iter().enumerate().filter(|(i, c)| **c != crate::device::library::SoundCell::as_read(*i)) {
+                crate::log::line(format!("elek-lib: pushing pool sound {}: {:?} name {:?}", i + 1, match &c.src {
+                    crate::device::library::SoundSrc::Read(o) => format!("from {}", *o as usize + 1),
+                    crate::device::library::SoundSrc::Empty => "emptied".into(),
+                    crate::device::library::SoundSrc::Preset { from, sample, .. } => format!("preset {from}, sample slot {sample} (as read)"),
+                }, c.name));
+            }
+            p.edited_sounds(sounds).into_iter().map(|s| if s.blank { String::new() } else { s.name }).collect()
+        });
         for (slot, e) in &self.elek.fills {
             if e.is_empty() {
                 crate::log::line(format!("elek: pushing slot {slot} (as read) cleared"));
@@ -536,7 +561,7 @@ impl App {
         }
         // A read stopped early: some patterns would be left on the wrong
         // samples, so live pushes stop until a full reload.
-        if st.reading.is_none() && st.project.as_ref().is_some_and(|p| p.partial) {
+        if st.reading.is_none() && st.project.as_ref().is_some_and(|p| p.partial || !p.sounds_read) {
             st.live = false;
             st.status = "Live mode off: the read didn't finish, so not every pattern could follow its samples. Reload to turn it on again.".into();
             return;
@@ -992,7 +1017,7 @@ impl App {
         let base = format!("{} project", p.model.name());
         let Some(path) = Self::ask_save_path("projects", "Project", &base, bundle) else { return };
         let st = &self.elek;
-        let file = p.project_file(&st.order, &st.fills, &st.proj.cells, &st.new_pool(), &st.names);
+        let file = p.project_file(&st.order, &st.fills, &st.proj.cells, &st.lib.sounds, &st.new_pool(), &st.names);
         self.save_elek_file(file, path, bundle, "Project".into());
     }
 
@@ -1003,7 +1028,7 @@ impl App {
         let base: String = base.chars().map(|c| if "/\\:".contains(c) { '_' } else { c }).collect();
         let Some(path) = Self::ask_save_path("patterns", "Pattern", &base, bundle) else { return };
         let st = &self.elek;
-        let file = p.pattern_file(slot, name, &st.order, &st.fills, &st.proj.cells, &st.new_pool(), &st.names);
+        let file = p.pattern_file(slot, name, &st.order, &st.fills, &st.proj.cells, &st.lib.sounds, &st.new_pool(), &st.names);
         self.save_elek_file(file, path, bundle, label);
     }
 
@@ -1432,6 +1457,30 @@ impl App {
         let st = &mut self.elek;
         match e {
             ElekEv::Projects(r) => st.projects = Some(r),
+            ElekEv::SoundProgress { done, total } => st.lib.sound_progress = Some((done, total)),
+            ElekEv::Sounds(r) => {
+                st.lib.sound_progress = None;
+                st.status = match &r {
+                    Ok(s) => format!("Sound pool read: {} sounds in use", s.iter().filter(|s| !s.blank).count()),
+                    Err(e) => format!("Sound pool read failed: {e}"),
+                };
+                st.lib.pool_sounds = Some(r);
+            }
+            ElekEv::Preset { path, r } => {
+                st.lib.preset_pending.remove(&path);
+                // Dropped on the sound pool before it was read: place it now.
+                if let Some(to) = st.lib.place_after.remove(&path) {
+                    match &r {
+                        Ok(pr) => st.place_preset(to, &path, pr),
+                        Err(e) => st.status = format!("Couldn't read preset {path}: {e}"),
+                    }
+                }
+                st.lib.presets.insert(path, r);
+            }
+            ElekEv::Data { path, items } => {
+                st.lib.data_pending.remove(&path);
+                st.lib.data.insert(path, items);
+            }
             ElekEv::Partial(p) => {
                 st.set_project(p);
                 st.read_shown = true;
@@ -1517,6 +1566,24 @@ impl App {
                             }
                             None => format!("Read {used} samples"),
                         };
+                        if let (Some(want), Some(got)) = (st.expect_sounds.take(), p.pool_sounds()) {
+                            let off: Vec<String> = want
+                                .iter()
+                                .zip(&got)
+                                .enumerate()
+                                .filter(|(_, (w, g))| **w != if g.blank { String::new() } else { g.name.clone() })
+                                .map(|(i, (w, g))| format!("{:03} sent {w:?} read {:?}", i + 1, g.name))
+                                .collect();
+                            if off.is_empty() {
+                                crate::log::line("elek-lib: read back after push: the sound pool matches what was sent");
+                                st.status = "Pushed and read back: the device has the new sound pool. Save on the device (PROJECT › SAVE) to keep it.".into();
+                            } else {
+                                crate::log::line(format!("elek-lib: read back after push, sound pool differs: {}", off.join("; ")));
+                                let msg = format!("{} pool sound(s) read back different from what was sent (details in the log, elek-lib:). Check on the device before saving.", off.len());
+                                self.errors.push(msg.clone());
+                                st.status = msg;
+                            }
+                        }
                         match pat_check {
                             Some(Ok(())) => {
                                 crate::log::line("elek-pat: read back after push: every pattern matches what was sent".to_owned());
@@ -1542,6 +1609,8 @@ impl App {
                             } else {
                                 format!("Read stopped after {n} of 128 patterns. Bank {} can be edited and pushed; reload to read the rest.", banks.join(", "))
                             };
+                        } else if !p.sounds_read {
+                            st.status = "Read stopped before the sound pool was in: patterns can be pushed, sample pool changes can't (they move the samples pool sounds play). Reload to read it.".into();
                         }
                         if streamed {
                             st.finish_read(p);
@@ -1623,6 +1692,7 @@ impl App {
                     st.busy = None;
                     st.expect = None;
                     st.expect_patterns = None;
+                    st.expect_sounds = None;
                     st.status = format!("Push failed: {e}");
                     self.errors.push(format!("push to device: {e}"));
                 }

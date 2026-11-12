@@ -9,6 +9,7 @@ use super::*;
 
 mod dump;
 pub mod file;
+pub mod library;
 pub mod patterns;
 
 pub use patterns::{Cell, PatState, Patterns};
@@ -545,6 +546,11 @@ pub struct ElekProject {
     pub partial: bool,
     /// The 128 patterns for the project editor, or why they can't be shown.
     pub patterns: Result<Box<Patterns>, String>,
+    /// The sound pool is in `msgs` in full, so pool changes can renumber
+    /// the samples its sounds play. False after a read stopped before the
+    /// sounds came in: pool changes would leave those sounds on the wrong
+    /// samples, so they aren't pushed.
+    pub sounds_read: bool,
 }
 
 /// The pool from a project settings struct: where it starts, and its entries.
@@ -662,6 +668,7 @@ impl ElekProject {
             read_only,
             partial,
             patterns,
+            sounds_read: true,
         })
     }
 
@@ -696,6 +703,7 @@ impl ElekProject {
             read_only: Some("still reading the patterns".into()),
             partial: true,
             patterns: Err("still reading the patterns".into()),
+            sounds_read: false,
         })
     }
 
@@ -714,29 +722,50 @@ impl ElekProject {
     /// (settings last). Untouched patterns, kits and sounds are left alone on
     /// the device, so edits made there since the read survive.
     /// `fills` are new files put into slots that were empty, by old slot.
-    pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Vec<u8>> {
+    pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<Vec<u8>> {
         let all = self.from_file.is_some();
-        self.new_data(order, fills, cells)
-            .into_iter()
-            .take(self.base)
-            .enumerate()
-            .filter_map(|(i, d)| {
-                let m = &self.msgs[i];
-                if all {
-                    return Some(build_dump(self.model, m.kind, m.index, d.as_ref().unwrap_or(&m.data)));
-                }
-                let d = d.filter(|d| *d != m.data)?;
-                Some(build_dump(self.model, m.kind, m.index, &d))
-            })
-            .collect()
+        let data = self.new_data(order, fills, cells, sounds);
+        let mut out = Vec::new();
+        let mut settings = None;
+        for (i, d) in data.iter().enumerate().take(self.base) {
+            let m = &self.msgs[i];
+            // Pool sounds go out below, as edited.
+            if m.kind == SOUND {
+                continue;
+            }
+            let d = if all { Some(d.as_ref().unwrap_or(&m.data)) } else { d.as_ref().filter(|d| **d != m.data) };
+            let Some(d) = d else { continue };
+            let msg = build_dump(self.model, m.kind, m.index, d);
+            if m.kind == SETTINGS {
+                settings = Some(msg);
+            } else {
+                out.push(msg);
+            }
+        }
+        for (i, d) in self.sound_writes(sounds, &data, &self.new_of(order), all) {
+            out.push(build_dump(self.model, SOUND, i, &d));
+        }
+        out.extend(settings);
+        out
+    }
+
+    /// `new_of[old] = new` for the sample pool laid out as `order`.
+    fn new_of(&self, order: &[u16]) -> Vec<usize> {
+        let mut new_of: Vec<usize> = (0..self.pool.len()).collect();
+        for (new, &old) in order.iter().enumerate() {
+            if let Some(n) = new_of.get_mut(old as usize) {
+                *n = new;
+            }
+        }
+        new_of
     }
 
     /// Every pattern payload (by slot) the device should hold after the push,
     /// to compare with the read-back.
     /// `None` for slots whose pattern never arrived (a stopped read).
-    pub fn expected_patterns(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Option<Vec<u8>>> {
+    pub fn expected_patterns(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<Option<Vec<u8>>> {
         let Ok(pats) = &self.patterns else { return Vec::new() };
-        let data = self.new_data(order, fills, cells);
+        let data = self.new_data(order, fills, cells, sounds);
         (0..patterns::PATTERNS)
             .map(|i| {
                 let mi = pats.msg_of(i)?;
@@ -747,13 +776,25 @@ impl ElekProject {
 
     /// Every one of the project's own messages as it would be after a push:
     /// `(kind, index, payload)`, in dump order.
-    pub fn edited_msgs(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<(u8, u8, Vec<u8>)> {
-        self.new_data(order, fills, cells)
-            .into_iter()
-            .take(self.base)
-            .zip(&self.msgs)
-            .map(|(d, m)| (m.kind, m.index, d.unwrap_or_else(|| m.data.clone())))
-            .collect()
+    pub fn edited_msgs(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<(u8, u8, Vec<u8>)> {
+        let data = self.new_data(order, fills, cells, sounds);
+        let new_of = self.new_of(order);
+        let pool: Vec<(u8, u8, Vec<u8>)> = (0..library::SOUND_POOL)
+            .filter_map(|i| Some((SOUND, i as u8, self.sound_want(sounds, i, &data, &new_of)?)))
+            .collect();
+        let mut out = Vec::new();
+        let mut settings = None;
+        for (d, m) in data.into_iter().take(self.base).zip(&self.msgs) {
+            let d = d.unwrap_or_else(|| m.data.clone());
+            match m.kind {
+                SOUND => {}
+                SETTINGS => settings = Some((m.kind, m.index, d)),
+                _ => out.push((m.kind, m.index, d)),
+            }
+        }
+        out.extend(pool);
+        out.extend(settings);
+        out
     }
 
     /// A project from payloads saved earlier (see `file`).
@@ -806,6 +847,15 @@ impl ElekProject {
         Ok(idx)
     }
 
+    /// The sound pool as read, all 128 (blank where nothing came), or
+    /// `None` when it wasn't read in full.
+    pub fn pool_sounds(&self) -> Option<Vec<library::PoolSound>> {
+        if !self.sounds_read {
+            return None;
+        }
+        Some(library::sounds_from(self.model, self.msgs[..self.base].iter().filter(|m| m.kind == SOUND)))
+    }
+
     /// The pattern payloads as read, by slot (empty if not parsed; `None`
     /// for ones that never arrived).
     pub fn pattern_data(&self) -> Vec<Option<&[u8]>> {
@@ -814,7 +864,7 @@ impl ElekProject {
     }
 
     /// New payload per message (`None` = untouched).
-    fn new_data(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell]) -> Vec<Option<Vec<u8>>> {
+    fn new_data(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<Option<Vec<u8>>> {
         let n = self.pool.len();
         let mut new_of = vec![0usize; n];
         for (new, &old) in order.iter().enumerate() {
@@ -843,6 +893,17 @@ impl ElekProject {
                         let src = self.pool_at + old as usize * 16;
                         d[dst..dst + 16].copy_from_slice(&self.msgs[self.settings_msg].data[src..src + 16]);
                     }
+                }
+            }
+        }
+        // Sound locks follow the pool sounds they point at (every pattern,
+        // loaded ones included, which point into this pool as read).
+        if let Some(map) = Self::sound_moves(sounds) {
+            for (mi, m) in self.msgs.iter().enumerate().filter(|(_, m)| m.kind == PATTERN_KIT) {
+                let mut d = data[mi].clone().unwrap_or_else(|| m.data.clone());
+                self.move_locks(&mut d, &map);
+                if d != m.data {
+                    data[mi] = Some(d);
                 }
             }
         }
@@ -881,6 +942,12 @@ pub struct SavedProject {
 
 pub enum ElekCmd {
     ListProjects,
+    /// The project's sound pool, read-only (`library`).
+    ReadSounds,
+    /// A +Drive data folder (`/`, `/soundbanks`, …), read-only.
+    ListData(String),
+    /// A sound preset on the +Drive (`/soundbanks/…`), read-only.
+    ReadPreset(String),
     /// Read the project; `known` names needn't be looked up again. `ctl`
     /// steers it while it runs (which banks first, stop).
     Read {
@@ -922,6 +989,10 @@ impl ReadCtl {
 
 pub enum ElekEv {
     Projects(Result<Vec<SavedProject>, String>),
+    SoundProgress { done: usize, total: usize },
+    Sounds(Result<Vec<library::PoolSound>, String>),
+    Data { path: String, items: Result<Vec<library::DataItem>, String> },
+    Preset { path: String, r: Result<library::Preset, String> },
     Progress {
         label: String,
         done: usize,
@@ -1173,6 +1244,28 @@ impl Worker {
                 let r = self.with_conn(|c| c.list_projects());
                 self.em.send(Ev::Elek(ElekEv::Projects(r)));
             }
+            ElekCmd::ReadSounds => {
+                let r = self.read_sound_pool();
+                if let Err(e) = &r {
+                    crate::log::line(format!("elek-lib: sound pool read failed: {e}"));
+                }
+                self.em.send(Ev::Elek(ElekEv::Sounds(r)));
+            }
+            ElekCmd::ReadPreset(path) => {
+                let r = self.read_preset(&path);
+                if let Err(e) = &r {
+                    crate::log::line(format!("elek-lib: reading preset {path} failed: {e}"));
+                }
+                self.em.send(Ev::Elek(ElekEv::Preset { path, r }));
+            }
+            ElekCmd::ListData(path) => {
+                let items = self.with_conn(|c| c.list_data(&path));
+                crate::log::line(format!("elek-lib: listed {path}: {}", match &items {
+                    Ok(v) => format!("{} entries", v.len()),
+                    Err(e) => e.clone(),
+                }));
+                self.em.send(Ev::Elek(ElekEv::Data { path, items }));
+            }
             ElekCmd::Read { known, ctl } => {
                 let mut asked = known;
                 prog("Reading sample pool", 0, 129);
@@ -1190,16 +1283,18 @@ impl Worker {
                         // Names before the patterns: a quick request each,
                         // where the patterns take half a minute.
                         self.look_up_names(&keys, &mut asked, true);
-                        Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses }
+                        Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses, sounds: false }
                     }
                     Ok((_, Err(e), _)) | Err(e) => {
                         crate::log::line(format!("elek: early pool read skipped: {e}"));
-                        Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new() }
+                        Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new(), sounds: false }
                     }
                 };
                 let started = Instant::now();
                 let r = self.read_patterns(&mut st, &ctl);
+                let r = r.and_then(|()| if ctl.stopped() || st.sounds { Ok(()) } else { self.read_sounds(&mut st, &ctl) });
                 let stopped = ctl.stopped();
+                let sounds = st.sounds;
                 // Without the early settings (or a whole dump), ask for them now.
                 let r = r.and_then(|()| {
                     if st.settings().is_none() {
@@ -1213,6 +1308,13 @@ impl Worker {
                     st.finish()
                 });
                 let r = r.and_then(|(m, msgs)| ElekProject::parse(m, msgs, stopped).map(Box::new));
+                let r = r.map(|mut p| {
+                    p.sounds_read = sounds;
+                    if !sounds {
+                        crate::log::line("elek: sound pool not read in full; sample pool changes won't be pushed");
+                    }
+                    p
+                });
                 match &r {
                     Ok(p) => crate::log::line(format!(
                         "elek: parsed {}, {} references in {:.1}s{}{}",
@@ -1282,6 +1384,8 @@ struct Stream {
     live: bool,
     scan: Scan,
     uses: Vec<u32>,
+    /// Every pool sound is in `msgs` (the whole dump, or one request each).
+    sounds: bool,
 }
 
 impl Stream {
@@ -1293,7 +1397,17 @@ impl Stream {
         self.msgs.iter().rev().find(|m| m.kind == SETTINGS)
     }
 
+    fn have_sound(&self, i: u8) -> bool {
+        self.msgs.iter().any(|m| m.kind == SOUND && m.index == i)
+    }
+
     fn add(&mut self, em: &Emitter, msg: DumpMsg) {
+        if msg.kind == SOUND {
+            if !self.have_sound(msg.index) {
+                self.msgs.push(msg);
+            }
+            return;
+        }
         if msg.kind != PATTERN_KIT {
             // The whole dump's own settings, at its end.
             self.msgs.push(msg);
@@ -1314,12 +1428,13 @@ impl Stream {
         em.send(Ev::Elek(ElekEv::Pattern { msg: self.msgs[mi].clone(), pats }));
     }
 
-    /// Everything read, in dump order: patterns by slot, settings last.
+    /// Everything read, in dump order: patterns by slot, then pool sounds
+    /// by index, settings last.
     fn finish(self) -> Result<(Model, Vec<DumpMsg>), String> {
         let m = self.m.ok_or("no device model")?;
         let settings = self.settings().cloned().ok_or("no project settings came back")?;
-        let mut msgs: Vec<DumpMsg> = self.msgs.into_iter().filter(|m| m.kind == PATTERN_KIT).collect();
-        msgs.sort_by_key(|m| m.index);
+        let mut msgs: Vec<DumpMsg> = self.msgs.into_iter().filter(|m| m.kind == PATTERN_KIT || m.kind == SOUND).collect();
+        msgs.sort_by_key(|m| (m.kind != PATTERN_KIT, m.index));
         msgs.push(settings);
         Ok((m, msgs))
     }
@@ -1387,6 +1502,8 @@ impl Worker {
             })
         })?;
         st.m = Some(m);
+        // The dump carries every non-empty sound, unless it was cut short.
+        st.sounds = !ctl.stopped();
         Ok(())
     }
 }
