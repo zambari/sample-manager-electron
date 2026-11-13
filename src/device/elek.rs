@@ -732,7 +732,7 @@ impl ElekProject {
     /// `fills` are new files put into slots that were empty, by old slot.
     pub fn build_push(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<Vec<u8>> {
         let all = self.from_file.is_some();
-        let data = self.new_data(order, fills, cells, sounds);
+        let (pre, data) = self.new_data_parts(order, fills, cells, sounds);
         let mut out = Vec::new();
         let mut settings = None;
         for (i, d) in data.iter().enumerate().take(self.base) {
@@ -750,7 +750,7 @@ impl ElekProject {
                 out.push(msg);
             }
         }
-        for (i, d) in self.sound_writes(sounds, &data, all) {
+        for (i, d) in self.sound_writes(sounds, &pre, all) {
             out.push(build_dump(self.model, SOUND, i, &d));
         }
         out.extend(settings);
@@ -774,9 +774,9 @@ impl ElekProject {
     /// Every one of the project's own messages as it would be after a push:
     /// `(kind, index, payload)`, in dump order.
     pub fn edited_msgs(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<(u8, u8, Vec<u8>)> {
-        let data = self.new_data(order, fills, cells, sounds);
+        let (pre, data) = self.new_data_parts(order, fills, cells, sounds);
         let pool: Vec<(u8, u8, Vec<u8>)> = (0..library::SOUND_POOL)
-            .filter_map(|i| Some((SOUND, i as u8, self.sound_want(sounds, i, &data)?)))
+            .filter_map(|i| Some((SOUND, i as u8, self.sound_want(sounds, i, &pre)?)))
             .collect();
         let mut out = Vec::new();
         let mut settings = None;
@@ -886,6 +886,14 @@ impl ElekProject {
 
     /// New payload per message (`None` = untouched).
     fn new_data(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<Option<Vec<u8>>> {
+        self.new_data_parts(order, fills, cells, sounds).1
+    }
+
+    /// `new_data`, and before it the payloads with only the sample pool
+    /// renumbered and sound locks moved (patterns still where they were
+    /// read): where pool sounds, and track sounds pasted into the pool, are
+    /// taken from.
+    fn new_data_parts(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> (Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>) {
         let n = self.pool.len();
         let mut new_of = vec![0usize; n];
         for (new, &old) in order.iter().enumerate() {
@@ -928,6 +936,7 @@ impl ElekProject {
                 }
             }
         }
+        let pre = data.clone();
         // Patterns: built from the pool-remapped payloads, then placed.
         if let Ok(pats) = &self.patterns {
             if cells.len() == patterns::PATTERNS {
@@ -942,14 +951,25 @@ impl ElekProject {
                     .enumerate()
                     .filter(|(i, c)| **c != Cell::as_read(*i))
                     .filter(|(_, c)| c.sources().all(|s| pats.loaded[s as usize]))
-                    .filter_map(|(i, c)| Some((pats.msg_of(i)?, pats.build(i, c, src)?)))
+                    .filter_map(|(i, c)| {
+                        let mut d = pats.build(i, c, src)?;
+                        // Track sounds pasted from the sound pool.
+                        for (t, sc) in &c.pool {
+                            let put = self.cell_sound(sc, &pre).ok_or_else(|| "pool sound is empty".to_owned()).and_then(|snd| pats.put_track_sound(&mut d, *t as usize, &snd));
+                            if let Err(e) = put {
+                                crate::log::line(format!("elek-pat: {}: track {} pool sound not pasted: {e}", patterns::label(i), t + 1));
+                                return None;
+                            }
+                        }
+                        Some((pats.msg_of(i)?, d))
+                    })
                     .collect();
                 for (mi, d) in placed {
                     data[mi] = Some(d);
                 }
             }
         }
-        data
+        (pre, data)
     }
 }
 

@@ -207,7 +207,7 @@ notices when the device is plugged in or out and reconnects on its own.
   between slots. A bar under the panes shows how much sample memory the
   project uses and how much that changed since it was read.
 
-![Samples page: two bank panes of a Digitakt II project, with the right-click menu of a pool slot](docs/sample_pool_menu.webp)
+![Samples page: two bank panes of a Digitakt II project, with the right-click menu of a pool slot](docs/sample_pool_menu.png)
 
 #### Patterns: organise and rename (experimental)
 

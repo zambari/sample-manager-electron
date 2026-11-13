@@ -14,7 +14,7 @@ use super::*;
 use super::machines::{machine_id, machine_name, src_params, SrcParam};
 
 /// Where pool sound `i` comes from after the Sounds page's edits.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SoundSrc {
     /// The pool sound read at this index.
     Read(u8),
@@ -25,7 +25,7 @@ pub enum SoundSrc {
 }
 
 /// One pool sound after the edits: where it comes from, and its new name.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SoundCell {
     pub src: SoundSrc,
     pub name: Option<String>,
@@ -40,6 +40,30 @@ impl SoundCell {
 /// The sound pool untouched: each sound where it was read.
 pub fn sounds_as_read() -> Vec<SoundCell> {
     (0..SOUND_POOL).map(SoundCell::as_read).collect()
+}
+
+/// Where each pool sound's locks go (old index → new; `NO_LOCK`: removed).
+/// A sound found in several places (pasted copies) keeps its locks where it
+/// still sits as read, else at its first place; a place whose own sound went
+/// nowhere keeps its locks, which then play whatever was pasted there.
+pub fn lock_map(cells: &[SoundCell]) -> Vec<u8> {
+    let mut map = vec![NO_LOCK; SOUND_POOL];
+    if cells.is_empty() {
+        return (0..SOUND_POOL as u8).collect();
+    }
+    for (new, c) in cells.iter().enumerate() {
+        if let SoundSrc::Read(o) = c.src {
+            if map[o as usize] == NO_LOCK || new == o as usize {
+                map[o as usize] = new as u8;
+            }
+        }
+    }
+    for (new, c) in cells.iter().enumerate() {
+        if c.src != SoundSrc::Empty && map[new] == NO_LOCK {
+            map[new] = new as u8;
+        }
+    }
+    map
 }
 
 /// Pool sounds that differ from the read (`cells` empty: none).
@@ -174,19 +198,7 @@ impl ElekProject {
         if sounds_changed(cells) == 0 {
             return None;
         }
-        let mut map = vec![NO_LOCK; SOUND_POOL];
-        for (new, c) in cells.iter().enumerate() {
-            if let SoundSrc::Read(o) = c.src {
-                map[o as usize] = new as u8;
-            }
-        }
-        // A track sound pasted over a pool sound that went nowhere else
-        // takes over its locks: they play the pasted sound.
-        for (new, c) in cells.iter().enumerate() {
-            if matches!(c.src, SoundSrc::Track { .. }) && map[new] == NO_LOCK {
-                map[new] = new as u8;
-            }
-        }
+        let map = lock_map(cells);
         (map.iter().enumerate().any(|(i, &n)| n as usize != i)).then_some(map)
     }
 
@@ -212,11 +224,18 @@ impl ElekProject {
     /// sample renumbering itself (`new_of[old] = new`).
     pub(super) fn sound_want(&self, cells: &[SoundCell], i: usize, data: &[Option<Vec<u8>>]) -> Option<Vec<u8>> {
         let cell = cells.get(i).cloned().unwrap_or_else(|| SoundCell::as_read(i));
+        self.cell_sound(&cell, data)
+    }
+
+    /// The sound struct pool cell `cell` stands for (`None`: empty), from
+    /// the payloads with the sample pool renumbered (`data`, before patterns
+    /// are placed; empty: as read).
+    pub(super) fn cell_sound(&self, cell: &SoundCell, data: &[Option<Vec<u8>>]) -> Option<Vec<u8>> {
         let mut d = match &cell.src {
             SoundSrc::Read(o) => {
                 let mi = self.sound_msg(*o as usize)?;
                 let d = data.get(mi).cloned().flatten().unwrap_or_else(|| self.msgs[mi].data.clone());
-                if be32(&d, 0) != Some(MAGIC) || parse_sound(self.model, i, &d).blank {
+                if be32(&d, 0) != Some(MAGIC) || parse_sound(self.model, 0, &d).blank {
                     return None;
                 }
                 d
@@ -257,6 +276,22 @@ impl ElekProject {
             }
         }
         Ok(snd.to_vec())
+    }
+
+    /// Pool cell `cell` as a kit track sound (decoded), or why it can't be
+    /// one: empty, or a sound version unlike the kits'.
+    pub fn pool_sound_for_track(&self, cell: &SoundCell) -> Result<PoolSound, String> {
+        let d = self.cell_sound(cell, &[]).ok_or("that pool sound is empty")?;
+        let pats = self.patterns.as_ref().map_err(|e| e.clone())?;
+        let kit_v = (0..patterns::PATTERNS)
+            .filter_map(|i| pats.msg_of(i))
+            .find_map(|mi| pats.track_sound(&self.msgs[mi].data, 0).and_then(|(s, _)| be32(s, 4)));
+        if let (Some(kv), Some(v)) = (kit_v, be32(&d, 4)) {
+            if kv != v {
+                return Err(format!("the pool sound is version {v}, the kits' sounds are version {kv}: not safe to paste"));
+            }
+        }
+        Ok(parse_sound(self.model, 0, &d))
     }
 
     /// The `0x53` payloads a push sends: every pool sound that changes

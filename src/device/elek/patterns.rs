@@ -277,19 +277,23 @@ pub struct Cell {
     /// Track sounds (kit sound, MIDI-track bit) taken from another pattern,
     /// the same way.
     pub sounds: BTreeMap<u8, Option<u8>>,
+    /// Track sounds taken from the sound pool (pasted from the Sounds page):
+    /// track → the pool sound as it was when copied (where it was read from
+    /// and its name). Never on a track that is also in `sounds`.
+    pub pool: BTreeMap<u8, super::library::SoundCell>,
 }
 
 impl Cell {
     pub fn as_read(slot: usize) -> Self {
-        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new() }
+        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new() }
     }
 
     pub fn empty() -> Self {
-        Self { src: None, name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new() }
+        Self { src: None, name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new() }
     }
 
     pub fn with_src(src: u8) -> Self {
-        Self { src: Some(src), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new() }
+        Self { src: Some(src), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new() }
     }
 
     /// The pattern track `t` comes from (`None`: an empty pattern).
@@ -314,6 +318,7 @@ impl Cell {
 
     /// Take track `t`'s sound from pattern `from`, like `set_track`.
     pub fn set_sound(&mut self, t: usize, from: Option<u8>) {
+        self.pool.remove(&(t as u8));
         if from == self.src {
             self.sounds.remove(&(t as u8));
         } else {
@@ -321,9 +326,15 @@ impl Cell {
         }
     }
 
+    /// Give track `t` pool sound `c` (as copied on the Sounds page).
+    pub fn set_pool_sound(&mut self, t: usize, c: super::library::SoundCell) {
+        self.sounds.remove(&(t as u8));
+        self.pool.insert(t as u8, c);
+    }
+
     /// Tracks with pasted events or sound.
     pub fn pasted_tracks(&self) -> BTreeSet<u8> {
-        self.tracks.keys().chain(self.sounds.keys()).copied().collect()
+        self.tracks.keys().chain(self.sounds.keys()).chain(self.pool.keys()).copied().collect()
     }
 
     /// Every pattern this cell reads from.
@@ -786,6 +797,26 @@ impl Patterns {
         let snd = d.get(at..at + sz)?;
         let midi = g.midi_mask.is_some_and(|m| be16(d, m).unwrap_or(0) & (1u16 << t) != 0);
         Some((snd, midi))
+    }
+
+    /// Put sound struct `snd` (a pool sound) on kit track `t` of payload
+    /// `d`; the track becomes an audio track (DT2 MIDI bit cleared).
+    pub(super) fn put_track_sound(&self, d: &mut [u8], t: usize, snd: &[u8]) -> Result<(), String> {
+        let g = &self.geo;
+        if t >= g.model.kit_tracks() {
+            return Err("not a kit (audio) track".into());
+        }
+        let (Some(s0), Some(sz)) = (g.sounds, g.ssize) else { return Err("the kit's track sound layout isn't known".into()) };
+        if snd.len() != sz {
+            return Err(format!("pool sound is {} bytes, a kit sound {sz}", snd.len()));
+        }
+        let at = g.kit + s0 + t * sz;
+        d.get_mut(at..at + sz).ok_or("payload too short")?.copy_from_slice(snd);
+        if let Some(m) = g.midi_mask {
+            let v = be16(d, m).unwrap_or(0) & !(1u16 << t);
+            d[m..m + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        Ok(())
     }
 
     pub(super) fn splice_track(&self, d: &mut [u8], s: &[u8], t: usize, events: bool) -> Result<(), String> {
