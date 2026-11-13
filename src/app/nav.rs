@@ -153,7 +153,7 @@ impl App {
         let Some((_, buf)) = self.path_edit.as_mut() else {
             return;
         };
-        let id = egui::Id::new(("path_edit", role.label()));
+        let id = egui::Id::unique(("path_edit", role.label()));
         let resp = ui.add(
             egui::TextEdit::singleline(buf)
                 .id(id)

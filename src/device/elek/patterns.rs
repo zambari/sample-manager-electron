@@ -64,8 +64,6 @@ pub struct PatternInfo {
     /// the kit name (patterns from before the DT1 had pattern names).
     pub name: String,
     pub kit_name: String,
-    /// The pattern-name field as text (· for non-printable).
-    pub pattern_field: String,
     pub tracks: Vec<TrackInfo>,
     /// Sequencer tracks: the audio tracks, then the MIDI tracks. Empty when
     /// the layout isn't known.
@@ -123,7 +121,6 @@ impl PatternInfo {
             state: PatState::Blank,
             name: String::new(),
             kit_name: String::new(),
-            pattern_field: String::new(),
             tracks: Vec::new(),
             seq: Vec::new(),
             diff: 0,
@@ -432,11 +429,11 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
     };
     let seq = pattern_plocks(g.model, g.pv).map_or_else(Vec::new, |pl| parse_seq(g.model, g.pv, d, pl, g.sample_param));
     let kit_name = text_at(d, kit_name_at);
-    let name = if !pf.is_empty() && printable(d, pattern_name_at) { pf.clone() } else { kit_name.clone() };
+    let name = if !pf.is_empty() && printable(d, pattern_name_at) { pf } else { kit_name.clone() };
     let tail_at = pattern_name_at + 16;
     let tail = d.get(tail_at..(tail_at + PAT_TAIL).min(d.len())).map(<[u8]>::to_vec).unwrap_or_default();
     let timing = (g.model == DT && g.pv >= 9).then(|| Timing::read(&tail)).flatten().filter(|t| scale_label(t.scale).is_some());
-    PatternInfo { state, name, kit_name, pattern_field: pf, tracks, seq, diff, tail, tail_at, timing }
+    PatternInfo { state, name, kit_name, tracks, seq, diff, tail, tail_at, timing }
 }
 
 impl Patterns {
@@ -776,6 +773,21 @@ impl Patterns {
     /// sequencer track (trigs, notes, length, scale…) and its p-lock rows,
     /// packed to the front afterwards in their old order. Else, for kit
     /// tracks, its sound (sample, parameters) and MIDI-track bit.
+    /// Kit track `t`'s sound struct in pattern payload `d`, and whether the
+    /// track is a MIDI track (DT2 MIDI bit). `None` past the audio tracks or
+    /// where the kit layout isn't known.
+    pub(super) fn track_sound<'a>(&self, d: &'a [u8], t: usize) -> Option<(&'a [u8], bool)> {
+        let g = &self.geo;
+        if t >= g.model.kit_tracks() {
+            return None;
+        }
+        let (s0, sz) = (g.sounds?, g.ssize?);
+        let at = g.kit + s0 + t * sz;
+        let snd = d.get(at..at + sz)?;
+        let midi = g.midi_mask.is_some_and(|m| be16(d, m).unwrap_or(0) & (1u16 << t) != 0);
+        Some((snd, midi))
+    }
+
     pub(super) fn splice_track(&self, d: &mut [u8], s: &[u8], t: usize, events: bool) -> Result<(), String> {
         if let Some(why) = self.track_copy_blocked() {
             return Err(why);

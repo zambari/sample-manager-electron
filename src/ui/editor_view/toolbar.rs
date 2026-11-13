@@ -855,7 +855,6 @@ pub(super) fn toolbar(
     ui: &mut Ui,
     ed: &mut Editor,
     pv: &PlayView,
-    can_export: bool,
     slots: &Slots,
     out: &mut Vec<EdIntent>,
 ) {

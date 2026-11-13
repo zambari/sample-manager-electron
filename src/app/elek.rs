@@ -584,6 +584,9 @@ impl App {
                 crate::log::line(format!("elek-lib: pushing pool sound {}: {:?} name {:?}", i + 1, match &c.src {
                     crate::device::library::SoundSrc::Read(o) => format!("from {}", *o as usize + 1),
                     crate::device::library::SoundSrc::Empty => "emptied".into(),
+                    crate::device::library::SoundSrc::Track { pattern, track } => {
+                        format!("track {} sound of {}", *track as usize + 1, crate::device::patterns::label(*pattern as usize))
+                    }
                 }, c.name));
             }
             p.edited_sounds(sounds).into_iter().map(|s| if s.blank { String::new() } else { s.name }).collect()

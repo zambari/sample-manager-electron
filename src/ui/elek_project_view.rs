@@ -311,6 +311,12 @@ fn track_name(t: usize, audio: usize) -> String {
 }
 
 impl ProjEd {
+    /// Copied track sounds (track, pattern as read; `None`: an empty
+    /// pattern), for the Sounds page's paste. Empty when none are copied.
+    pub fn copied_sounds(&self) -> Vec<(u8, Option<u8>)> {
+        self.tclip_snd.as_ref().map(|c| c.tracks.clone()).unwrap_or_default()
+    }
+
     fn has_tclip(&self) -> bool {
         self.tclip_ev.is_some() || self.tclip_snd.is_some()
     }

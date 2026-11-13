@@ -1,7 +1,6 @@
-//! One side of the window: a role (Source or Destination) plus its sub-tabs.
+//! One side of the window (Source or Destination role) and its sub-tabs.
 
 use crate::tab::DirTab;
-use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Role {
@@ -26,7 +25,6 @@ impl Role {
 }
 
 pub struct Pane {
-    pub role: Role,
     pub tabs: Vec<DirTab>,
     pub active: usize,
     /// Id of the local tab last active, to fall back to when the device goes.
@@ -119,9 +117,5 @@ impl Pane {
             }
             None => false,
         }
-    }
-
-    pub fn tab_dirs(&self) -> Vec<PathBuf> {
-        self.tabs.iter().map(|t| t.cwd.clone()).collect()
     }
 }

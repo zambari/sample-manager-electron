@@ -5,7 +5,7 @@
 //! The project read also takes the sound pool in (`Worker::read_sounds`),
 //! so a sample pool push can renumber the samples pool sounds play.
 //!
-//! Sound pool edits (`SoundCell`: moved, emptied, renamed) go out with the project push (`ElekProject::build_push`): each
+//! Sound pool edits (`SoundCell`: moved, emptied, renamed, or a kit track's sound pasted in) go out with the project push (`ElekProject::build_push`): each
 //! changed pool sound as one `0x53` message, an emptied one as a blank
 //! sound (`blank_sound`), and every pattern's sound locks renumbered to
 //! follow (`lock_spots`), or cleared when their sound goes.
@@ -19,6 +19,9 @@ pub enum SoundSrc {
     /// The pool sound read at this index.
     Read(u8),
     Empty,
+    /// Kit track `track`'s sound in pattern `pattern` (slot as read),
+    /// pasted from the Patterns page's track sound clipboard.
+    Track { pattern: u8, track: u8 },
 }
 
 /// One pool sound after the edits: where it comes from, and its new name.
@@ -177,6 +180,13 @@ impl ElekProject {
                 map[o as usize] = new as u8;
             }
         }
+        // A track sound pasted over a pool sound that went nowhere else
+        // takes over its locks: they play the pasted sound.
+        for (new, c) in cells.iter().enumerate() {
+            if matches!(c.src, SoundSrc::Track { .. }) && map[new] == NO_LOCK {
+                map[new] = new as u8;
+            }
+        }
         (map.iter().enumerate().any(|(i, &n)| n as usize != i)).then_some(map)
     }
 
@@ -212,11 +222,41 @@ impl ElekProject {
                 d
             }
             SoundSrc::Empty => return None,
+            SoundSrc::Track { pattern, track } => self.track_sound_for_pool(Some(*pattern), *track, data).ok()?,
         };
         if let Some(n) = &cell.name {
             set_sound_name(&mut d, n);
         }
         Some(d)
+    }
+
+    /// Kit track `track`'s sound in pattern `pattern` (slot as read; `None`:
+    /// an empty pattern) as a pool sound, from the payloads with the sample
+    /// pool renumbered (`data`, from `new_data`; empty: as read). `Err` says
+    /// why it can't go into the pool.
+    pub fn track_sound_for_pool(&self, pattern: Option<u8>, track: u8, data: &[Option<Vec<u8>>]) -> Result<Vec<u8>, String> {
+        let t = track as usize + 1;
+        let pattern = pattern.ok_or_else(|| format!("track {t} comes from an empty pattern: no sound to paste"))?;
+        let pats = self.patterns.as_ref().map_err(|e| e.clone())?;
+        let mi = pats.msg_of(pattern as usize).ok_or_else(|| format!("pattern {} isn't read", patterns::label(pattern as usize)))?;
+        let d = data.get(mi).cloned().flatten().unwrap_or_else(|| self.msgs[mi].data.clone());
+        let (snd, midi) = pats.track_sound(&d, track as usize).ok_or_else(|| format!("track {t} has no kit sound (MIDI track or kit layout not known)"))?;
+        if midi {
+            return Err(format!("track {t} is a MIDI track: the pool holds audio sounds only"));
+        }
+        if be32(snd, 0) != Some(MAGIC) || parse_sound(self.model, 0, snd).blank {
+            return Err(format!("track {t} has an empty sound"));
+        }
+        let from_pool = self.msgs[..self.base]
+            .iter()
+            .filter(|m| m.kind == SOUND && be32(&m.data, 0) == Some(MAGIC))
+            .find_map(|m| be32(&m.data, 4));
+        if let (Some(v), Some(kv)) = (from_pool, be32(snd, 4)) {
+            if v != kv {
+                return Err(format!("the kit sound is version {kv}, the pool's sounds are version {v}: not safe to paste"));
+            }
+        }
+        Ok(snd.to_vec())
     }
 
     /// The `0x53` payloads a push sends: every pool sound that changes

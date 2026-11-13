@@ -322,6 +322,19 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
             st.lib.blank_ok = Some(p.blank_sound().is_some());
         }
     }
+    // ⌘V: paste copied track sounds into the highlighted (empty) sound.
+    if editable && st.keys_on && st.lib.renaming.is_none() && !ui.ctx().egui_wants_keyboard_input() {
+        let paste = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) || (i.modifiers.command_only() && i.key_pressed(egui::Key::V)));
+        if paste {
+            st.status = match (st.lib.selected, st.project.as_deref()) {
+                (Some(at), Some(p)) => {
+                    let sounds = p.edited_sounds(&st.lib.sounds);
+                    paste_track_sounds(st, at, &sounds, false)
+                }
+                _ => "Click a pool sound first, then ⌘V pastes the copied track sound there".into(),
+            };
+        }
+    }
     ui.horizontal(|ui| {
         if editable {
             let lib = &mut st.lib;
@@ -380,7 +393,7 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
     let filled = sounds.iter().filter(|s| !s.blank).count();
     let with_sample = sounds.iter().filter(|s| !s.blank && s.slot != 0).count();
     let tip = if editable {
-        "Drag a sound by its number or name onto another to swap them (onto an empty one to move it); click a row to highlight it, then click its name to rename it; right-click to rename or delete. Click a sample to play it. ⬆ Push to device sends the changes, with every pattern's sound locks following their sounds."
+        "Drag a sound by its number or name onto another to swap them (onto an empty one to move it); click a row to highlight it, then click its name to rename it; right-click to rename or delete. A track sound copied on the Patterns page (Copy ▸ track sound) pastes in with right-click or ⌘V on a highlighted empty sound. Click a sample to play it. ⬆ Push to device sends the changes, with every pattern's sound locks following their sounds."
     } else {
         "Read-only until the whole project is read"
     };
@@ -432,9 +445,21 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
     let sel_bg = Color32::from_rgba_unmultiplied(255, 255, 255, 22);
     let cell_of = |i: usize| cells.get(i).cloned().unwrap_or_else(|| SoundCell::as_read(i));
     // Locks follow the sound: count them by where it was read.
+    // A pasted track sound takes over the locks of the sound it replaced,
+    // unless that sound moved elsewhere (`sound_moves`).
     let locks_of = |i: usize| match cell_of(i).src {
         SoundSrc::Read(o) if editable => lock_uses.get(o as usize).copied().unwrap_or(0),
+        SoundSrc::Track { .. } if editable && !(0..SOUND_POOL).any(|j| cell_of(j).src == SoundSrc::Read(i as u8)) => {
+            lock_uses.get(i).copied().unwrap_or(0)
+        }
         _ => 0,
+    };
+    let copied = st.proj.copied_sounds();
+    let paste_what = match copied.as_slice() {
+        [] => String::new(),
+        [(t, Some(pat))] => format!("track {} sound of {}", *t as usize + 1, patterns::label(*pat as usize)),
+        [(t, None)] => format!("track {} sound (empty pattern)", *t as usize + 1),
+        many => format!("{} track sounds", many.len()),
     };
     let shown: Vec<(&PoolSound, Vec<(usize, usize)>)> = sounds
         .iter()
@@ -615,9 +640,37 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
             if let Some(d) = over.dnd_release_payload::<SoundDrag>() {
                 dropped = Some(((*d).clone(), s.index));
             }
-            if !s.blank {
-                r.on_hover_text("Drag onto another sound to swap them, or onto an empty one to move it. Click to highlight; click the highlighted name to rename it. Right-click to rename or delete").context_menu(|ui| {
-                    ui.label(RichText::new(format!("Pool sound {:03} “{}”", s.index + 1, s.name)).weak());
+            let r = if s.blank {
+                ui.interact(rect, id.with("menu"), egui::Sense::click())
+            } else {
+                r.on_hover_text("Drag onto another sound to swap them, or onto an empty one to move it. Click to highlight; click the highlighted name to rename it. Right-click to rename, delete or paste a copied track sound over it")
+            };
+            r.context_menu(|ui| {
+                let label = if s.blank { format!("Pool sound {:03} (empty)", s.index + 1) } else { format!("Pool sound {:03} “{}”", s.index + 1, s.name) };
+                ui.label(RichText::new(label).weak());
+                let ok = !copied.is_empty();
+                let (text, tip) = match (ok, s.blank) {
+                    (false, _) => (
+                        "Paste track sound".to_owned(),
+                        "Nothing copied: on the Patterns page, fold out a pattern, select a track and right-click → Copy ▸ track sound".to_owned(),
+                    ),
+                    (true, true) => (
+                        format!("Paste {paste_what}"),
+                        if copied.len() > 1 { "Fills this sound and the next empty ones below it".to_owned() } else { "Puts the copied kit sound here as a pool sound".to_owned() },
+                    ),
+                    (true, false) => {
+                        let locks = locks_of(s.index);
+                        let more = if copied.len() > 1 { "; the rest fill the next empty sounds below" } else { "" };
+                        let lk = if locks > 0 { format!(". Its {locks} sound-locked step(s) will play the pasted sound") } else { String::new() };
+                        (format!("Paste {paste_what} over this one"), format!("Replaces “{}”{lk}{more}", s.name))
+                    }
+                };
+                if ui.add_enabled(ok, egui::Button::new(text)).on_hover_text(tip.clone()).on_disabled_hover_text(tip).clicked() {
+                    menu = Some((s.index, MenuPick::Paste));
+                    ui.close();
+                }
+                if !s.blank {
+                    ui.separator();
                     if ui.button("Rename…").clicked() {
                         menu = Some((s.index, MenuPick::Rename));
                         ui.close();
@@ -635,8 +688,8 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
                         menu = Some((s.index, MenuPick::Delete));
                         ui.close();
                     }
-                });
-            }
+                }
+            });
         }
     });
     match rename_done {
@@ -674,6 +727,7 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
     blocked_tip(ui.ctx(), st);
     match menu {
         Some((_, MenuPick::Rename)) => {}
+        Some((i, MenuPick::Paste)) => st.status = paste_track_sounds(st, i, sounds, true),
         Some((i, MenuPick::Delete)) => {
             let name = sounds.get(i).map(|s| s.name.clone()).unwrap_or_default();
             st.lib.delete_sound(i);
@@ -687,6 +741,66 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
 enum MenuPick {
     Rename,
     Delete,
+    Paste,
+}
+
+/// Put the Patterns page's copied track sounds into the sound pool: the
+/// first at `at` (only over a filled sound with `over`), the rest into the
+/// next empty sounds below it. Returns the status line.
+fn paste_track_sounds(st: &mut ElekState, at: usize, sounds: &[PoolSound], over: bool) -> String {
+    let copied = st.proj.copied_sounds();
+    if copied.is_empty() {
+        return "No track sound copied: on the Patterns page, select a track and right-click → Copy ▸ track sound".into();
+    }
+    let Some(p) = st.project.as_deref() else { return "No project loaded".into() };
+    let blank = |i: usize| sounds.get(i).is_none_or(|s| s.blank);
+    if !over && !blank(at) {
+        return format!("Pool sound {:03} isn't empty: right-click it → Paste … over this one to replace it", at + 1);
+    }
+    let mut problems = Vec::new();
+    let good: Vec<(u8, u8)> = copied
+        .iter()
+        .filter_map(|&(t, pat)| match p.track_sound_for_pool(pat, t, &[]) {
+            Ok(_) => pat.map(|pat| (pat, t)),
+            Err(e) => {
+                problems.push(e);
+                None
+            }
+        })
+        .collect();
+    let mut targets = vec![at];
+    let mut next = at + 1;
+    while targets.len() < good.len() {
+        match (next..SOUND_POOL).find(|&i| blank(i)) {
+            Some(i) => {
+                targets.push(i);
+                next = i + 1;
+            }
+            None => break,
+        }
+    }
+    let n = targets.len().min(good.len());
+    if n == 0 {
+        return format!("Nothing pasted: {}", problems.join("; "));
+    }
+    let cells = st.lib.cells_mut();
+    for (&i, &(pattern, track)) in targets.iter().zip(&good) {
+        cells[i] = SoundCell { src: SoundSrc::Track { pattern, track }, name: None };
+    }
+    st.lib.selected = Some(at);
+    let mut msg = if n == 1 {
+        let (pat, t) = good[0];
+        format!("Track {} sound of {} pasted into pool sound {:03}. Push to send it", t as usize + 1, patterns::label(pat as usize), at + 1)
+    } else {
+        format!("{n} track sounds pasted into pool sounds {}. Push to send them", targets[..n].iter().map(|i| format!("{:03}", i + 1)).collect::<Vec<_>>().join(", "))
+    };
+    if good.len() > n {
+        msg += &format!("; {} didn't fit (no empty sounds left below)", good.len() - n);
+    }
+    if !problems.is_empty() {
+        msg += &format!("; skipped: {}", problems.join("; "));
+    }
+    msg
 }
 
 /// A sound let go over pool sound `to`.

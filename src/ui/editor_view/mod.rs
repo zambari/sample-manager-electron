@@ -220,7 +220,7 @@ pub fn show(
 
     header(ui, ed, focused, slots.drive_shown, &mut out);
     slot_bar(ui, ed, slots, &mut out);
-    toolbar(ui, ed, &pv, can_export, slots, &mut out);
+    toolbar(ui, ed, &pv, slots, &mut out);
 
     // Tail trim, kits only: its section, and its fades and cuts on the
     // wave. Hidden, nothing is shown or draggable there. Found after the

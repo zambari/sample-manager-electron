@@ -92,7 +92,7 @@ impl App {
         // Per-pane footer: counts stay visible even while a transfer's
         // progress bar takes over the window's status bar.
         let footer = Self::pane_footer_text(self.pane(role).active_tab());
-        egui::Panel::bottom(egui::Id::new(("pane_footer", role.label())))
+        egui::Panel::bottom(egui::Id::unique(("pane_footer", role.label())))
             .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 3)))
             .resizable(false)
             .show(ui, |ui| {
@@ -512,7 +512,7 @@ impl App {
 
                 let active = self.pane(role).active;
                 // Bring the active tab into view whenever it changes.
-                let seen_id = egui::Id::new(("tab_strip_active", role.label()));
+                let seen_id = egui::Id::unique(("tab_strip_active", role.label()));
                 let changed = ui.data(|d| d.get_temp::<usize>(seen_id)) != Some(active);
                 ui.data_mut(|d| d.insert_temp(seen_id, active));
 

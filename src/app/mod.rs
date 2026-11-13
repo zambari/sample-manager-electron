@@ -390,7 +390,7 @@ impl App {
                 DirTab::new(next_tab_id, p)
             }
         };
-        let mut restore = |role: Role, ps: Option<&state::PaneState>| -> Pane {
+        let mut restore = |ps: Option<&state::PaneState>| -> Pane {
             let mut tabs: Vec<DirTab> = ps
                 .map(|ps| ps.tabs.as_slice())
                 .unwrap_or_default()
@@ -414,14 +414,13 @@ impl App {
             }
             let active = ps.map_or(0, |ps| ps.active).min(tabs.len() - 1);
             Pane {
-                role,
                 tabs,
                 active,
                 last_local: None,
             }
         };
-        let source = restore(Role::Source, saved.as_ref().map(|s| &s.source));
-        let dest = restore(Role::Dest, saved.as_ref().map(|s| &s.dest));
+        let source = restore(saved.as_ref().map(|s| &s.source));
+        let dest = restore(saved.as_ref().map(|s| &s.dest));
 
         let output_device = saved.as_ref().and_then(|s| s.output_device.clone());
         let engine = Engine::open(output_device.as_deref());
