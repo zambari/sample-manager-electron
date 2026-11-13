@@ -263,6 +263,13 @@ impl ElekProject {
 pub const SOUND_POOL: usize = 128;
 
 const REQ_SOUND: u8 = 0x63;
+
+/// The device answers `0x63` with pool sound `i`. The Digitakt (I) answers
+/// 0..7 with the active kit's track sounds (same `0x53` reply, same index)
+/// and stays quiet from 8 on, so its pool comes from the whole dump only.
+fn single_sounds(m: Model) -> bool {
+    m != DT
+}
 /// First sound request: long enough for the device to answer at all.
 const FIRST_SOUND_WAIT: Duration = Duration::from_secs(3);
 /// Later ones: an unanswered sound counts as empty.
@@ -392,6 +399,10 @@ impl Worker {
                 m
             }
         };
+        if !single_sounds(m) {
+            crate::log::line("elek: Digitakt (I) answers single-sound requests with kit tracks; reading the whole project for the sound pool");
+            return self.read_whole(st, ctl);
+        }
         let started = Instant::now();
         let mut kept = 0;
         for i in 0..SOUND_POOL {
@@ -407,6 +418,8 @@ impl Worker {
             }
             let Some(msg) = got else {
                 crate::log::line(format!("elek: pool sound {i} didn't arrive; reading the whole project for the sound pool"));
+                // What did answer may not be pool sounds: the dump's own win.
+                st.msgs.retain(|x| x.kind != SOUND);
                 return self.read_whole(st, ctl);
             };
             if be32(&msg.data, 0) == Some(MAGIC) {
@@ -429,7 +442,7 @@ impl Worker {
     pub(super) fn read_sound_pool(&mut self) -> Result<Vec<PoolSound>, String> {
         let em = self.em.clone();
         let m = self.with_conn(|c| c.model())?;
-        let first = self.with_conn(|c| c.read_sound(m, 0, FIRST_SOUND_WAIT))?;
+        let first = if single_sounds(m) { self.with_conn(|c| c.read_sound(m, 0, FIRST_SOUND_WAIT))? } else { None };
         let Some(first) = first else {
             crate::log::line("elek-lib: no answer to a single-sound request; reading the whole project for its sounds");
             let (_, msgs) = self.with_conn(|c| {
