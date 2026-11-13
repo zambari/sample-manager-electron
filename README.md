@@ -167,6 +167,11 @@ Patterns arrive one by one, folded-out banks first; a bank can be edited
 as soon as all of it is in, and **Stop** ends a read early, keeping the
 banks that finished.
 
+Switching device pages prioritizes the data that page needs after the
+current request finishes. Preset banks, listings and preset details load
+between project read requests, while the remaining patterns continue in
+the background. +Drive browsing stays responsive during project reads too.
+
 Changes stay in the app until you **Push to device**, which writes them
 into the project in the device's memory, updating patterns, kits and
 sounds to match, then reads it back to check. Only the parts that changed
@@ -224,9 +229,16 @@ a name filter and **Hide empty**. Click a preset to read its machine, source
 sample and SRC values. Exact matches in the loaded project's sound pool
 are identified by comparing the entire sound payload. **▶ Sample** previews
 the source sample; it does not render the preset's effects or synthesis.
-**Refresh presets** rereads saved changes from the device. Browsing is read-only
-and works without loading a project. Preset decoding has been verified on
-Digitakt II; other supported sound versions use the existing sound decoder.
+Drag a preset onto an empty slot to move it, or onto another preset to swap
+them, within a bank or between the two panes. Right-click **Clear** to empty a
+slot. Edits show in amber and wait for **Push to device**; **Undo** and **Reset**
+revert pending edits. **Reload presets** rereads saved changes from the device
+and asks before discarding pending edits. Progress bars show reads and pushes.
+Push checks the touched slots for changes made on the device, saves directly
+to the preset banks on +Drive, then verifies the result. If a push fails,
+reload before trying again: some edits may already have landed. Presets work
+without loading a project. Preset decoding has been verified on Digitakt II;
+other supported sound versions use the existing sound decoder.
 
 #### Sounds: the project's sound pool
 
@@ -316,6 +328,13 @@ Install Rust from <https://rustup.rs>, then:
 `./build.sh` alone makes a release build at `target/release/sample_manager`.
 The script's header lists the other options (`bundle`, `windows`, `dev`,
 `test`, `clean`).
+
+Click **SAMPLE MANAGER** in the toolbar for the version, build number and
+repository link. The release version and repository URL come from
+`Cargo.toml`; bump its package version for a release. `build.rs` stamps each
+changed build with a build number (Unix time in seconds) and the Git
+revision, suffixed `-modified` when tracked files have uncommitted changes.
+Source archives without Git still get a build number.
 
 **Windows from a Mac.** `./build.sh windows` cross-compiles a 64-bit `.exe`
 into `target/bundle/Sample Manager Windows.zip`. It needs

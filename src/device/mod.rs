@@ -6,7 +6,9 @@
 //! gain from parallel requests and a lot to lose. The UI posts [`Cmd`]s and
 //! gets results back as ordinary [`crate::jobs::Ev`]s. While a job runs, the
 //! worker answers folder listings between its steps (down to single transfer
-//! chunks) so browsing stays responsive; other jobs wait their turn.
+//! chunks) and read-only preset / project browser requests so browsing
+//! stays responsive. Project reads choose their next request from the
+//! current device page's priority; writes wait their turn.
 //!
 //! Device paths are plain absolute paths (`/samples/kicks`) stored in
 //! `PathBuf`s; they never touch the local filesystem.

@@ -142,7 +142,7 @@ impl App {
         let st = &mut self.elek;
         // Paths and listings belong to whichever machine answered last.
         st.names.clear();
-        st.presets = Default::default();
+        st.presets.device_reconnected(other);
         if st.project.as_ref().is_some_and(|p| p.from_file.is_some()) {
             st.status = "Device reconnected; the project opened from a file is kept (not read from the device)".into();
             return;
@@ -523,9 +523,19 @@ impl App {
                     self.elek.projects = None;
                     self.device.elek(ElekCmd::ListProjects);
                 }
-                ElekIntent::ListPresetBanks => self.device.elek(ElekCmd::ListPresetBanks),
-                ElekIntent::ListPresets(bank) => self.device.elek(ElekCmd::ListPresets(bank)),
-                ElekIntent::ReadPreset { bank, slot } => self.device.elek(ElekCmd::ReadPreset { bank, slot }),
+                ElekIntent::ListPresetBanks => {
+                    self.elek.presets.begin_load();
+                    self.device.elek(ElekCmd::ListPresetBanks);
+                }
+                ElekIntent::ListPresets(bank) => {
+                    self.elek.presets.begin_load();
+                    self.device.elek(ElekCmd::ListPresets(bank));
+                }
+                ElekIntent::ReadPreset { bank, slot } => {
+                    self.elek.presets.begin_load();
+                    self.device.elek(ElekCmd::ReadPreset { bank, slot });
+                }
+                ElekIntent::PushPresets(plan) => self.device.elek(ElekCmd::PushPresets(plan)),
                 ElekIntent::Read => self.elek_read(Vec::new()),
                 ElekIntent::ReadSounds => {
                     self.elek.lib.sound_progress = Some((0, crate::device::library::SOUND_POOL));
@@ -1557,14 +1567,24 @@ impl App {
         ctl.open.store(self.elek.proj.bank_mask(), std::sync::atomic::Ordering::Relaxed);
         self.elek.reading = Some(ctl.clone());
         self.elek.read_shown = false;
-        // What the page in view shows comes first; the docked pool (or the
-        // Samples page) wants its names.
-        let first = match (self.elek_mode, self.elek.page) {
+        ctl.prioritize(self.elek_read_first());
+        self.device.elek(ElekCmd::Read { known, ctl, cached });
+    }
+
+    fn elek_read_first(&self) -> crate::device::ReadFirst {
+        match (self.elek_mode, self.elek.page) {
             (true, elek_view::ElekPage::Project) => crate::device::ReadFirst::Patterns,
             (true, elek_view::ElekPage::Library) => crate::device::ReadFirst::Sounds,
             _ => crate::device::ReadFirst::Names,
-        };
-        self.device.elek(ElekCmd::Read { known, ctl, cached, first });
+        }
+    }
+
+    /// A tab switch changes the next read request, including a read already
+    /// streaming patterns. The in-flight SysEx request finishes first.
+    pub(super) fn prioritize_elek_read(&self) {
+        if let Some(ctl) = &self.elek.reading {
+            ctl.prioritize(self.elek_read_first());
+        }
     }
 
     pub(super) fn elek_event(&mut self, e: ElekEv) {
@@ -1580,15 +1600,42 @@ impl App {
         }
         let st = &mut self.elek;
         match e {
-            ElekEv::PresetBanks(result) => st.presets.banks = Some(result),
-            ElekEv::Presets { bank, result } => { st.presets.listings.insert(bank, Some(result)); }
+            ElekEv::PresetBanks(result) => {
+                st.presets.end_load();
+                st.presets.banks = Some(result);
+            }
+            ElekEv::Presets { bank, result } => {
+                st.presets.end_load();
+                st.presets.listings.insert(bank, Some(result));
+            }
             ElekEv::Preset { bank, slot, result } => {
+                st.presets.end_load();
+                if let Err(e) = &result {
+                    st.presets.status = format!("Could not load preset {bank}:{slot:03}: {e}. Reload presets to retry.");
+                }
                 if let Ok(preset) = &result {
                     if let Some((key, Some(path))) = &preset.sample {
                         st.names.insert(*key, path.clone());
                     }
                 }
                 st.presets.sounds.insert((bank, slot), Some(result));
+            }
+            ElekEv::PresetReadProgress(p) => st.presets.read_progress = p,
+            ElekEv::PresetPushProgress { label, done, total } => {
+                st.presets.pushing = Some((label, done, total));
+            }
+            ElekEv::PresetsPushed(result) => {
+                st.presets.pushing = None;
+                match result {
+                    Ok(()) => {
+                        st.presets.reload();
+                        st.presets.status = "Presets pushed to +Drive and verified.".into();
+                    }
+                    Err(e) => {
+                        st.presets.push_failed = true;
+                        st.presets.status = format!("Preset push failed: {e} Some edits may already be on the device. Reload presets before trying again.");
+                    }
+                }
             }
             ElekEv::Projects(r) => st.projects = Some(r),
             ElekEv::SoundProgress { done, total } => st.lib.sound_progress = Some((done, total)),

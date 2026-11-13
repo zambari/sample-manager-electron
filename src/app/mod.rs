@@ -732,6 +732,7 @@ impl eframe::App for App {
             self.absorb(events);
         }
         self.track_presence();
+        self.prioritize_elek_read();
         self.live_push_tick(ctx);
         self.check_changed(ctx);
         self.print_tick(ctx);

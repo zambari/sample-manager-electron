@@ -995,23 +995,68 @@ pub enum ReadFirst {
     Patterns,
 }
 
+impl ElekCmd {
+    /// Read-only browser requests that can run between project / transfer
+    /// steps. Writes and other dump requests must keep their place.
+    pub(super) fn browsing(&self) -> bool {
+        matches!(self, Self::ListProjects | Self::ListPresetBanks | Self::ListPresets(_)
+            | Self::ReadPreset { .. } | Self::Resolve { .. })
+    }
+
+    pub(super) fn read_browser(&self, c: &mut Conn, em: &Emitter) -> R<ElekEv> {
+        Ok(match self {
+            Self::ListProjects => ElekEv::Projects(Ok(c.list_projects()?)),
+            Self::ListPresetBanks => ElekEv::PresetBanks(Ok(c.preset_banks()?)),
+            Self::ListPresets(bank) => ElekEv::Presets { bank: bank.clone(), result: Ok(c.preset_entries(bank)?) },
+            Self::ReadPreset { bank, slot } => ElekEv::Preset {
+                bank: bank.clone(), slot: *slot,
+                result: Ok(c.read_preset(bank, *slot, &|p| {
+                    em.send(Ev::Elek(ElekEv::PresetReadProgress(p)));
+                })?),
+            },
+            Self::Resolve { slot, hash, lens } => {
+                let mut found = None;
+                for &len in lens {
+                    if let Some(path) = c.sample_path(*hash, len)? {
+                        found = Some((len, path));
+                        break;
+                    }
+                }
+                crate::log::line(format!("elek: resolve {hash:08x} lens {lens:?} -> {found:?}"));
+                ElekEv::Resolved { slot: *slot, hash: *hash, found: Ok(found) }
+            }
+            _ => unreachable!("only browser reads may interrupt a project read"),
+        })
+    }
+
+    pub(super) fn browser_failed(&self, error: String) -> ElekEv {
+        match self {
+            Self::ListProjects => ElekEv::Projects(Err(error)),
+            Self::ListPresetBanks => ElekEv::PresetBanks(Err(error)),
+            Self::ListPresets(bank) => ElekEv::Presets { bank: bank.clone(), result: Err(error) },
+            Self::ReadPreset { bank, slot } => ElekEv::Preset { bank: bank.clone(), slot: *slot, result: Err(error) },
+            Self::Resolve { slot, hash, .. } => ElekEv::Resolved { slot: *slot, hash: *hash, found: Err(error) },
+            _ => unreachable!("only browser reads may interrupt a project read"),
+        }
+    }
+}
+
 pub enum ElekCmd {
     ListProjects,
     ListPresetBanks,
     ListPresets(String),
     ReadPreset { bank: String, slot: u32 },
+    PushPresets(presets::PresetPush),
     /// The project's sound pool, read-only (`library`).
     ReadSounds,
     /// Read the project; `known` names needn't be looked up again. `ctl`
-    /// steers it while it runs (which banks first, stop).
+    /// steers it while it runs (current page, which banks first, stop).
     Read {
         known: std::collections::HashSet<(u32, u32)>,
         ctl: std::sync::Arc<ReadCtl>,
         /// Empty patterns known not to have changed (a read-back after a
         /// push): taken as they are, not asked for again.
         cached: Vec<DumpMsg>,
-        /// Which part to read first: the one the open page shows.
-        first: ReadFirst,
     },
     /// Which of `lens` the +Drive knows file `hash` by (asked in order),
     /// for filling pool slot `slot` (old numbering).
@@ -1038,9 +1083,23 @@ pub struct ReadCtl {
     pub open: std::sync::atomic::AtomicU8,
     /// Stop after the pattern on its way; what arrived stays usable.
     pub stop: std::sync::atomic::AtomicBool,
+    /// The page's current priority, refreshed as the user switches tabs.
+    first: std::sync::atomic::AtomicU8,
 }
 
 impl ReadCtl {
+    pub fn prioritize(&self, first: ReadFirst) {
+        self.first.store(first as u8, Ordering::Relaxed);
+    }
+
+    fn first(&self) -> ReadFirst {
+        match self.first.load(Ordering::Relaxed) {
+            1 => ReadFirst::Sounds,
+            2 => ReadFirst::Patterns,
+            _ => ReadFirst::Names,
+        }
+    }
+
     fn stopped(&self) -> bool {
         self.stop.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1051,6 +1110,9 @@ pub enum ElekEv {
     PresetBanks(Result<Vec<String>, String>),
     Presets { bank: String, result: Result<Vec<presets::PresetEntry>, String> },
     Preset { bank: String, slot: u32, result: Result<presets::Preset, String> },
+    PresetReadProgress(f32),
+    PresetPushProgress { label: String, done: usize, total: usize },
+    PresetsPushed(Result<(), String>),
     SoundProgress { done: usize, total: usize },
     Sounds(Result<Vec<library::PoolSound>, String>),
     Progress {
@@ -1110,13 +1172,14 @@ impl Conn {
         &mut self,
         m: Model,
         last: u8,
-        on_msg: &mut dyn FnMut(usize, &DumpMsg) -> bool,
+        on_msg: &mut dyn FnMut(&mut Conn, usize, &DumpMsg) -> bool,
     ) -> R<Vec<DumpMsg>> {
         let mut out = Vec::new();
         let mut wait = FIRST_WAIT;
         let mut ignored = 0usize;
         loop {
-            let raw = self.rx.recv_timeout(wait).map_err(|_| {
+            let buffered = self.dump_pending.as_mut().and_then(|pending| pending.pop_front());
+            let raw = buffered.map(Ok).unwrap_or_else(|| self.rx.recv_timeout(wait)).map_err(|_| {
                 let e = if out.is_empty() {
                     "the device didn't answer the project dump request. Is it set to receive SysEx over USB?".to_owned()
                 } else {
@@ -1148,7 +1211,7 @@ impl Conn {
                 continue;
             }
             let kind = msg.kind;
-            let more = on_msg(out.len(), &msg);
+            let more = on_msg(self, out.len(), &msg);
             out.push(msg);
             // Stopped: the device sends the rest anyway; later requests
             // empty the input first.
@@ -1160,7 +1223,7 @@ impl Conn {
 
     pub(super) fn read_project(
         &mut self,
-        on_msg: &mut dyn FnMut(usize, &DumpMsg) -> bool,
+        on_msg: &mut dyn FnMut(&mut Conn, usize, &DumpMsg) -> bool,
     ) -> R<(Model, Vec<DumpMsg>)> {
         let m = self.model()?;
         while self.rx.try_recv().is_ok() {}
@@ -1171,7 +1234,10 @@ impl Conn {
         ));
         self.send_sysex(&req)?;
         let started = Instant::now();
-        let msgs = self.collect_dump(m, SETTINGS, on_msg)?;
+        self.dump_pending = Some(VecDeque::new());
+        let result = self.collect_dump(m, SETTINGS, on_msg);
+        self.dump_pending = None;
+        let msgs = result?;
         let bytes: usize = msgs.iter().map(|m| m.raw.len()).sum();
         crate::log::line(format!(
             "elek: got {} dump messages, {} KB in {:.1}s",
@@ -1185,7 +1251,7 @@ impl Conn {
     pub(super) fn read_settings_msg(&mut self, m: Model) -> R<DumpMsg> {
         while self.rx.try_recv().is_ok() {}
         self.send_sysex(&build_dump(m, REQ_SETTINGS, 0, &[]))?;
-        let msgs = self.collect_dump(m, SETTINGS, &mut |_, _| true)?;
+        let msgs = self.collect_dump(m, SETTINGS, &mut |_, _, _| true)?;
         msgs.into_iter().last().map_or_else(|| refused("no project settings came back"), Ok)
     }
 
@@ -1300,21 +1366,16 @@ impl Worker {
             }));
         };
         match cmd {
-            ElekCmd::ListPresetBanks => {
-                let r = self.with_conn(|c| c.preset_banks());
-                em.send(Ev::Elek(ElekEv::PresetBanks(r)));
+            cmd @ (ElekCmd::ListPresetBanks | ElekCmd::ListPresets(_) |
+                ElekCmd::ReadPreset { .. } | ElekCmd::ListProjects | ElekCmd::Resolve { .. }) => {
+                let result = self.with_conn(|c| cmd.read_browser(c, &em));
+                em.send(Ev::Elek(result.unwrap_or_else(|e| cmd.browser_failed(e))));
             }
-            ElekCmd::ListPresets(bank) => {
-                let result = self.with_conn(|c| c.preset_entries(&bank));
-                em.send(Ev::Elek(ElekEv::Presets { bank, result }));
-            }
-            ElekCmd::ReadPreset { bank, slot } => {
-                let result = self.with_conn(|c| c.read_preset(&bank, slot));
-                em.send(Ev::Elek(ElekEv::Preset { bank, slot, result }));
-            }
-            ElekCmd::ListProjects => {
-                let r = self.with_conn(|c| c.list_projects());
-                self.em.send(Ev::Elek(ElekEv::Projects(r)));
+            ElekCmd::PushPresets(plan) => {
+                let result = self.with_conn(|c| c.push_presets(&plan, &|label, done, total| {
+                    em.send(Ev::Elek(ElekEv::PresetPushProgress { label: label.into(), done, total }));
+                }));
+                em.send(Ev::Elek(ElekEv::PresetsPushed(result)));
             }
             ElekCmd::ReadSounds => {
                 let r = self.read_sound_pool();
@@ -1323,7 +1384,7 @@ impl Worker {
                 }
                 self.em.send(Ev::Elek(ElekEv::Sounds(r)));
             }
-            ElekCmd::Read { known, ctl, cached, first } => {
+            ElekCmd::Read { known, ctl, cached } => {
                 let mut asked = known;
                 prog("Reading sample pool", 0, 129);
                 // The pool comes last in the dump, so ask for it on its own
@@ -1337,60 +1398,59 @@ impl Worker {
                         let keys = pool_keys(&p.pool, &asked);
                         let uses = vec![0u32; p.pool.len()];
                         em.send(Ev::Elek(ElekEv::Partial(Box::new(p))));
-                        (keys, Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses, sounds: false })
+                        (keys, Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses, sounds: false, sound_next: 0, patterns_read: 0 })
                     }
                     Ok((_, Err(e), _)) | Err(e) => {
                         crate::log::line(format!("elek: early pool read skipped: {e}"));
-                        (Vec::new(), Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new(), sounds: false })
+                        (Vec::new(), Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new(), sounds: false, sound_next: 0, patterns_read: 0 })
                     }
                 };
                 let (keys, mut st) = st;
                 let started = Instant::now();
-                // The page in view's part first. Names and pool sounds are
-                // quick requests each, the patterns take half a minute, so
-                // otherwise patterns go last. A whole-dump fallback in
-                // sounds or patterns brings the other along, and that
-                // stage then finds nothing left to ask for.
-                #[derive(Clone, Copy)]
-                enum Stage { Names, Sounds, Patterns }
-                let order = match first {
-                    ReadFirst::Names => [Stage::Names, Stage::Sounds, Stage::Patterns],
-                    ReadFirst::Sounds => [Stage::Sounds, Stage::Names, Stage::Patterns],
-                    ReadFirst::Patterns => [Stage::Patterns, Stage::Names, Stage::Sounds],
-                };
-                crate::log::line(format!("elek: reading {first:?} first"));
-                let mut cached = Some(cached);
+                // Keep each read job to one request. Re-evaluate the page's
+                // priority and serve queued browser reads before the next
+                // request; switching tabs never restarts completed work.
+                crate::log::line(format!("elek: reading {:?} first", ctl.first()));
+                if !cached.is_empty() {
+                    crate::log::line(format!("elek: {} empty patterns kept from the last read, not read again", cached.len()));
+                }
+                for msg in cached {
+                    st.add(&em, msg);
+                }
+                let mut name_next = 0;
                 let mut r = Ok(());
-                for stage in order {
-                    if r.is_err() {
+                while r.is_ok() && !ctl.stopped() {
+                    self.serve_pending();
+                    let order = match ctl.first() {
+                        ReadFirst::Names => [ReadFirst::Names, ReadFirst::Sounds, ReadFirst::Patterns],
+                        ReadFirst::Sounds => [ReadFirst::Sounds, ReadFirst::Names, ReadFirst::Patterns],
+                        ReadFirst::Patterns => [ReadFirst::Patterns, ReadFirst::Names, ReadFirst::Sounds],
+                    };
+                    let Some(stage) = order.into_iter().find(|stage| match stage {
+                        ReadFirst::Names => name_next < keys.len(),
+                        ReadFirst::Sounds => !st.sounds,
+                        ReadFirst::Patterns => (0..patterns::PATTERNS).any(|i| !st.have(i)),
+                    }) else {
                         break;
-                    }
+                    };
                     match stage {
-                        Stage::Names => {
-                            if !ctl.stopped() {
-                                self.look_up_names(&keys, &mut asked, true);
-                            }
+                        ReadFirst::Names => {
+                            let complete = self.look_up_names(&keys[name_next..name_next + 1], &mut asked);
+                            // A failed link ends this phase, as in the batched
+                            // lookup; don't reopen it once for every pool slot.
+                            name_next = if complete { name_next + 1 } else { keys.len() };
+                            prog("Looking up names", name_next, keys.len());
                         }
-                        Stage::Sounds => {
-                            if st.sounds {
-                                continue;
-                            }
-                            r = self.read_sounds(&mut st, &ctl);
+                        ReadFirst::Sounds => {
+                            r = self.read_sound_step(&mut st, &ctl);
                             // Show the sound pool now, not once the patterns are in too.
                             if let (Ok(()), true, Some(m)) = (&r, st.sounds, st.m) {
                                 let sounds = library::sounds_from(m, st.msgs.iter().filter(|m| m.kind == SOUND));
                                 em.send(Ev::Elek(ElekEv::Sounds(Ok(sounds))));
                             }
                         }
-                        Stage::Patterns => {
-                            let cached = cached.take().unwrap_or_default();
-                            if !cached.is_empty() {
-                                crate::log::line(format!("elek: {} empty patterns kept from the last read, not read again", cached.len()));
-                            }
-                            for msg in cached {
-                                st.add(&em, msg);
-                            }
-                            r = self.read_patterns(&mut st, &ctl);
+                        ReadFirst::Patterns => {
+                            r = self.read_pattern_step(&mut st, &ctl);
                         }
                     }
                 }
@@ -1433,19 +1493,7 @@ impl Worker {
                 let keys = r.as_ref().map(|p| pool_keys(&p.pool, &asked)).unwrap_or_default();
                 self.em.send(Ev::Elek(ElekEv::Loaded(r)));
                 // After `Loaded`: no progress, nothing would clear it.
-                self.look_up_names(&keys, &mut asked, false);
-            }
-            ElekCmd::Resolve { slot, hash, lens } => {
-                let found = self.with_conn(|c| {
-                    for &len in &lens {
-                        if let Some(p) = c.sample_path(hash, len)? {
-                            return Ok(Some((len, p)));
-                        }
-                    }
-                    Ok(None)
-                });
-                crate::log::line(format!("elek: resolve {hash:08x} lens {lens:?} -> {found:?}"));
-                self.em.send(Ev::Elek(ElekEv::Resolved { slot, hash, found }));
+                self.look_up_names(&keys, &mut asked);
             }
             ElekCmd::Push { msgs, settings, force, model } => {
                 let total = msgs.len();
@@ -1487,6 +1535,10 @@ struct Stream {
     uses: Vec<u32>,
     /// Every pool sound is in `msgs` (the whole dump, or one request each).
     sounds: bool,
+    /// Next single-sound request, including empty slots already answered.
+    sound_next: usize,
+    /// Successful single-pattern requests (kept across page switches).
+    patterns_read: usize,
 }
 
 impl Stream {
@@ -1546,10 +1598,9 @@ impl Stream {
 const FIRST_PATTERN_WAIT: Duration = Duration::from_secs(4);
 
 impl Worker {
-    /// The 128 patterns one at a time, banks folded out in the view first,
-    /// until done or stopped. Falls back to the whole-project dump (slot
-    /// order) if the device doesn't answer single-pattern requests.
-    fn read_patterns(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
+    /// One pattern read job, choosing folded-out banks first. Falls back
+    /// to the whole dump if single-pattern requests aren't supported.
+    fn read_pattern_step(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
         let em = self.em.clone();
         let m = match st.m {
             Some(m) => m,
@@ -1559,55 +1610,74 @@ impl Worker {
                 m
             }
         };
-        // Patterns already here (kept empty ones) count as done.
         let had = (0..patterns::PATTERNS).filter(|&i| st.have(i)).count();
         let prog = |done: usize| {
-            em.send(Ev::Elek(ElekEv::Progress { label: "Reading patterns".into(), done: had + done, total: patterns::PATTERNS }));
+            em.send(Ev::Elek(ElekEv::Progress { label: "Reading patterns".into(), done, total: patterns::PATTERNS }));
         };
-        let mut done = 0;
-        prog(0);
-        while !ctl.stopped() {
+        prog(had);
+        if !ctl.stopped() {
             let open = ctl.open.load(std::sync::atomic::Ordering::Relaxed);
             let Some(i) = (0..patterns::PATTERNS).filter(|&i| !st.have(i)).min_by_key(|&i| (open & (1 << (i / 16)) == 0, i)) else {
                 return Ok(());
             };
-            let wait = if done == 0 { FIRST_PATTERN_WAIT } else { GAP_WAIT };
+            let wait = if st.patterns_read == 0 { FIRST_PATTERN_WAIT } else { GAP_WAIT };
             let mut got = self.with_conn(|c| c.read_pattern(m, i as u8, wait))?;
-            if got.is_none() && done > 0 {
+            if got.is_none() && st.patterns_read > 0 {
                 crate::log::line(format!("elek: pattern {} didn't arrive, asking again", patterns::label(i)));
                 got = self.with_conn(|c| c.read_pattern(m, i as u8, GAP_WAIT))?;
             }
             let Some(msg) = got else {
-                if done > 0 {
+                if st.patterns_read > 0 {
                     return Err(format!("pattern {} didn't arrive", patterns::label(i)));
                 }
                 crate::log::line("elek: no answer to a single-pattern request; reading the whole project instead");
                 return self.read_whole(st, ctl);
             };
             st.add(&em, msg);
-            done += 1;
-            prog(done);
-            // Previews clicked meanwhile go between patterns.
-            self.serve_pending();
+            st.patterns_read += 1;
+            prog(had + 1);
         }
-        crate::log::line(format!("elek: read stopped after {done} of {} patterns", patterns::PATTERNS));
         Ok(())
     }
 
     /// The whole-project dump, streamed in slot order.
     fn read_whole(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
         let em = self.em.clone();
-        let (m, _) = self.with_conn(|c| {
-            c.read_project(&mut |i, msg| {
-                st.add(&em, msg.clone());
-                em.send(Ev::Elek(ElekEv::Progress { label: "Reading project".into(), done: i + 1, total: 129.max(i + 2) }));
-                !ctl.stopped()
-            })
+        let (m, _) = self.read_project_browsing(&mut |i, msg| {
+            st.add(&em, msg.clone());
+            em.send(Ev::Elek(ElekEv::Progress { label: "Reading project".into(), done: i + 1, total: 129.max(i + 2) }));
+            !ctl.stopped()
         })?;
         st.m = Some(m);
         // The dump carries every non-empty sound, unless it was cut short.
         st.sounds = !ctl.stopped();
         Ok(())
+    }
+
+    /// Receive a whole dump with API browser reads between messages. A
+    /// second dump request stays queued, since it would consume this one.
+    pub(super) fn read_project_browsing(
+        &mut self,
+        on_msg: &mut dyn FnMut(usize, &DumpMsg) -> bool,
+    ) -> Result<(Model, Vec<DumpMsg>), String> {
+        self.with_conn(|_| Ok(()))?;
+        let em = self.em.clone();
+        let rx = &self.rx;
+        let later = &mut self.later;
+        let busy = &self.busy;
+        let mut browse = |c: &mut Conn, i: usize, msg: &DumpMsg| {
+            let more = on_msg(i, msg);
+            super::serve_lists(c, rx, later, busy, &em);
+            more
+        };
+        let result = match self.conn.as_mut() {
+            Some(c) => c.read_project(&mut browse),
+            None => return Err("Device disconnected".into()),
+        };
+        result.map_err(|e| match e {
+            Fail::Link(e) => self.link_failed(e),
+            Fail::Refused(e) => e,
+        })
     }
 }
 
@@ -1622,18 +1692,19 @@ fn pool_keys(pool: &[PoolEntry], skip: &std::collections::HashSet<(u32, u32)>) -
 impl Worker {
     /// Asks the device for each file's +Drive path, sending them on in small
     /// batches so the list fills in as it goes.
-    fn look_up_names(&mut self, keys: &[(u32, u32)], asked: &mut std::collections::HashSet<(u32, u32)>, progress: bool) {
+    fn look_up_names(&mut self, keys: &[(u32, u32)], asked: &mut std::collections::HashSet<(u32, u32)>) -> bool {
         let mut batch = Vec::new();
+        let mut complete = true;
         for (i, &(h, l)) in keys.iter().enumerate() {
             match self.with_conn(|c| c.sample_path(h, l)) {
                 Ok(Some(p)) => batch.push(((h, l), p)),
                 Ok(None) => {}
-                Err(_) => break,
+                Err(_) => {
+                    complete = false;
+                    break;
+                }
             }
             asked.insert((h, l));
-            if progress {
-                self.em.send(Ev::Elek(ElekEv::Progress { label: "Looking up names".into(), done: i + 1, total: keys.len() }));
-            }
             if batch.len() >= 8 || i + 1 == keys.len() {
                 self.em.send(Ev::Elek(ElekEv::Names(std::mem::take(&mut batch))));
                 self.serve_pending();
@@ -1642,5 +1713,6 @@ impl Worker {
         if !batch.is_empty() {
             self.em.send(Ev::Elek(ElekEv::Names(batch)));
         }
+        complete
     }
 }

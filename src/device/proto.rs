@@ -30,7 +30,8 @@ pub const SAMPLE_INFO: u8 = 0x23;
 /// Data API (saved projects, sounds): list a folder.
 pub const DATA_LIST: u8 = 0x53;
 /// Data API writes, moves, copies, clears and swaps. These change saved
-/// projects on the +Drive; never sent (see project_discovery.md §0).
+/// projects on the +Drive; blocked except for validated native preset
+/// move/clear/swap paths (see `presets::allowed_edit`).
 pub const FORBIDDEN: [u8; 7] = [0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D];
 
 /// Bytes per read/write chunk, as elk-herd uses.

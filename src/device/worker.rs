@@ -1,5 +1,5 @@
 //! The device thread: one queue of commands, run in order, with folder
-//! listings answered between a job's steps.
+//! listings and read-only device browser requests answered between steps.
 
 use super::*;
 
@@ -71,8 +71,9 @@ pub(super) fn jumps_queue(task: &Task, busy: &[PathBuf], later: &VecDeque<Cmd>) 
     }
 }
 
-/// Answer listings waiting in `rx` on `c`, mid-transfer; park anything else
-/// in `later`. A link failure is only reported to the listing: the transfer's
+/// Answer listings and API browser reads waiting in `rx` on `c`, between
+/// transfer chunks or dump messages; park anything else in `later`.
+/// A link failure is only reported to the read: the running job's
 /// next request hits it too and handles the reconnect.
 pub(super) fn serve_lists(
     c: &mut Conn,
@@ -95,6 +96,10 @@ pub(super) fn serve_lists(
                     path,
                     result,
                 });
+            }
+            Cmd::Elek(cmd) if cmd.browsing() => {
+                let result = cmd.read_browser(c, em);
+                em.send(Ev::Elek(result.unwrap_or_else(|e| cmd.browser_failed(e.to_string()))));
             }
             Cmd::Job { job, task, .. } if jumps_queue(&task, busy, later) => {
                 em.send(
@@ -260,14 +265,22 @@ impl Worker {
         e
     }
 
-    /// Between a job's steps: answer waiting listings, park waiting jobs.
+    /// Between steps: answer queued browser reads, park other jobs.
     pub(super) fn serve_pending(&mut self) {
         self.check_alive();
+        // Include reads already parked by a transfer's chunk callback.
+        // Keep the other jobs in their original order.
+        let mut pending = std::mem::take(&mut self.later);
         while let Ok(cmd) = self.rx.try_recv() {
+            pending.push_back(cmd);
+        }
+        while let Some(cmd) = pending.pop_front() {
             match cmd {
                 Cmd::List { path, generation } => self.list_now(path, generation),
+                Cmd::Elek(cmd) if cmd.browsing() => self.elek(cmd),
                 // Quick enough to run between the current job's steps.
-                Cmd::Job { job, cancel, task } if jumps_queue(&task, &self.busy, &self.later) => {
+                Cmd::Job { job, cancel, task } if jumps_queue(&task, &self.busy, &self.later)
+                    && jumps_queue(&task, &self.busy, &pending) => {
                     self.job(job, &cancel, task)
                 }
                 Cmd::Release => self.release(),

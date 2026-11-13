@@ -2,7 +2,7 @@
 //! one `0x63` request per sound, falling back to the whole-project dump,
 //! which carries the non-empty ones.
 //!
-//! The project read also takes the sound pool in (`Worker::read_sounds`),
+//! The project read also takes the sound pool in (`Worker::read_sound_step`),
 //! so a sample pool push can renumber the samples pool sounds play.
 //!
 //! Sound pool edits (`SoundCell`: moved, emptied, renamed, or a kit track's sound pasted in) go out with the project push (`ElekProject::build_push`): each
@@ -459,12 +459,9 @@ impl Conn {
 }
 
 impl Worker {
-    /// The project read's part before the patterns: every pool sound, one request each,
-    /// into `st` (only real sound structs are kept, as the whole dump
-    /// would). A sound that doesn't come even when asked twice means the
-    /// device doesn't answer these, and the whole dump is read instead.
-    /// `st.sounds` is set once all are in.
-    pub(super) fn read_sounds(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
+    /// One sound-pool read job. The cursor survives a page switch even
+    /// for empty sounds, whose structs aren't kept in the project.
+    pub(super) fn read_sound_step(&mut self, st: &mut Stream, ctl: &ReadCtl) -> Result<(), String> {
         let em = self.em.clone();
         let m = match st.m {
             Some(m) => m,
@@ -478,9 +475,8 @@ impl Worker {
             crate::log::line("elek: Digitakt (I) answers single-sound requests with kit tracks; reading the whole project for the sound pool");
             return self.read_whole(st, ctl);
         }
-        let started = Instant::now();
-        let mut kept = 0;
-        for i in 0..SOUND_POOL {
+        let i = st.sound_next;
+        if i < SOUND_POOL {
             if ctl.stopped() {
                 crate::log::line(format!("elek: read stopped after {i} of {SOUND_POOL} pool sounds"));
                 return Ok(());
@@ -499,15 +495,10 @@ impl Worker {
             };
             if be32(&msg.data, 0) == Some(MAGIC) {
                 st.add(&em, msg);
-                kept += 1;
             }
-            self.serve_pending();
+            st.sound_next += 1;
         }
-        st.sounds = true;
-        crate::log::line(format!(
-            "elek: sound pool read, {kept} sound structs of {SOUND_POOL} in {:.1}s",
-            started.elapsed().as_secs_f32()
-        ));
+        st.sounds = st.sound_next == SOUND_POOL;
         Ok(())
     }
 
@@ -520,11 +511,9 @@ impl Worker {
         let first = if single_sounds(m) { self.with_conn(|c| c.read_sound(m, 0, FIRST_SOUND_WAIT))? } else { None };
         let Some(first) = first else {
             crate::log::line("elek-lib: no answer to a single-sound request; reading the whole project for its sounds");
-            let (_, msgs) = self.with_conn(|c| {
-                c.read_project(&mut |i, _| {
-                    em.send(Ev::Elek(ElekEv::SoundProgress { done: i + 1, total: 129.max(i + 2) }));
-                    true
-                })
+            let (_, msgs) = self.read_project_browsing(&mut |i, _| {
+                em.send(Ev::Elek(ElekEv::SoundProgress { done: i + 1, total: 129.max(i + 2) }));
+                true
             })?;
             let got: Vec<PoolSound> = msgs.iter().filter(|m| m.kind == SOUND).map(|s| parse_sound(m, s.index as usize, &s.data)).collect();
             crate::log::line(format!("elek-lib: whole dump held {} sounds", got.len()));

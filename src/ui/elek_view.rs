@@ -161,6 +161,7 @@ pub enum ElekIntent {
     ListPresetBanks,
     ListPresets(String),
     ReadPreset { bank: String, slot: u32 },
+    PushPresets(crate::device::presets::PresetPush),
     BackToEditor,
     /// The DEVICE switch: close the device panels and its MIDI ports.
     ToggleDevice,

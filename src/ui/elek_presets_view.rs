@@ -1,12 +1,12 @@
-//! The read-only Presets page: two independent +Drive bank browsers,
+//! The editable Presets page: two independent +Drive bank browsers,
 //! decoded sound details and exact matches in the current sound pool.
 
-use crate::device::presets::{Preset, PresetEntry};
+use crate::device::presets::{Preset, PresetEntry, PresetOp, PresetPush, PresetSlot};
 use crate::ui::elek_library_view::{is_default, machine_text, param_at, src_detail};
 use crate::ui::elek_view::{self, ElekIntent, ElekState};
 use crate::ui::theme::{self, OLED, OLED_BG, OLED_DIM, OLED_HOVER, oled_font};
 use egui::{RichText, Sense, Stroke};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 type Read<T> = Option<Result<T, String>>;
 
@@ -20,6 +20,177 @@ pub struct PresetView {
     filter: String,
     hide_empty: bool,
     show_defaults: bool,
+    ops: Vec<PresetOp>,
+    pub pushing: Option<(String, usize, usize)>,
+    pub status: String,
+    pub push_failed: bool,
+    loading: (usize, usize),
+    pub read_progress: f32,
+    confirm_reload: bool,
+    confirm_push: bool,
+}
+
+#[derive(Clone)]
+struct PresetDrag(PresetSlot);
+
+impl PresetView {
+    pub fn begin_load(&mut self) {
+        if self.loading.0 == self.loading.1 {
+            self.loading = (0, 0);
+        }
+        self.loading.1 += 1;
+    }
+
+    pub fn end_load(&mut self) {
+        self.loading.0 = (self.loading.0 + 1).min(self.loading.1);
+        self.read_progress = 0.0;
+    }
+
+    fn loading(&self) -> bool {
+        self.loading.0 < self.loading.1
+    }
+
+    pub fn reload(&mut self) {
+        self.banks = None;
+        self.asked = false;
+        self.listings.clear();
+        self.sounds.clear();
+        self.ops.clear();
+        self.push_failed = false;
+        self.loading = (0, 0);
+        self.read_progress = 0.0;
+        self.status.clear();
+    }
+
+    pub fn device_reconnected(&mut self, other: bool) {
+        if self.changed() > 0 && !other {
+            if !self.push_failed {
+                self.status = "Device reconnected; pending preset edits kept. Push checks for changes on the device before writing.".into();
+            }
+        } else {
+            let dropped = self.changed();
+            self.reload();
+            if dropped > 0 {
+                self.status = format!(
+                    "Another device connected; {dropped} pending preset slot change(s) belonged to the previous device."
+                );
+            }
+        }
+    }
+
+    fn base(&self, loc: &PresetSlot) -> Option<PresetSlot> {
+        self.listings
+            .get(&loc.bank)
+            .and_then(|r| r.as_ref())
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|entries| entries.iter().find(|e| e.slot == loc.slot))
+            .map(|_| loc.clone())
+    }
+
+    fn edits(&self) -> BTreeMap<PresetSlot, Option<PresetSlot>> {
+        let mut cells = BTreeMap::new();
+        for op in &self.ops {
+            for loc in op.slots() {
+                cells.entry(loc.clone()).or_insert_with(|| self.base(&loc));
+            }
+            match op {
+                PresetOp::Move(a, b) => {
+                    let src = cells[a].clone();
+                    cells.insert(b.clone(), src);
+                    cells.insert(a.clone(), None);
+                }
+                PresetOp::Swap(a, b) => {
+                    let src = cells[a].clone();
+                    let dst = cells[b].clone();
+                    cells.insert(a.clone(), dst);
+                    cells.insert(b.clone(), src);
+                }
+                PresetOp::Clear(a) => {
+                    cells.insert(a.clone(), None);
+                }
+            }
+        }
+        cells
+    }
+
+    fn origin(&self, loc: &PresetSlot) -> Option<PresetSlot> {
+        self.edits()
+            .get(loc)
+            .cloned()
+            .unwrap_or_else(|| self.base(loc))
+    }
+
+    fn changed(&self) -> usize {
+        self.edits()
+            .iter()
+            .filter(|(loc, src)| self.base(loc) != **src)
+            .count()
+    }
+
+    fn name(&self, loc: &PresetSlot) -> String {
+        self.listings
+            .get(&loc.bank)
+            .and_then(|r| r.as_ref())
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|entries| entries.iter().find(|e| e.slot == loc.slot))
+            .map_or_else(|| "—".into(), |e| e.name.clone())
+    }
+
+    fn request_sound(&mut self, loc: &PresetSlot, out: &mut Vec<ElekIntent>) {
+        let key = (loc.bank.clone(), loc.slot);
+        if !self.sounds.contains_key(&key) {
+            self.sounds.insert(key, None);
+            out.push(ElekIntent::ReadPreset {
+                bank: loc.bank.clone(),
+                slot: loc.slot,
+            });
+        }
+    }
+
+    fn stage(&mut self, op: PresetOp, out: &mut Vec<ElekIntent>) {
+        for loc in op.slots() {
+            if self.base(&loc).is_some() {
+                self.request_sound(&loc, out);
+            }
+        }
+        self.ops.push(op);
+        if self.changed() == 0 {
+            self.ops.clear();
+        }
+        self.status.clear();
+    }
+
+    fn data(&self, loc: &PresetSlot) -> Option<Vec<u8>> {
+        self.sounds
+            .get(&(loc.bank.clone(), loc.slot))?
+            .as_ref()?
+            .as_ref()
+            .ok()
+            .map(|p| p.data.clone())
+    }
+
+    fn plan(&self) -> Option<PresetPush> {
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for (loc, src) in self.edits() {
+            let old = if self.base(&loc).is_some() {
+                Some(self.data(&loc)?)
+            } else {
+                None
+            };
+            let new = match src {
+                Some(src) => Some(self.data(&src)?),
+                None => None,
+            };
+            before.push((loc.clone(), old));
+            after.push((loc, new));
+        }
+        Some(PresetPush {
+            ops: self.ops.clone(),
+            before,
+            after,
+        })
+    }
 }
 
 impl Default for PresetView {
@@ -34,6 +205,14 @@ impl Default for PresetView {
             filter: String::new(),
             hide_empty: false,
             show_defaults: false,
+            ops: Vec::new(),
+            pushing: None,
+            status: String::new(),
+            push_failed: false,
+            loading: (0, 0),
+            read_progress: 0.0,
+            confirm_reload: false,
+            confirm_push: false,
         }
     }
 }
@@ -46,25 +225,59 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         st.presets.asked = true;
         out.push(ElekIntent::ListPresetBanks);
     }
+    let changed = st.presets.changed();
+    let busy = st.presets.pushing.is_some();
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(present, egui::Button::new("⟳ Refresh presets"))
-            .clicked()
-        {
-            let bank = st.presets.bank.clone();
-            let filter = st.presets.filter.clone();
-            let hide_empty = st.presets.hide_empty;
-            let show_defaults = st.presets.show_defaults;
-            st.presets = PresetView {
-                bank,
-                filter,
-                hide_empty,
-                show_defaults,
-                asked: true,
-                ..Default::default()
-            };
-            out.push(ElekIntent::ListPresetBanks);
+        if ui.add_enabled(present && !busy && !st.presets.loading(), egui::Button::new("⬇ Reload presets")).clicked() {
+            if changed > 0 {
+                st.presets.confirm_reload = true;
+            } else {
+                st.presets.reload();
+            }
         }
+        let ready = present && !busy && !st.presets.push_failed && !st.presets.loading()
+            && changed > 0 && st.presets.plan().is_some();
+        if ui.add_enabled(ready, egui::Button::new(RichText::new("⬆ Push to device").color(theme::DEVICE_ACCENT_BRIGHT)))
+            .on_hover_text("Save staged preset edits to +Drive after checking the device still has the presets that were read. Preset data must finish loading first.").clicked() {
+            st.presets.confirm_push = true;
+        }
+        if ui.add_enabled(!busy && !st.presets.ops.is_empty(), egui::Button::new("Undo")).clicked() {
+            st.presets.ops.pop();
+        }
+        if ui.add_enabled(!busy && changed > 0, egui::Button::new("Reset")).clicked() {
+            st.presets.ops.clear();
+        }
+        if changed > 0 {
+            ui.colored_label(theme::CHANGED, format!("{changed} changed slot(s) · not pushed"));
+        }
+    });
+    if let Some((label, done, total)) = &st.presets.pushing {
+        ui.add(
+            theme::progress_bar(*done as f32 / (*total).max(1) as f32)
+                .text(format!("{label} · {done}/{total}"))
+                .desired_width(ui.available_width()),
+        );
+        ui.ctx().request_repaint();
+    } else if st.presets.loading() {
+        let (done, total) = st.presets.loading;
+        ui.add(
+            theme::progress_bar((done as f32 + st.presets.read_progress) / total.max(1) as f32)
+                .text(format!("Loading presets · {done}/{total}"))
+                .desired_width(ui.available_width()),
+        );
+        ui.ctx().request_repaint();
+    }
+    if !st.presets.status.is_empty() {
+        ui.colored_label(
+            if st.presets.push_failed {
+                theme::CHANGED
+            } else {
+                OLED_DIM
+            },
+            &st.presets.status,
+        );
+    }
+    ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut st.presets.filter)
                 .hint_text("filter presets")
@@ -76,7 +289,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
             "Show defaults",
         ));
         ui.label(
-            RichText::new("Saved on +Drive · select a preset to decode it")
+            RichText::new("Drag to move / swap · right-click to clear · edits wait for Push")
                 .weak()
                 .small(),
         );
@@ -112,6 +325,39 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
                 }
             });
         }
+    }
+    if st.presets.confirm_reload {
+        egui::Modal::new(egui::Id::unique("preset_reload")).show(ui.ctx(), |ui| {
+            ui.heading("Discard preset edits and reload?");
+            ui.label(format!("{changed} changed slot(s) have not been pushed."));
+            ui.horizontal(|ui| {
+                if ui.button("Discard and reload").clicked() {
+                    st.presets.confirm_reload = false;
+                    st.presets.reload();
+                }
+                if ui.button("Cancel").clicked() {
+                    st.presets.confirm_reload = false;
+                }
+            });
+        });
+    }
+    if st.presets.confirm_push {
+        egui::Modal::new(egui::Id::unique("preset_push")).show(ui.ctx(), |ui| {
+            ui.set_width(420.0);
+            ui.heading(format!("Push {changed} changed preset slot(s)?"));
+            ui.label("This saves the staged moves, swaps and clears directly to the preset banks on +Drive. Cleared presets are removed from their saved slots.");
+            ui.horizontal(|ui| {
+                if ui.button("Push presets").clicked() {
+                    st.presets.confirm_push = false;
+                    if let Some(plan) = st.presets.plan() {
+                        st.presets.pushing = Some(("Queued preset push".into(), 0, 1));
+                        st.presets.status.clear();
+                        out.push(ElekIntent::PushPresets(plan));
+                    }
+                }
+                if ui.button("Cancel").clicked() { st.presets.confirm_push = false; }
+            });
+        });
     }
     elek_view::finish(ui, st, &mut out);
     out
@@ -187,7 +433,7 @@ fn pane(
         st.presets.selected[side] = None;
     }
     let bank = st.presets.bank[side].clone();
-    if present && !st.presets.listings.contains_key(&bank) {
+    if present && st.presets.pushing.is_none() && !st.presets.listings.contains_key(&bank) {
         st.presets.listings.insert(bank.clone(), None);
         out.push(ElekIntent::ListPresets(bank.clone()));
     }
@@ -195,26 +441,40 @@ fn pane(
         ui.label("Reading bank…");
         return;
     };
-    let entries = match listing {
-        Ok(e) => e,
+    match listing {
+        Ok(_) => {}
         Err(e) => {
             ui.colored_label(theme::CHANGED, e);
             return;
         }
     };
+    let edits = st.presets.edits();
+    let origin_at = |loc: &PresetSlot| {
+        edits
+            .get(loc)
+            .cloned()
+            .unwrap_or_else(|| st.presets.base(loc))
+    };
+    let count = (1..=256)
+        .filter(|slot| origin_at(&PresetSlot::new(&bank, *slot)).is_some())
+        .count();
     ui.label(
-        RichText::new(format!("BANK {bank} · {} PRESETS", entries.len()))
+        RichText::new(format!("BANK {bank} · {count} PRESETS"))
             .font(oled_font(12.0))
             .color(OLED_DIM),
     );
     let filter = st.presets.filter.to_uppercase();
-    let rows: Vec<(u32, String, bool)> = (1..=256)
+    let rows: Vec<(u32, String, bool, bool)> = (1..=256)
         .filter_map(|slot| {
-            let entry = entries.iter().find(|e| e.slot == slot);
-            if st.presets.hide_empty && entry.is_none() {
+            let loc = PresetSlot::new(&bank, slot);
+            let origin = origin_at(&loc);
+            let changed = origin != st.presets.base(&loc);
+            if st.presets.hide_empty && origin.is_none() && !changed {
                 return None;
             }
-            let name = entry.map_or("—", |e| e.name.as_str());
+            let name = origin
+                .as_ref()
+                .map_or_else(|| "—".into(), |src| st.presets.name(src));
             if !filter.is_empty()
                 && !format!("{bank}:{slot:03} {name}")
                     .to_uppercase()
@@ -222,11 +482,18 @@ fn pane(
             {
                 return None;
             }
-            Some((slot, name.to_owned(), entry.is_some()))
+            Some((slot, name, origin.is_some(), changed))
         })
         .collect();
-    let height = (ui.available_height() * 0.57).max(60.0);
+    let show_details = st.presets.selected[side].is_some();
+    let height = if show_details {
+        (ui.available_height() * 0.57).max(60.0)
+    } else {
+        ui.available_height()
+    };
     let mut select = None;
+    let mut edit = None;
+    let can_edit = present && st.presets.pushing.is_none() && !st.presets.push_failed;
     egui::Frame::new().fill(OLED_BG).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         egui::ScrollArea::vertical()
@@ -236,10 +503,11 @@ fn pane(
             .auto_shrink([false, false])
             .show_rows(ui, 20.0, rows.len(), |ui, range| {
                 for row in range {
-                    let (slot, name, filled) = &rows[row];
+                    let (slot, name, filled, changed) = &rows[row];
+                    let loc = PresetSlot::new(&bank, *slot);
                     let (r, resp) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 20.0),
-                        Sense::click(),
+                        Sense::click_and_drag(),
                     );
                     let selected = st.presets.selected[side] == Some(*slot);
                     if selected || resp.hovered() {
@@ -256,48 +524,104 @@ fn pane(
                     ui.painter().text(
                         r.left_center() + egui::vec2(6.0, 0.0),
                         egui::Align2::LEFT_CENTER,
-                        format!("{bank}:{slot:03}  {name}"),
+                        format!(
+                            "{bank}:{slot:03}  {name}{}",
+                            if *changed { " *" } else { "" }
+                        ),
                         oled_font(16.0),
-                        if *filled { OLED } else { OLED_DIM },
+                        if *changed {
+                            theme::CHANGED
+                        } else if *filled {
+                            OLED
+                        } else {
+                            OLED_DIM
+                        },
                     );
                     if resp.clicked() {
                         select = Some((*slot, *filled));
                     }
+                    if can_edit && *filled && resp.drag_started() {
+                        egui::DragAndDrop::set_payload(ui.ctx(), PresetDrag(loc.clone()));
+                    }
+                    if can_edit && *filled && resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
+                    if can_edit {
+                        if let Some(drag) = resp.dnd_hover_payload::<PresetDrag>() {
+                            if drag.0 != loc {
+                                ui.painter().rect_stroke(
+                                    r,
+                                    0.0,
+                                    Stroke::new(1.0, theme::DEVICE_ACCENT_BRIGHT),
+                                    egui::StrokeKind::Inside,
+                                );
+                                theme::pointer_note(
+                                    ui.ctx(),
+                                    if *filled {
+                                        "Swap presets"
+                                    } else {
+                                        "Move preset"
+                                    },
+                                    theme::DEVICE_ACCENT_BRIGHT,
+                                );
+                            }
+                        }
+                        if let Some(drag) = resp.dnd_release_payload::<PresetDrag>() {
+                            if drag.0 != loc {
+                                edit = Some(if *filled {
+                                    PresetOp::Swap(drag.0.clone(), loc.clone())
+                                } else {
+                                    PresetOp::Move(drag.0.clone(), loc.clone())
+                                });
+                            }
+                        }
+                    }
+                    resp.context_menu(|ui| {
+                        ui.label(format!("Preset {bank}:{slot:03} · {name}"));
+                        if ui
+                            .add_enabled(can_edit && *filled, egui::Button::new("Clear"))
+                            .clicked()
+                        {
+                            edit = Some(PresetOp::Clear(loc.clone()));
+                            ui.close();
+                        }
+                    });
                 }
             });
     });
+    if let Some(op) = edit {
+        st.presets.stage(op, out);
+    }
     if let Some((slot, filled)) = select {
         st.presets.selected[side] = Some(slot);
-        if filled && present && !st.presets.sounds.contains_key(&(bank.clone(), slot)) {
-            st.presets.sounds.insert((bank.clone(), slot), None);
-            out.push(ElekIntent::ReadPreset {
-                bank: bank.clone(),
-                slot,
-            });
+        if filled && present && st.presets.pushing.is_none() {
+            if let Some(origin) = st.presets.origin(&PresetSlot::new(&bank, slot)) {
+                st.presets.request_sound(&origin, out);
+            }
         }
     }
-    ui.add_space(5.0);
-    egui::ScrollArea::vertical()
-        .id_salt("preset_details")
-        .max_height(ui.available_height())
-        .show(ui, |ui| {
-            details(ui, st, side, &bank, out);
-        });
+    if show_details {
+        ui.add_space(5.0);
+        egui::ScrollArea::vertical()
+            .id_salt("preset_details")
+            .max_height(ui.available_height())
+            .show(ui, |ui| {
+                details(ui, st, side, &bank, out);
+            });
+    }
 }
 
 fn details(ui: &mut egui::Ui, st: &ElekState, side: usize, bank: &str, out: &mut Vec<ElekIntent>) {
     let Some(slot) = st.presets.selected[side] else {
-        ui.label(
-            RichText::new(
-                "Select a preset to see its machine, sample, SRC values and sound-pool matches.",
-            )
-            .weak(),
-        );
         return;
     };
-    let preset = match st.presets.sounds.get(&(bank.to_owned(), slot)) {
+    let Some(origin) = st.presets.origin(&PresetSlot::new(bank, slot)) else {
+        ui.label("Empty preset slot.");
+        return;
+    };
+    let preset = match st.presets.sounds.get(&(origin.bank, origin.slot)) {
         None => {
-            ui.label("Empty preset slot.");
+            ui.label("Select this preset to load its details.");
             return;
         }
         Some(None) => {

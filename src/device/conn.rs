@@ -7,6 +7,9 @@ pub(super) struct Conn {
     pub(super) out: midir::MidiOutputConnection,
     pub(super) _input: midir::MidiInputConnection<()>,
     pub(super) rx: Receiver<Vec<u8>>,
+    /// While a whole-project dump streams, API browser reads preserve the
+    /// dump packets they encounter here for `collect_dump` to consume.
+    pub(super) dump_pending: Option<VecDeque<Vec<u8>>>,
     pub(super) next: u16,
     pub(super) stereo: bool,
     /// Product id from the handshake (12 = Digitakt, 42 = Digitakt II).
@@ -161,6 +164,7 @@ impl Conn {
             out,
             _input,
             rx,
+            dump_pending: None,
             next: 0,
             stereo: false,
             product: 0,
@@ -226,14 +230,18 @@ impl Conn {
         if self.dead {
             return Err(Fail::Link("Device disconnected".into()));
         }
-        if proto::FORBIDDEN.contains(&cmd) {
+        if proto::FORBIDDEN.contains(&cmd) && !elek::presets::allowed_edit(cmd, &args.0) {
             return refused(format!(
                 "command 0x{cmd:02x} would change saved projects; blocked"
             ));
         }
         self.next = self.next.wrapping_add(1).max(1);
         let id = self.next;
-        while self.rx.try_recv().is_ok() {} // stale replies
+        while let Ok(msg) = self.rx.try_recv() {
+            if let Some(pending) = &mut self.dump_pending {
+                pending.push_back(msg);
+            }
+        }
         self.out
             .send(&proto::frame(id, cmd, &args.0))
             .map_err(|e| Fail::Link(format!("MIDI send failed: {e}")))?;
@@ -248,6 +256,9 @@ impl Conn {
                 if c == cmd | 0x80 {
                     return Ok(a);
                 }
+            }
+            if let Some(pending) = &mut self.dump_pending {
+                pending.push_back(msg);
             }
         }
     }
