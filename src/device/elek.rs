@@ -750,22 +750,11 @@ impl ElekProject {
                 out.push(msg);
             }
         }
-        for (i, d) in self.sound_writes(sounds, &data, &self.new_of(order), all) {
+        for (i, d) in self.sound_writes(sounds, &data, all) {
             out.push(build_dump(self.model, SOUND, i, &d));
         }
         out.extend(settings);
         out
-    }
-
-    /// `new_of[old] = new` for the sample pool laid out as `order`.
-    fn new_of(&self, order: &[u16]) -> Vec<usize> {
-        let mut new_of: Vec<usize> = (0..self.pool.len()).collect();
-        for (new, &old) in order.iter().enumerate() {
-            if let Some(n) = new_of.get_mut(old as usize) {
-                *n = new;
-            }
-        }
-        new_of
     }
 
     /// Every pattern payload (by slot) the device should hold after the push,
@@ -786,9 +775,8 @@ impl ElekProject {
     /// `(kind, index, payload)`, in dump order.
     pub fn edited_msgs(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<(u8, u8, Vec<u8>)> {
         let data = self.new_data(order, fills, cells, sounds);
-        let new_of = self.new_of(order);
         let pool: Vec<(u8, u8, Vec<u8>)> = (0..library::SOUND_POOL)
-            .filter_map(|i| Some((SOUND, i as u8, self.sound_want(sounds, i, &data, &new_of)?)))
+            .filter_map(|i| Some((SOUND, i as u8, self.sound_want(sounds, i, &data)?)))
             .collect();
         let mut out = Vec::new();
         let mut settings = None;
@@ -990,10 +978,6 @@ pub enum ElekCmd {
     ListProjects,
     /// The project's sound pool, read-only (`library`).
     ReadSounds,
-    /// A +Drive data folder (`/`, `/soundbanks`, …), read-only.
-    ListData(String),
-    /// A sound preset on the +Drive (`/soundbanks/…`), read-only.
-    ReadPreset(String),
     /// Read the project; `known` names needn't be looked up again. `ctl`
     /// steers it while it runs (which banks first, stop).
     Read {
@@ -1042,8 +1026,6 @@ pub enum ElekEv {
     Projects(Result<Vec<SavedProject>, String>),
     SoundProgress { done: usize, total: usize },
     Sounds(Result<Vec<library::PoolSound>, String>),
-    Data { path: String, items: Result<Vec<library::DataItem>, String> },
-    Preset { path: String, r: Result<library::Preset, String> },
     Progress {
         label: String,
         done: usize,
@@ -1301,21 +1283,6 @@ impl Worker {
                     crate::log::line(format!("elek-lib: sound pool read failed: {e}"));
                 }
                 self.em.send(Ev::Elek(ElekEv::Sounds(r)));
-            }
-            ElekCmd::ReadPreset(path) => {
-                let r = self.read_preset(&path);
-                if let Err(e) = &r {
-                    crate::log::line(format!("elek-lib: reading preset {path} failed: {e}"));
-                }
-                self.em.send(Ev::Elek(ElekEv::Preset { path, r }));
-            }
-            ElekCmd::ListData(path) => {
-                let items = self.with_conn(|c| c.list_data(&path));
-                crate::log::line(format!("elek-lib: listed {path}: {}", match &items {
-                    Ok(v) => format!("{} entries", v.len()),
-                    Err(e) => e.clone(),
-                }));
-                self.em.send(Ev::Elek(ElekEv::Data { path, items }));
             }
             ElekCmd::Read { known, ctl, cached, first } => {
                 let mut asked = known;

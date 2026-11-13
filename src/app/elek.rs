@@ -138,10 +138,6 @@ impl App {
         let st = &mut self.elek;
         // Paths and listings belong to whichever machine answered last.
         st.names.clear();
-        st.lib.presets.clear();
-        st.lib.preset_pending.clear();
-        st.lib.data.clear();
-        st.lib.data_pending.clear();
         if st.project.as_ref().is_some_and(|p| p.from_file.is_some()) {
             st.status = "Device reconnected; the project opened from a file is kept (not read from the device)".into();
             return;
@@ -508,14 +504,6 @@ impl App {
                     self.elek.lib.sound_progress = Some((0, crate::device::library::SOUND_POOL));
                     self.device.elek(ElekCmd::ReadSounds);
                 }
-                ElekIntent::ReadPreset(path) => {
-                    self.elek.lib.preset_pending.insert(path.clone());
-                    self.device.elek(ElekCmd::ReadPreset(path));
-                }
-                ElekIntent::ListData(path) => {
-                    self.elek.lib.data_pending.insert(path.clone());
-                    self.device.elek(ElekCmd::ListData(path));
-                }
                 ElekIntent::SaveDump => {
                     let Some(p) = &self.elek.project else { continue };
                     let Some(home) = std::env::var_os("HOME") else { continue };
@@ -596,7 +584,6 @@ impl App {
                 crate::log::line(format!("elek-lib: pushing pool sound {}: {:?} name {:?}", i + 1, match &c.src {
                     crate::device::library::SoundSrc::Read(o) => format!("from {}", *o as usize + 1),
                     crate::device::library::SoundSrc::Empty => "emptied".into(),
-                    crate::device::library::SoundSrc::Preset { from, sample, .. } => format!("preset {from}, sample slot {sample} (as read)"),
                 }, c.name));
             }
             p.edited_sounds(sounds).into_iter().map(|s| if s.blank { String::new() } else { s.name }).collect()
@@ -1569,21 +1556,6 @@ impl App {
                     Err(e) => format!("Sound pool read failed: {e}"),
                 };
                 st.lib.pool_sounds = Some(r);
-            }
-            ElekEv::Preset { path, r } => {
-                st.lib.preset_pending.remove(&path);
-                // Dropped on the sound pool before it was read: place it now.
-                if let Some(to) = st.lib.place_after.remove(&path) {
-                    match &r {
-                        Ok(pr) => st.place_preset(to, &path, pr),
-                        Err(e) => st.status = format!("Couldn't read preset {path}: {e}"),
-                    }
-                }
-                st.lib.presets.insert(path, r);
-            }
-            ElekEv::Data { path, items } => {
-                st.lib.data_pending.remove(&path);
-                st.lib.data.insert(path, items);
             }
             ElekEv::Partial(p) => {
                 st.set_project(p);

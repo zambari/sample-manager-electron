@@ -145,7 +145,7 @@ pub enum ElekPage {
     #[default]
     Order,
     Project,
-    /// Sounds: kits, sample use, sound pool, +Drive presets (read-only).
+    /// Sounds: the project's sound pool.
     Library,
 }
 
@@ -204,10 +204,6 @@ pub enum ElekIntent {
     LoadPattern(usize),
     /// Read the project's sound pool (Sounds page).
     ReadSounds,
-    /// List a +Drive data folder (Sounds page).
-    ListData(String),
-    /// Read a sound preset on the +Drive (Sounds page).
-    ReadPreset(String),
 }
 
 impl ElekState {
@@ -220,50 +216,6 @@ impl ElekState {
     /// Pool slots, pattern slots and pool sounds changed since the read.
     pub fn changed(&self) -> usize {
         self.pool_changed() + self.proj.changed() + self.lib.sound_changed()
-    }
-
-    /// Put a sound preset read from the +Drive into empty pool sound `to`.
-    /// Its sample is found in the sample pool, or put into its first empty
-    /// slot (pushed with the rest).
-    pub fn place_preset(&mut self, to: usize, path: &str, pr: &crate::device::library::Preset) {
-        let Some(p) = &self.project else { return };
-        let (data, file) = match p.preset_sound(pr) {
-            Ok(x) => x,
-            Err(e) => {
-                self.status = format!("Can't put {path} into the sound pool: {e}");
-                return;
-            }
-        };
-        let name = pr.sound.as_ref().map(|s| s.name.clone()).unwrap_or_default();
-        let mut note = String::new();
-        let sample = match file {
-            None => 0,
-            Some(e) => {
-                let have = (1..self.order.len()).map(|pos| self.order[pos]).find(|&old| {
-                    let x = self.entry(old as usize);
-                    !x.is_empty() && x.key() == e.key()
-                });
-                match have.or_else(|| self.first_free().map(|(_, old)| old)) {
-                    Some(old) if have.is_some() => old,
-                    Some(old) => {
-                        self.fill(old, PoolEntry::new_file(e.hash, e.size.saturating_sub(16)));
-                        let pos = self.order.iter().position(|&o| o == old).unwrap_or(old as usize);
-                        note = format!("; its sample went into empty sample slot {pos:03}");
-                        old
-                    }
-                    None => {
-                        self.status = format!("Can't put “{name}” into the sound pool: its sample isn't in the sample pool and there's no empty slot for it");
-                        return;
-                    }
-                }
-            }
-        };
-        let cell = crate::device::library::SoundCell {
-            src: crate::device::library::SoundSrc::Preset { data: std::sync::Arc::new(data), sample, from: path.to_owned() },
-            name: None,
-        };
-        self.lib.set_sound(to, cell);
-        self.status = format!("“{name}” put into pool sound {:03}{note}. Push to send it.", to + 1);
     }
 
     pub fn pool_changed(&self) -> usize {
@@ -1092,7 +1044,7 @@ pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>, drive: b
         &[
             (DevicePick::Page(ElekPage::Order), "Samples", "The sample pool in two side-by-side panes"),
             (DevicePick::Page(ElekPage::Project), "Patterns", "Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)"),
-            (DevicePick::Page(ElekPage::Library), "Sounds", "Kits, sample use, the sound pool and +Drive presets, to plan how to organise the project. Read-only"),
+            (DevicePick::Page(ElekPage::Library), "Sounds", "The project's 128 pool sounds: rearrange, rename or delete them"),
             (DevicePick::Drive, "+Drive", "The device's file storage, in the right column"),
         ],
         |v| match v {

@@ -1,20 +1,16 @@
-//! Read-only lookups for the Sounds page (`ui::elek_library_view`): the
-//! project's sound pool (one `0x63` request per sound, falling back to the
-//! whole-project dump, which carries the non-empty ones), the MIDI track
-//! names in Digitakt II kits, and the +Drive's data tree (`/soundbanks`,
-//! `/projects`, …) over the data API list `0x53`.
+//! The project's sound pool for the Sounds page (`ui::elek_library_view`):
+//! one `0x63` request per sound, falling back to the whole-project dump,
+//! which carries the non-empty ones.
 //!
 //! The project read also takes the sound pool in (`Worker::read_sounds`),
 //! so a sample pool push can renumber the samples pool sounds play.
 //!
-//! Sound pool edits (`SoundCell`: moved, emptied, renamed, filled from a
-//! preset) go out with the project push (`ElekProject::build_push`): each
+//! Sound pool edits (`SoundCell`: moved, emptied, renamed) go out with the project push (`ElekProject::build_push`): each
 //! changed pool sound as one `0x53` message, an emptied one as a blank
 //! sound (`blank_sound`), and every pattern's sound locks renumbered to
 //! follow (`lock_spots`), or cleared when their sound goes.
 
 use super::*;
-use std::sync::Arc;
 use super::machines::{machine_id, machine_name, src_params, SrcParam};
 
 /// Where pool sound `i` comes from after the Sounds page's edits.
@@ -23,9 +19,6 @@ pub enum SoundSrc {
     /// The pool sound read at this index.
     Read(u8),
     Empty,
-    /// A preset from the +Drive: its sound struct, and the pool sample it
-    /// plays (numbered as read, 0 = none).
-    Preset { data: Arc<Vec<u8>>, sample: u16, from: String },
 }
 
 /// One pool sound after the edits: where it comes from, and its new name.
@@ -207,7 +200,7 @@ impl ElekProject {
     /// Pool sound `i` after the edits (`None`: empty), from the payloads
     /// with the sample pool renumbered (`data`, from `new_data`) and the
     /// sample renumbering itself (`new_of[old] = new`).
-    pub(super) fn sound_want(&self, cells: &[SoundCell], i: usize, data: &[Option<Vec<u8>>], new_of: &[usize]) -> Option<Vec<u8>> {
+    pub(super) fn sound_want(&self, cells: &[SoundCell], i: usize, data: &[Option<Vec<u8>>]) -> Option<Vec<u8>> {
         let cell = cells.get(i).cloned().unwrap_or_else(|| SoundCell::as_read(i));
         let mut d = match &cell.src {
             SoundSrc::Read(o) => {
@@ -219,11 +212,6 @@ impl ElekProject {
                 d
             }
             SoundSrc::Empty => return None,
-            SoundSrc::Preset { data: p, sample, .. } => {
-                let mut d = p.to_vec();
-                set_sound_slot(self.model, &mut d, new_of.get(*sample as usize).copied().unwrap_or(0));
-                d
-            }
         };
         if let Some(n) = &cell.name {
             set_sound_name(&mut d, n);
@@ -233,12 +221,12 @@ impl ElekProject {
 
     /// The `0x53` payloads a push sends: every pool sound that changes
     /// (all non-empty ones with `all`), an emptied one as a blank sound.
-    pub(super) fn sound_writes(&self, cells: &[SoundCell], data: &[Option<Vec<u8>>], new_of: &[usize], all: bool) -> Vec<(u8, Vec<u8>)> {
+    pub(super) fn sound_writes(&self, cells: &[SoundCell], data: &[Option<Vec<u8>>], all: bool) -> Vec<(u8, Vec<u8>)> {
         let mut blank = None;
         let mut out = Vec::new();
         for i in 0..SOUND_POOL {
             let now = self.sound_now(i);
-            match self.sound_want(cells, i, data, new_of) {
+            match self.sound_want(cells, i, data) {
                 Some(w) => {
                     if all || now != Some(&w[..]) {
                         out.push((i as u8, w));
@@ -261,52 +249,26 @@ impl ElekProject {
 
     /// The pool sounds as edited, for showing (samples numbered as read).
     pub fn edited_sounds(&self, cells: &[SoundCell]) -> Vec<PoolSound> {
-        let ident: Vec<usize> = (0..self.pool.len()).collect();
         (0..SOUND_POOL)
-            .map(|i| match self.sound_want(cells, i, &[], &ident) {
+            .map(|i| match self.sound_want(cells, i, &[]) {
                 Some(d) => parse_sound(self.model, i, &d),
                 None => PoolSound::blank(i),
             })
             .collect()
     }
 
-    /// A preset's sound struct, ready for the pool, and the sample file it
-    /// plays (`None`: no sample).
-    pub fn preset_sound(&self, p: &Preset) -> Result<(Vec<u8>, Option<PoolEntry>), String> {
-        let m = self.model;
-        let at = p.at.ok_or("not a sound preset this app can read")?;
-        let blob = &p.data[at..];
-        let sv = be32(blob, 4).ok_or("preset too short")?;
-        let size = sound_sizeof(m, sv).ok_or_else(|| format!("unknown sound version {sv}"))?;
-        if let Some(pool_v) = self.pool_sound_version() {
-            if pool_v != sv {
-                return Err(format!("the preset is a version {sv} sound and this project's are version {pool_v} (made on other firmware)"));
-            }
-        }
-        let d = blob.get(..size).ok_or("preset shorter than a sound")?.to_vec();
-        let f = sound_file(m, sv).ok_or_else(|| format!("where a version {sv} sound keeps its sample file isn't known, so its sample can't be found"))?;
-        let file = Some(f).and_then(|f| {
-            let e = PoolEntry { inode: be32(&d, f)?, hash: be32(&d, f + 4)?, size: be32(&d, f + 8)?, seqnr: be32(&d, f + 12)? };
-            (!e.is_empty() && e.hash != 0 && e.size > 16).then_some(e)
-        });
-        Ok((d, file))
-    }
 }
 
 /// Sounds in a project's sound pool (the dump index is 7-bit).
 pub const SOUND_POOL: usize = 128;
 
 const REQ_SOUND: u8 = 0x63;
-/// Data API reads (see project_discovery.md §3). Read-only.
-const DATA_READ_OPEN: u8 = 0x54;
-const DATA_READ_CHUNK: u8 = 0x55;
-const DATA_READ_CLOSE: u8 = 0x56;
 /// First sound request: long enough for the device to answer at all.
 const FIRST_SOUND_WAIT: Duration = Duration::from_secs(3);
 /// Later ones: an unanswered sound counts as empty.
 const SOUND_WAIT: Duration = Duration::from_millis(1500);
 
-/// One entry of the project's sound pool (or a sound preset).
+/// One entry of the project's sound pool.
 #[derive(Clone, Debug, Default)]
 pub struct PoolSound {
     pub index: usize,
@@ -325,8 +287,6 @@ pub struct PoolSound {
     /// `src` as this machine shows it (one-shot names when the machine
     /// isn't known), the sample place included.
     pub params: Vec<SrcParam>,
-    /// The sample file the sound was made with (+Drive hash), if any.
-    pub file_hash: Option<u32>,
 }
 
 /// SRC page names, in `PoolSound::src` order.
@@ -354,15 +314,6 @@ fn src_offsets(m: Model, sv: u32) -> Option<[usize; 8]> {
     })
 }
 
-/// The sample file entry (inode, hash, size, seqnr) in a sound struct.
-fn sound_file(m: Model, sv: u32) -> Option<usize> {
-    Some(match (m, sv) {
-        (DT, 1..=3) => 132,
-        (DT2, 3) => 297,
-        _ => return None,
-    })
-}
-
 pub(super) fn parse_sound(m: Model, index: usize, d: &[u8]) -> PoolSound {
     if be32(d, 0) != Some(MAGIC) {
         return PoolSound::blank(index);
@@ -376,37 +327,10 @@ pub(super) fn parse_sound(m: Model, index: usize, d: &[u8]) -> PoolSound {
     let src = src_offsets(m, sv)
         .and_then(|o| o.iter().map(|&at| Some((*d.get(at)?, *d.get(at + 1)?))).collect::<Option<Vec<_>>>())
         .unwrap_or_default();
-    let file_hash = sound_file(m, sv).and_then(|at| {
-        let inode = be32(d, at)?;
-        (inode != u32::MAX).then(|| be32(d, at + 4)).flatten().filter(|&h| h != 0)
-    });
     let id = machine_id(m, sv, d);
     let params = src_params(m, id.unwrap_or(0), &src);
     let machine = id.map(|i| (i, machine_name(m, i)));
-    PoolSound { index, name, slot, blank, src, machine, params, file_hash }
-}
-
-/// A sound preset read from the +Drive (`/soundbanks/…`): the bytes as
-/// they came, and the sound struct found in them, if any.
-#[derive(Clone, Debug)]
-pub struct Preset {
-    pub bytes: usize,
-    /// Where the sound struct starts in the blob.
-    pub at: Option<usize>,
-    pub sound: Option<PoolSound>,
-    /// The first bytes, in hex, for the log and the tooltip.
-    pub head: String,
-    /// Where the blob was saved for research.
-    pub saved: Option<std::path::PathBuf>,
-    /// The blob itself, to put the sound into the pool.
-    pub data: Arc<Vec<u8>>,
-}
-
-fn parse_preset(m: Model, blob: &[u8]) -> Preset {
-    let at = blob.windows(4).take(256).position(|w| w == MAGIC.to_be_bytes());
-    let sound = at.map(|a| parse_sound(m, 0, &blob[a..]));
-    let head = blob.iter().take(48).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-    Preset { bytes: blob.len(), at, sound, head, saved: None, data: Arc::new(blob.to_vec()) }
+    PoolSound { index, name, slot, blank, src, machine, params }
 }
 
 /// All 128 pool sounds from the sound messages there are (blank for the rest).
@@ -433,115 +357,7 @@ fn text16(d: &[u8], at: usize) -> String {
         .unwrap_or_default()
 }
 
-/// The 16 MIDI track names of a Digitakt II kit, where the layout is known
-/// (kit v4: kit+0x4638, 268 bytes apart; found in a DT II 1.15+ dump).
-/// Empty for anything else.
-pub fn midi_names(m: Model, d: &[u8]) -> Vec<String> {
-    if m != DT2 {
-        return Vec::new();
-    }
-    let Some(kit) = be32(d, 0).and_then(|pv| pattern_sizeof(m, pv)) else { return Vec::new() };
-    let kv_at = if be32(d, kit) == Some(MAGIC) { kit + 4 } else { kit };
-    if be32(d, kv_at) != Some(4) {
-        return Vec::new();
-    }
-    (0..16).map(|t| text16(d, kit + 0x4638 + t * 0x10C)).collect()
-}
-
-/// One entry of a +Drive data listing: a folder, or an item in a slot.
-#[derive(Clone, Debug)]
-pub struct DataItem {
-    pub name: String,
-    pub dir: bool,
-    /// Slot number (items); for folders whatever the device sent.
-    pub slot: u32,
-    pub size: u32,
-}
-
-/// `path` joined with `name`, for listing a folder inside it.
-pub fn data_child(path: &str, name: &str) -> String {
-    if path.ends_with('/') { format!("{path}{name}") } else { format!("{path}/{name}") }
-}
-
 impl Conn {
-    /// A +Drive data folder: same request and reply as `list_projects`,
-    /// folders kept.
-    pub(super) fn list_data(&mut self, path: &str) -> R<Vec<DataItem>> {
-        let args = Args::default().str(path).u32(0).u32(0).bytes(&[1]);
-        let r = self.request(proto::DATA_LIST, args)?;
-        if r.first() != Some(&1) || r.len() < 13 {
-            return refused(format!("the device wouldn't list {path}"));
-        }
-        let mut rd = Reader::new(&r[13..]);
-        let mut out = Vec::new();
-        let mut next = 1;
-        let bad = |e: String| Fail::Refused(format!("odd listing of {path}: {e}"));
-        while !rd.is_empty() {
-            let name = rd.str().map_err(bad)?;
-            let _children = rd.u8().map_err(bad)?;
-            match rd.u8().map_err(bad)? {
-                1 => {
-                    let v = rd.u32().map_err(bad)?;
-                    out.push(DataItem { name, dir: true, slot: v, size: 0 });
-                }
-                2 => {
-                    let id = rd.u32().map_err(bad)?;
-                    let size = rd.u32().map_err(bad)?;
-                    rd.u8().map_err(bad)?;
-                    rd.u8().map_err(bad)?;
-                    let _valid = rd.u8().map_err(bad)?;
-                    let _meta = rd.u8().map_err(bad)?;
-                    let slot = if id == 0 || id == u32::MAX { next } else { id };
-                    next = slot + 1;
-                    out.push(DataItem { name, dir: false, slot, size });
-                }
-                t => {
-                    crate::log::line(format!("elek-lib: listing {path}: unknown entry type {t} after {} entries", out.len()));
-                    break;
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// A +Drive data item (a sound preset), read whole over the data API's
-    /// read open / chunk / close, uncompressed. Read-only.
-    pub(super) fn read_data(&mut self, path: &str) -> R<Vec<u8>> {
-        let r = self.request(DATA_READ_OPEN, Args::default().str(path).u32(proto::CHUNK as u32).bytes(&[0]))?;
-        crate::log::line(format!("elek-lib: read open {path}: {:02x?}", &r[..r.len().min(16)]));
-        if r.first() != Some(&1) || r.len() < 10 {
-            return refused(format!("the device wouldn't open {path}"));
-        }
-        let job = Reader::new(&r[1..]).u32().map_err(Fail::Refused)?;
-        let mut out = Vec::new();
-        let mut result = Ok(());
-        for seq in 0..4096u32 {
-            let c = match self.request(DATA_READ_CHUNK, Args::default().u32(job).u32(seq)) {
-                Ok(c) => c,
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            };
-            // ok, job, seq, status, last, hash, size, data
-            if c.first() != Some(&1) || c.len() < 22 {
-                crate::log::line(format!("elek-lib: odd chunk {seq} of {path}: {:02x?}", &c[..c.len().min(32)]));
-                result = refused(format!("odd reply reading {path}"));
-                break;
-            }
-            let last = c[13] != 0;
-            if seq == 0 {
-                crate::log::line(format!("elek-lib: first chunk of {path}: header {:02x?}, {} data bytes", &c[..22], c.len() - 22));
-            }
-            out.extend_from_slice(&c[22..]);
-            if last {
-                break;
-            }
-        }
-        let _ = self.request(DATA_READ_CLOSE, Args::default().u32(job));
-        result.map(|()| out)
-    }
-
     /// Sound pool entry `i` on its own. `Ok(None)`: nothing within `wait`.
     fn read_sound(&mut self, m: Model, i: u8, wait: Duration) -> R<Option<DumpMsg>> {
         while self.rx.try_recv().is_ok() {}
@@ -561,29 +377,6 @@ impl Conn {
 }
 
 impl Worker {
-    /// A sound preset from the +Drive, parsed, and its bytes saved under
-    /// `~/Documents/sample_manager/project_dumps/presets` for research.
-    pub(super) fn read_preset(&mut self, path: &str) -> Result<Preset, String> {
-        let m = self.with_conn(|c| c.model())?;
-        let blob = self.with_conn(|c| c.read_data(path))?;
-        let mut p = parse_preset(m, &blob);
-        crate::log::line(format!(
-            "elek-lib: preset {path}: {} bytes, sound struct at {:?}, name {:?}, starts {}",
-            p.bytes,
-            p.at,
-            p.sound.as_ref().map(|s| s.name.clone()),
-            p.head
-        ));
-        if let Some(home) = std::env::var_os("HOME") {
-            let dir = std::path::PathBuf::from(home).join("Documents/sample_manager/project_dumps/presets");
-            let file = dir.join(format!("{}_{}.bin", m.name().replace(' ', ""), path.trim_start_matches('/').replace('/', "_")));
-            if std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&file, &blob)).is_ok() {
-                p.saved = Some(file);
-            }
-        }
-        Ok(p)
-    }
-
     /// The project read's part before the patterns: every pool sound, one request each,
     /// into `st` (only real sound structs are kept, as the whole dump
     /// would). A sound that doesn't come even when asked twice means the
