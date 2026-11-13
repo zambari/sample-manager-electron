@@ -225,13 +225,33 @@ notices when the device is plugged in or out and reconnects on its own.
 #### Presets: saved sounds on +Drive
 
 The **Presets** page has two independent bank browsers, with bank switches,
-a name filter and **Hide empty**. Click a preset to read its machine, source
-sample and SRC values. Exact matches in the loaded project's sound pool
-are identified by comparing the entire sound payload. **▶ Sample** previews
-the source sample; it does not render the preset's effects or synthesis.
-Drag a preset onto an empty slot to move it, or onto another preset to swap
-them, within a bank or between the two panes. Right-click **Clear** to empty a
-slot. Edits show in amber and wait for **Push to device**; **Undo** and **Reset**
+a name filter and **Hide empty**. Both lists use the full pane height.
+Use **click / ⇧click / ⌘click** to select slots, then drag the group within a
+bank or between panes. Normal drops place the group in consecutive slots,
+swapping occupied targets back into the freed slots. Hold **⌥** or **⌃** to
+insert above or below a row and shift the intervening slots. Hover a bank tab
+while dragging to open that bank. **⌥↑ / ⌥↓** nudges the selection; **⌘A**
+selects the active bank, **Esc** deselects, and **⌘Z** undoes a whole group edit.
+Right-click to clear the selection, move it here, insert empty slots or close
+an empty gap (empty-slot insertion and gap closing stay within that bank).
+Cross-bank inserts read any affected intermediate banks before staging.
+Copy a sound with **⌘C** or right-click → **Copy sound**, then select a slot
+on **Sounds** or **Presets** and use **⌘V** or right-click → **Paste**. A filled
+target is replaced; **Undo** restores it before pushing. Copies include pending
+sound renames. Pasting a preset into Sounds resolves its source sample by
++Drive identity and, if needed, adds it to an empty sample-pool slot. Missing
+samples on +Drive stop the paste with a persistent message above the sound
+rows; nothing is pasted. Supported older presets keep their versioned sound
+payload for the device to upgrade on Push. Sounds from newer firmware are
+refused with an explanation; pasting directly onto kit tracks still needs a
+matching sound version.
+Push on **Sounds** sends project sound and sample edits; Push on **Presets**
+saves to the selected +Drive preset slot. Saving a pool sound uses an existing
+saved preset of the same sound version as a container-format reference; if
+none exists, save one sound on the device first. Preset writes are read back
+and checked after saving.
+
+Edits show in amber and wait for **Push to device**; **Undo** and **Reset**
 revert pending edits. **Reload presets** rereads saved changes from the device
 and asks before discarding pending edits. Progress bars show reads and pushes.
 Push checks the touched slots for changes made on the device, saves directly
@@ -244,8 +264,8 @@ other supported sound versions use the existing sound decoder.
 
 The **Sounds** page lists the project's 128 pool sounds with their
 machine, sample and SRC settings. Drag sounds to reorder them, rename or
-delete them, or paste a track sound copied on the Patterns page into the
-pool. Patterns that lock a pool sound are renumbered to follow it, so
+delete them, copy/paste sounds between this pool and **Presets**, or paste a
+track sound copied on the Patterns page into the pool. Patterns that lock a pool sound are renumbered to follow it, so
 nothing that plays changes.
 
 #### Preview cache for samples on the device
@@ -329,12 +349,11 @@ Install Rust from <https://rustup.rs>, then:
 The script's header lists the other options (`bundle`, `windows`, `dev`,
 `test`, `clean`).
 
-Click **SAMPLE MANAGER** in the toolbar for the version, build number and
-repository link. The release version and repository URL come from
+Click **SAMPLE MANAGER** in the toolbar for the version, build number, build date and
+repository and personal website links. The release version and both URLs come from
 `Cargo.toml`; bump its package version for a release. `build.rs` stamps each
-changed build with a build number (Unix time in seconds) and the Git
-revision, suffixed `-modified` when tracked files have uncommitted changes.
-Source archives without Git still get a build number.
+changed build with a build number (Unix time in seconds) and a readable UTC
+build date, including when building from a source archive without Git.
 
 **Windows from a Mac.** `./build.sh windows` cross-compiles a 64-bit `.exe`
 into `target/bundle/Sample Manager Windows.zip`. It needs

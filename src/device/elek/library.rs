@@ -22,6 +22,8 @@ pub enum SoundSrc {
     /// Kit track `track`'s sound in pattern `pattern` (slot as read),
     /// pasted from the Patterns page's track sound clipboard.
     Track { pattern: u8, track: u8 },
+    /// A saved preset, with its sample slot translated into this project.
+    Preset { model: Model, data: Vec<u8> },
 }
 
 /// One pool sound after the edits: where it comes from, and its new name.
@@ -94,7 +96,7 @@ fn set_sound_name(d: &mut [u8], name: &str) {
 }
 
 /// Point a sound struct at pool sample `slot`.
-fn set_sound_slot(m: Model, d: &mut [u8], slot: usize) {
+pub(super) fn set_sound_slot(m: Model, d: &mut [u8], slot: usize) {
     let Some(at) = be32(d, 4).and_then(|sv| sound_slot(m, sv)) else { return };
     if m == DT2 {
         if let Some(b) = d.get_mut(at..at + 2) {
@@ -117,7 +119,14 @@ impl ElekProject {
             .iter()
             .filter(|m| m.kind == SOUND && be32(&m.data, 0) == Some(MAGIC))
             .find_map(|m| be32(&m.data, 4));
-        from_pool.or_else(|| self.blank_kit_sound().and_then(|d| be32(&d, 4)))
+        from_pool.or_else(|| self.blank_kit_sound().and_then(|d| be32(&d, 4))).or_else(|| {
+            let pats = self.patterns.as_ref().ok()?;
+            (0..patterns::PATTERNS).filter_map(|i| pats.msg_of(i)).find_map(|mi| {
+                (0..self.model.kit_tracks()).find_map(|track| {
+                    pats.track_sound(&self.msgs[mi].data, track).and_then(|(s, _)| be32(s, 4))
+                })
+            })
+        })
     }
 
     /// Kit track 1's sound in an empty pattern: the device's default sound.
@@ -240,6 +249,21 @@ impl ElekProject {
                 }
                 d
             }
+            SoundSrc::Preset { model, data: raw } => {
+                if *model != self.model { return None; }
+                let mut d = raw.clone();
+                if !data.is_empty() {
+                    if let Some(key) = presets::sample_key(self.model, &d) {
+                        let settings = data.get(self.settings_msg).and_then(Option::as_deref)
+                            .unwrap_or(&self.msgs[self.settings_msg].data);
+                        let (_, _, pool) = read_pool(self.model, settings).ok()?;
+                        let slot = pool.iter().enumerate().skip(1)
+                            .find(|(_, e)| !e.is_empty() && e.key() == key).map_or(0, |(i, _)| i);
+                        set_sound_slot(self.model, &mut d, slot);
+                    }
+                }
+                d
+            }
             SoundSrc::Empty => return None,
             SoundSrc::Track { pattern, track } => self.track_sound_for_pool(Some(*pattern), *track, data).ok()?,
         };
@@ -276,6 +300,29 @@ impl ElekProject {
             }
         }
         Ok(snd.to_vec())
+    }
+
+    /// Snapshot a copied sound, including a pending rename.
+    pub fn copied_sound_data(&self, cell: &SoundCell) -> Option<Vec<u8>> {
+        self.cell_sound(cell, &[])
+    }
+
+    /// Check a preset before importing it into this project's sound pool.
+    pub fn accepts_preset(&self, model: Model, data: &[u8]) -> Result<(), String> {
+        if model != self.model { return Err("The copied sound belongs to another device model".into()); }
+        let version = be32(data, 4).ok_or("Missing sound version")?;
+        if sound_sizeof(model, version) != Some(data.len()) || be32(data, 0) != Some(MAGIC) {
+            return Err("Unsupported preset sound layout".into());
+        }
+        let target = self.pool_sound_version().ok_or("Cannot determine the project's sound version; reload the project")?;
+        // Pool entries are independent versioned SysEx sound dumps. Keep an
+        // older supported payload intact for the firmware's loader to upgrade.
+        // Kit track pastes still require matching layouts: those splice bytes
+        // directly into a fixed-size kit (pool_sound_for_track).
+        if version > target {
+            return Err(format!("This preset uses sound version {version}, newer than this project's version {target}. Update the device firmware and reload the project before pasting"));
+        }
+        Ok(())
     }
 
     /// Pool cell `cell` as a kit track sound (decoded), or why it can't be
@@ -396,7 +443,7 @@ fn src_offsets(m: Model, sv: u32) -> Option<[usize; 8]> {
     })
 }
 
-pub(super) fn parse_sound(m: Model, index: usize, d: &[u8]) -> PoolSound {
+pub(crate) fn parse_sound(m: Model, index: usize, d: &[u8]) -> PoolSound {
     if be32(d, 0) != Some(MAGIC) {
         return PoolSound::blank(index);
     }

@@ -5,6 +5,7 @@
 
 use crate::device::{ElekProject, PoolEntry, SavedProject};
 use crate::ui::drag_drop::ResponseDnd;
+use crate::ui::slot_list::{self, DropTarget};
 use crate::ui::theme;
 use egui::{Color32, RichText, Sense, Stroke};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -633,19 +634,7 @@ impl ElekState {
         }
         let n = self.order.len();
         let to = to.clamp(1, n);
-        self.edit(|order| {
-            let moved: Vec<u16> = sel.iter().map(|&s| order[s]).collect();
-            let set: HashSet<usize> = sel.iter().copied().collect();
-            let mut rest: Vec<u16> = order
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !set.contains(i))
-                .map(|(_, &o)| o)
-                .collect();
-            let at = to - sel.iter().filter(|&&s| s < to).count();
-            rest.splice(at..at, moved);
-            *order = rest;
-        });
+        self.edit(|order| slot_list::insert(order, &sel, to, 1));
         if let (Some(&a), Some(&b)) = (self.sel.first(), self.sel.last()) {
             self.status = if a == b {
                 format!("Moved to {}", self.label(a))
@@ -666,23 +655,15 @@ impl ElekState {
         }
         let to = to.clamp(1, n - sel.len());
         let targets: Vec<usize> = (to..to + sel.len()).collect();
-        let tset: HashSet<usize> = targets.iter().copied().collect();
         let sset: HashSet<usize> = sel.iter().copied().collect();
         let displaced: Vec<usize> = targets
             .iter()
             .copied()
             .filter(|t| !sset.contains(t))
             .collect();
-        let freed: Vec<usize> = sel.iter().copied().filter(|s| !tset.contains(s)).collect();
         let occupied = displaced.iter().filter(|&&t| !self.is_empty_at(t)).count();
         self.edit(|order| {
-            let old = order.clone();
-            for (&s, &t) in sel.iter().zip(&targets) {
-                order[t] = old[s];
-            }
-            for (&d, &f) in displaced.iter().zip(&freed) {
-                order[f] = old[d];
-            }
+            slot_list::place(order, &sel, to, 1);
         });
         let what = if sel.len() == 1 {
             self.label(to)
@@ -712,17 +693,7 @@ impl ElekState {
         if (dir < 0 && lo <= 1) || (dir > 0 && hi + 1 >= n) {
             return;
         }
-        self.edit(|order| {
-            if dir < 0 {
-                for &s in &sel {
-                    order.swap(s - 1, s);
-                }
-            } else {
-                for &s in sel.iter().rev() {
-                    order.swap(s, s + 1);
-                }
-            }
-        });
+        self.edit(|order| slot_list::nudge(order, &sel, dir, 1));
     }
 
     /// Puts `n` empty slots at `at`, pushing `at` and the samples below it
@@ -732,15 +703,7 @@ impl ElekState {
             return;
         }
         let mut order = self.order.clone();
-        let (mut made, mut last) = (0, at);
-        while made < n {
-            // Past the empties made so far (the first one may sit on `at`).
-            let from = at + made.max(1);
-            let Some(e) = (from..order.len()).find(|&i| self.free(order[i])) else { break };
-            order[at..=e].rotate_right(1);
-            made += 1;
-            last = last.max(e);
-        }
+        let (made, last) = slot_list::insert_empty(&mut order, at, n, |o| self.free(*o));
         if made == 0 {
             self.status = "No empty slot below to make room".into();
             return;
@@ -760,11 +723,9 @@ impl ElekState {
         if self.project.is_none() {
             return;
         }
-        let n = self.order.len();
-        let e = (at + 1..n)
-            .find(|&i| self.free(self.order[i]))
-            .unwrap_or(n);
-        self.edit(|order| order[at..e].rotate_left(1));
+        let mut order = self.order.clone();
+        slot_list::close_gap(&mut order, at, |o| self.free(*o));
+        self.edit(|o| *o = order);
         self.status = format!("Closed gap at {}", self.label(at));
     }
 
@@ -854,23 +815,7 @@ impl ElekState {
     }
 
     fn click(&mut self, slot: usize, m: egui::Modifiers) {
-        if m.shift {
-            let a = self.cursor.unwrap_or(slot);
-            if !m.command {
-                self.sel.clear();
-            }
-            self.sel.extend(a.min(slot)..=a.max(slot));
-        } else if m.command {
-            if !self.sel.remove(&slot) {
-                self.sel.insert(slot);
-            }
-            self.cursor = Some(slot);
-        } else {
-            self.sel.clear();
-            self.sel.insert(slot);
-            self.cursor = Some(slot);
-        }
-        self.sel.remove(&0);
+        slot_list::click(&mut self.sel, &mut self.cursor, slot, m, 1);
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
@@ -1479,11 +1424,7 @@ fn body(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, busy: 
         load_screen(ui, st, out);
     } else {
         st.keys(ui.ctx());
-        ui.label(
-            RichText::new("Click / ⇧click / ⌘click to select · drag to place into slots (swaps with what's there; ⌃/⌥ while dropping inserts and shifts instead) · drag onto a bank tab or the other pane · ⌥↑↓ nudge · ⌘X cut, ⌘V paste into empty slots, ⇧⌘V paste and shift down · right-click for more")
-                .weak()
-                .small(),
-        );
+       
         let w = (ui.available_width() - 8.0) / 2.0;
         let h = (ui.available_height() - MEM_BAR_H).max(ROW_H * 4.0);
         ui.horizontal_top(|ui| {
@@ -2043,35 +1984,10 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     // Drop: by default the selection lands in this slot and the ones after it,
     // swapping with what's there. With ⌃ or ⌥ held it's inserted instead,
     // before this row (top half) or after it (bottom half), shifting the rest.
-    let pointer = ui.input(|i| i.pointer.interact_pos());
-    let shift_mode = ui.input(|i| i.modifiers.ctrl || i.modifiers.alt);
-    let before = |pos: Option<egui::Pos2>| {
-        if pos.is_some_and(|p| p.y > rect.center().y) {
-            slot + 1
-        } else {
-            slot
-        }
-    };
+    let target = slot_list::drop_target(ui, rect, slot);
     if resp.dnd_hover_payload::<SlotDrag>().is_some() {
-        if shift_mode {
-            let at = before(pointer);
-            let ly = if at == slot {
-                rect.top()
-            } else {
-                rect.bottom()
-            };
-            ui.painter()
-                .hline(rect.x_range(), ly, Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT));
-        } else {
-            let n = st.sel.len().max(1).min(st.order.len() - slot);
-            let r = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_H * n as f32));
-            ui.painter().rect_stroke(
-                r,
-                0.0,
-                Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT),
-                egui::StrokeKind::Inside,
-            );
-        }
+        let n = st.sel.len().max(1).min(st.order.len() - slot);
+        slot_list::paint_drop(ui, rect, slot, target, n);
     }
     // Local files from a file pane (or Finder) onto an empty slot.
     if let Some(d) = resp.dnd_hover_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
@@ -2101,10 +2017,9 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     // frame, the drop still lands.
     let released = resp.contains_pointer() && ui.input(|i| i.pointer.any_released());
     if resp.release_payload::<SlotDrag>().is_some() || (released && st.slot_drag) {
-        acts.push(if shift_mode {
-            RowAct::DropBefore(before(pointer))
-        } else {
-            RowAct::DropOn(slot)
+        acts.push(match target {
+            DropTarget::Insert(at) => RowAct::DropBefore(at),
+            DropTarget::Place(at) => RowAct::DropOn(at),
         });
     }
 

@@ -80,7 +80,11 @@ pub struct PoolClip {
 
 impl PoolClip {
     pub fn desc(&self) -> String {
-        format!("pool sound {:03} “{}”", self.at + 1, self.name)
+        if matches!(self.cell.src, SoundSrc::Preset { .. }) {
+            format!("preset “{}”", self.name)
+        } else {
+            format!("pool sound {:03} “{}”", self.at + 1, self.name)
+        }
     }
 }
 
@@ -143,7 +147,12 @@ pub struct ProjEd {
 impl ProjEd {
     pub fn reset(&mut self, p: &ElekProject) {
         let (used_only, banks, bytes) = (self.used_only, self.banks, self.bytes);
-        *self = Self { used_only, banks, bytes, ..Self::default() };
+        let pool_clip = self.pool_clip.clone().filter(|c| matches!(c.cell.src, SoundSrc::Preset { .. }))
+            .map(|mut c| {
+                c.track_ok = Err("Paste this preset into the sound pool first to resolve its sample in this project".into());
+                c
+            });
+        *self = Self { used_only, banks, bytes, pool_clip, ..Self::default() };
         self.refresh(p);
     }
 
@@ -335,10 +344,15 @@ fn track_name(t: usize, audio: usize) -> String {
 
 impl ProjEd {
     /// Copy a pool sound (the Sounds page): the other clipboards go.
-    pub fn set_pool_clip(&mut self, c: PoolClip) {
+    pub fn clear_sound_clipboard(&mut self) {
         self.tclip_ev = None;
         self.tclip_snd = None;
         self.clip.clear();
+        self.pool_clip = None;
+    }
+
+    pub fn set_pool_clip(&mut self, c: PoolClip) {
+        self.clear_sound_clipboard();
         self.pool_clip = Some(c);
     }
 
@@ -500,9 +514,10 @@ fn paste_pool_sound(ed: &mut ProjEd, p: &Patterns, i: usize, tracks: &[u8], audi
 /// the pool as read (`pool`) or the pattern track it was pasted from, with
 /// its new name.
 fn pool_cell_sound(p: &Patterns, pool: &[PoolSound], c: &SoundCell) -> Option<PoolSound> {
-    let mut s = match c.src {
-        SoundSrc::Read(o) => pool.get(o as usize)?.clone(),
-        SoundSrc::Track { pattern, track } => p.info.get(pattern as usize)?.tracks.get(track as usize)?.sound.clone(),
+    let mut s = match &c.src {
+        SoundSrc::Read(o) => pool.get(*o as usize)?.clone(),
+        SoundSrc::Track { pattern, track } => p.info.get(*pattern as usize)?.tracks.get(*track as usize)?.sound.clone(),
+        SoundSrc::Preset { model, data } => crate::device::library::parse_sound(*model, 0, data),
         SoundSrc::Empty => return None,
     };
     if let Some(n) = &c.name {

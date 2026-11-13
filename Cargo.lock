@@ -3769,6 +3769,7 @@ dependencies = [
 name = "sample_manager"
 version = "0.9.0"
 dependencies = [
+ "chrono",
  "cpal",
  "drag",
  "eframe",

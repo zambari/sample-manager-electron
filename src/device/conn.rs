@@ -11,6 +11,7 @@ pub(super) struct Conn {
     /// dump packets they encounter here for `collect_dump` to consume.
     pub(super) dump_pending: Option<VecDeque<Vec<u8>>>,
     pub(super) next: u16,
+    pub(super) preset_writer: Option<u32>,
     pub(super) stereo: bool,
     /// Product id from the handshake (12 = Digitakt, 42 = Digitakt II).
     pub(super) product: u8,
@@ -166,6 +167,7 @@ impl Conn {
             rx,
             dump_pending: None,
             next: 0,
+            preset_writer: None,
             stereo: false,
             product: 0,
             port: in_name.to_owned(),
@@ -230,7 +232,9 @@ impl Conn {
         if self.dead {
             return Err(Fail::Link("Device disconnected".into()));
         }
-        if proto::FORBIDDEN.contains(&cmd) && !elek::presets::allowed_edit(cmd, &args.0) {
+        if proto::FORBIDDEN.contains(&cmd)
+            && !elek::presets::allowed_edit(cmd, &args.0)
+            && !elek::presets::allowed_write(cmd, &args.0, self.preset_writer) {
             return refused(format!(
                 "command 0x{cmd:02x} would change saved projects; blocked"
             ));

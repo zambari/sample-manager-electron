@@ -3,7 +3,7 @@
 //! resource (.res) file ourselves and hand it to the linker, which accepts
 //! .res files directly (both link.exe and lld-link).
 
-use std::{env, fs, path::PathBuf, process::Command, time::SystemTime};
+use std::{env, fs, path::PathBuf, time::SystemTime};
 
 const ICON: &str = "assets/icon.ico";
 const RT_ICON: u16 = 3;
@@ -18,25 +18,13 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
 
-    // A timestamp gives local builds their own number without a mutable
-    // counter or requiring Git in a downloaded source archive.
-    let build = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("build clock is before the Unix epoch")
-        .as_secs();
-    println!("cargo:rustc-env=SAMPLE_MANAGER_BUILD={build}");
-    let revision = git(&["describe", "--always", "--dirty=-modified"])
-        .unwrap_or_else(|| "unavailable".to_owned());
-    println!("cargo:rustc-env=SAMPLE_MANAGER_REVISION={revision}");
-    // Track commits, checkouts and staging as well as source changes, including
-    // worktrees where .git is a file pointing at another directory.
-    for path in ["HEAD", "refs", "packed-refs", "index"] {
-        if let Some(path) = git(&["rev-parse", "--git-path", path])
-            && std::path::Path::new(&path).exists()
-        {
-            println!("cargo:rerun-if-changed={path}");
-        }
-    }
+    // One timestamp supplies both the build number and its readable UTC date.
+    let built = chrono::DateTime::<chrono::Utc>::from(SystemTime::now());
+    println!("cargo:rustc-env=SAMPLE_MANAGER_BUILD={}", built.timestamp());
+    println!(
+        "cargo:rustc-env=SAMPLE_MANAGER_BUILD_DATE={}",
+        built.format("%Y-%m-%d %H:%M:%S UTC")
+    );
 
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -49,15 +37,6 @@ fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("icon.res");
     fs::write(&out, res).expect("write icon.res");
     println!("cargo:rustc-link-arg-bins={}", out.display());
-}
-
-fn git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?.trim().to_owned();
-    (!value.is_empty()).then_some(value)
 }
 
 fn u16_at(b: &[u8], i: usize) -> u16 {

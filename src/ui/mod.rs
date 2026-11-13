@@ -6,5 +6,7 @@ pub mod elek_project_view;
 pub mod elek_presets_view;
 pub mod elek_view;
 pub mod file_table;
+pub mod infobox;
 pub mod rename_view;
+pub mod slot_list;
 pub mod theme;
