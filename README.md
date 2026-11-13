@@ -4,11 +4,13 @@ A desktop app for digging through a sample library, cutting out the good
 bits, and getting them onto an Elektron Digitakt, then tidying up the
 project on the device without menu-diving on its screen.
 
-<p align="center">
-  <img src="docs/editor.png" width="49%" alt="Sample editor with the standard panels: gain, tools, file row, waveform, numbers and scalpel close-up">
-  <img src="docs/editor_expanded.png" width="49%" alt="Sample editor with every panel open: histogram, map, stats, loudness and phase meter">
-</p>
-<p align="center"><sub>The sample editor with its everyday panels (left) and with every panel switched on (right).</sub></p>
+
+
+![Sample editor with the standard panels: gain, tools, file row, waveform, numbers and scalpel close-up](docs/editor.png)
+
+
+
+The sample editor with its everyday panels (left) and with every panel switched on (right).</sub></p>
 
 - **File browser** with list and tree views, an audio-only filter,
   favourites, cut/copy/paste, duplicate removal and reveal in Finder.
@@ -18,7 +20,7 @@ project on the device without menu-diving on its screen.
   the +Drive or a pool slot.
 - **Slice kits**: collect slices from many samples into one file, free-form
   or on an equal 4/8/16 grid for the Digitakt 1, with automatic tail
-  trimming and fades. Every slice remembers where it came from.
+  trimming and fades, or a free slice collection for arbitrary lenght slices. Every slice remembers where it came from.
 - **Digitakt +Drive access over USB MIDI**: browse, create folders, rename,
   move, delete (to `/trash`, so mistakes can be undone), and transfer
   samples both ways.
@@ -28,7 +30,8 @@ project on the device without menu-diving on its screen.
   on-device samples from a local cache, watch sample memory, and back up
   or restore projects with their samples.
 
-Built in Rust with [egui](https://github.com/emilk/egui).
+
+
 
 ## How it works
 
@@ -36,8 +39,14 @@ The window is a sandwich: a **source** browser on the left, a
 **destination** browser on the right, and a **sample editor** in between.
 The idea is to dig through a large sample library quickly, cut out just the
 bits you want, make them mono if needed, and drop them into a target
-folder. That target can be another local folder or an Elektron machine's
-+Drive.
+folder. That target can be another local folder or an Elektron machine's +Drive.
+
+
+
+
+![Sample editor with every panel open: histogram, map, stats, loudness and phase meter](docs/editor_expanded.png)
+
+
 
 **Source (left).** Where you browse your library. Tabs at the top hold
 bookmarked folders (★ adds favourites, `+Drive` opens a connected Elektron
@@ -45,6 +54,15 @@ device). Sort by name, size, date or kind, type to filter, switch to a tree
 view, or tick *All files* to list every file below the current folder.
 Selecting a file loads it into the editor (and plays it, with *Auto-play*
 on), so you can step through hundreds of samples with the arrow keys.
+
+
+**Destination (right).** A switch at the top picks what the right column
+shows: **Files** (local folders, with the same tabs and browsing tools as
+the source), **Sample pool** (the slots of the project loaded on the
+device) or **+Drive** (the device's storage over USB). The **+Drive** tab
+next to Samples / Patterns in the Device group does the same. Commit and
+drops land in Files or the +Drive, whichever was shown last.
+
 
 **Sample editor (centre).** Trim the loaded sample down to the part you
 want. The main waveform is always shown: the green and red markers are
@@ -75,6 +93,15 @@ tempo together, ±50 %) for previewing. Shift-drag for fine moves,
 double-click to recentre. It never changes the file, and resets on each
 new sample.
 
+
+
+<p align="center">
+  <img src="docs/pattern_track_menu.png" width="36%" alt="Patterns page: four tracks of a folded-out pattern selected, with the Copy menu open">
+  <img src="docs/sample_pool_menu.png" width="59%" alt="Samples page: two bank panes of a Digitakt II project, with the right-click menu of a pool slot">
+</p>
+<p align="center"><sub>
+
+
 **Saving.** The File row has three controls, and each names where it writes:
 
 - **Save over *file*** (⌘S) writes what you hear back over the one thing the
@@ -98,48 +125,9 @@ new sample.
   has both, plus the pool slots: the whole kit goes into a slot as one
   sample, and the kit stays as it is in the editor.
 
-**Destination (right).** A switch at the top picks what the right column
-shows: **Files** (local folders, with the same tabs and browsing tools as
-the source), **Sample pool** (the slots of the project loaded on the
-device) or **+Drive** (the device's storage over USB). The **+Drive** tab
-next to Samples / Patterns in the Device group does the same. Commit and
-drops land in Files or the +Drive, whichever was shown last.
-
-**Commit to destination** (top right) copies the source selection into the
-active destination tab. If a single file is open in the editor, it is
-written as you hear it: trimmed, with gain and mono settings applied, and
-the original stays untouched. *Move* does the same but moves the files.
 
 **Top bar.** Audio output device and its sample rate, and a toggle for
 showing hidden files.
-
-### Slice kits
-
-A slice kit is a second file kept next to the sample in the editor. It
-collects the bits you cut out of many samples, one after another, into a
-single file (handy for chains of drum hits).
-
-- Select part of a sample and press **K** (or click the arrow button) to
-  add it to the end of the kit, as you hear it (trimmed, gain and mono
-  applied).
-- The first time, you're asked to name the new kit. It's created in the
-  active destination tab when that's a local folder. To keep adding to a
-  file you already have, open it and choose *Use as kit*.
-- Press **B** to switch the editor between the sample and the kit. Moving
-  to another file in the browser always brings you back to the sample.
-- Press **⌘S** while showing the kit to save it. The kit stays open between
-  launches, and quitting asks about unsaved kit changes.
-- Each slice gets a **marker**, saved as a WAV cue point. Click near a
-  marker to park the playhead on it; double-click to select one slice.
-  **G** inserts 100 ms of silence before the playhead.
-- Several kits can be open at once. The kit tab picks the one **K** adds
-  to, its **×** closes it, and right-click a file → *Load as kit* opens
-  another. *Export and close* writes a kit and closes it in one step.
-- **⌘Z** while browsing takes back the last slice **K** added (if nothing
-  happened since); **⇧⌘Z** puts it back.
-- Each slice remembers the file it was cut from. Right-click a slice to
-  **reveal its source** in the file pane or find it in the device's
-  sample pool.
 
 **Trim.** Turn on the *Trim* panel to free up sample memory: it cuts each
 slice's tail where the sound drops below a threshold and fades out slices
@@ -186,6 +174,8 @@ project on the device (PROJECT › SAVE) to keep the result. **⌘Z** undoes
 an edit, and *Read again* goes back to what's on the device. The app
 notices when the device is plugged in or out and reconnects on its own.
 
+
+
 #### Samples: reorder and clean up the pool
 
 - Drag a slot onto any other (in any bank) to swap them, or select several
@@ -207,7 +197,6 @@ notices when the device is plugged in or out and reconnects on its own.
   between slots. A bar under the panes shows how much sample memory the
   project uses and how much that changed since it was read.
 
-![Samples page: two bank panes of a Digitakt II project, with the right-click menu of a pool slot](docs/sample_pool_menu.png)
 
 #### Patterns: organise and rename (experimental)
 
@@ -226,10 +215,6 @@ notices when the device is plugged in or out and reconnects on its own.
   Select tracks and **copy and paste** them into other patterns: the whole
   track (trigs, p-locks and sound), just its events, or just its sound.
   The app asks before a paste would overwrite trigs.
-
-![Patterns page: four tracks of a folded-out pattern selected, with the Copy menu open](docs/pattern_track_menu.png)
-
-Digitakt II pattern support is newer and less tested than Digitakt 1.
 
 #### Sounds: the project's sound pool
 
@@ -355,11 +340,11 @@ The device-screen pixel font is **[Frucade](http://pixelfonts.style-force.net/)
 by Michael Schmidt** (2005). Frucade is free for personal use only, and
 Michael kindly gave Sample Manager written permission to use it (see
 [`assets/frucade-PERMISSION.txt`](assets/frucade-PERMISSION.txt)). The font
-is not covered by Sample Manager's MIT license, so to use it in your own
-project, ask the author. It is the closest match we found to the Elektron
-screen font. Thank you, Michael. Run `cargo metadata` or
+is not covered by Sample Manager's MIT license, so to use it in your own project, ask the author. It is the closest match we found to the Elektron screen font. Thank you, Michael. Run `cargo metadata` or
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) for the full
-list. No third-party file-browser library is used; the file browser is
-written from scratch on top of `walkdir` and `trash`.
+list. No third-party file-browser library is used; the file browser is written from scratch on top of `walkdir` and `trash`.
 
 Sample Manager itself is released under the [MIT License](LICENSE).
+
+
+Built in Rust with [egui](https://github.com/emilk/egui).
