@@ -54,7 +54,7 @@ pub struct LibraryView {
     /// then renames it.
     selected: Option<usize>,
     /// SRC values at their defaults (TUNE 0, LEV 100, …) are left blank.
-    show_defaults: bool,
+    pub(crate) show_defaults: bool,
     /// An edit was tried while editing is locked: why, and when (egui time),
     /// shown by the pointer and in the tool row for a few seconds.
     blocked: Option<(String, f64)>,
@@ -250,7 +250,7 @@ fn kit_uses(p: &ElekProject, s: &PoolSound) -> Vec<(usize, usize)> {
 }
 
 /// SRC page places shown as columns (place 3, SMP, is the sample column).
-const SRC_SHOWN: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
+pub(crate) const SRC_SHOWN: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
 const SRC_W: f32 = 40.0;
 const MACHINE_W: f32 = 70.0;
 const NUM_W: f32 = 20.0;
@@ -261,13 +261,13 @@ const PATS_W: f32 = 120.0;
 const LOCKS_W: f32 = 36.0;
 
 /// The parameter the sound's machine keeps in SRC place `place`, if any.
-fn param_at(s: &PoolSound, place: usize) -> Option<&SrcParam> {
+pub(crate) fn param_at(s: &PoolSound, place: usize) -> Option<&SrcParam> {
     s.params.iter().find(|q| q.place == place)
 }
 
 /// The value a fresh one-shot sound has for this parameter (stored, fine
 /// 0). Guessed names (`TUNE?`) count as the parameter they guess.
-fn is_default(q: &SrcParam) -> bool {
+pub(crate) fn is_default(q: &SrcParam) -> bool {
     let want = match q.name.trim_end_matches('?') {
         "TUNE" => 64,
         "PLAY" | "BIT" | "STRT" | "LOOP" => 0,
@@ -281,12 +281,12 @@ fn is_default(q: &SrcParam) -> bool {
 }
 
 /// The machine name, or "—" when its byte isn't known for this sound version.
-fn machine_text(s: &PoolSound) -> String {
+pub(crate) fn machine_text(s: &PoolSound) -> String {
     s.machine.as_ref().map(|(_, n)| n.clone()).unwrap_or_else(|| "—".into())
 }
 
 /// The whole SRC page, with fine bytes, for a tooltip.
-fn src_detail(s: &PoolSound) -> String {
+pub(crate) fn src_detail(s: &PoolSound) -> String {
     if s.src.is_empty() {
         return "SRC page layout not known for this sound version".into();
     }

@@ -52,6 +52,9 @@ pub struct TrackInfo {
     pub name: String,
     /// Pool slot as read (0 = none).
     pub slot: usize,
+    /// The kit track's sound decoded like a pool sound (machine, SRC page),
+    /// for the Patterns page's sound foldout. `index` is the track.
+    pub sound: super::library::PoolSound,
 }
 
 #[derive(Clone, Debug)]
@@ -421,7 +424,8 @@ fn make_info(g: &Geo, kit_name_at: usize, pattern_name_at: usize, state: PatStat
             .map(|t| {
                 let s = g.kit + s0 + t * sz;
                 let slot = if g.model == DT2 { be16(d, s + sl).map(usize::from) } else { d.get(s + sl).map(|&b| b as usize) };
-                TrackInfo { name: text_at(d, s + 12), slot: slot.unwrap_or(0) }
+                let sound = d.get(s..s + sz).map_or_else(|| super::library::PoolSound::blank(t), |b| super::library::parse_sound(g.model, t, b));
+                TrackInfo { name: text_at(d, s + 12), slot: slot.unwrap_or(0), sound }
             })
             .collect(),
         _ => Vec::new(),

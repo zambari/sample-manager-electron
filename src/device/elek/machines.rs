@@ -16,7 +16,7 @@
 //! |----|----------|------|------|------|------|------|------|------|-----|
 //! | 0  | ONE SHOT | TUNE | PLAY | BIT  | SMP  | STRT | LEN  | LOOP | LEV |
 //! | 1  | WERP     | TUNE?| –    | BIT? | SMP  | SEG  | PLAY | BARS | LEV |
-//! | 2  | REPITCH  | –    | –    | BIT? | SMP  | ?    | ?    | BARS | LEV |
+//! | 2  | REPITCH  | –    | –    | BIT? | SMP  | STRT | LEN  | BARS | LEV |
 //! | 3  | SLICE    | TUNE?| –    | BIT? | SMP  | SLICE| SLEN | GRID | LEV |
 //! | 6  | POLY     | custom machine, defaults 64 0 16 0 0 120 0 100 |
 //! | 9  | DT-FM    | custom machine, defaults 64 0 16 0 127 0 127 64 |
@@ -51,8 +51,8 @@
 //! | id | machine  | +94  | +96  | +98  | +100 | +106 | +108 | +110 | +112 |
 //! |----|----------|------|------|------|------|------|------|------|------|
 //! | 0  | ONE SHOT | TUNE | PLAY | BIT  | SMP  | STRT | LEN  | LOOP | LEV  |
-//! | 2  | ?        | –    | –    | BIT? | SMP  | ?    | ?    | BARS | LEV  |
-//! | 3  | ?        | –    | –    | BIT? | SMP  | ?    | ?    | BARS | LEV  |
+//! | 2  | STRETCH  | –    | –    | BIT? | SMP  | STRT | LEN  | BARS | LEV  |
+//! | 3  | REPITCH  | –    | –    | BIT? | SMP  | STRT | LEN  | BARS | LEV  |
 //! | 4  | GRID     | TUNE?| –    | –    | SMP  | SLICE| SLEN | GRID | LEV  |
 //! | 5  | MIDI     | parameters not in the sound: see below |
 //! | 6  | SLICE    | TUNE?| –    | –    | SMP  | SLICE| SLEN?| –    | LEV  |
@@ -61,8 +61,10 @@
 //! - Machine ids aren't in menu order, nor shared between models: new
 //!   machines were slotted into the menu before old ones, so ids keep the
 //!   order machines were added in (expected for compatibility).
-//! - Ids 2 and 3: both were reported as REPITCH (T1 bars 2 → stored 1,
-//!   T2 bars 8 → stored 3). [open] One of them is likely STRETCH.
+//! - Id 2 = STRETCH, id 3 = REPITCH (confirmed in dump
+//!   2026-11-13_125609_DigitaktII, B01: T1 STRETCH, T2 REPITCH). Bars: T1
+//!   2 → stored 1, T2 8 → stored 3. STRT / LEN as on ONE SHOT
+//!   (defaults 0 and 120 = the whole sample), confirmed on the device.
 //! - Id 1 (WERP) not dumped yet; shown with the DT1 werp layout.
 //! - SLICE: 0 = keyboard (pitch-mapped), n = slice n (GRID T4: 3 → 3).
 //! - SLEN: GRID stored 1 for length 2; SLICE stored 0 for length 0. The
@@ -111,7 +113,9 @@ const RAW: Fmt = Fmt::Raw;
 /// The machine-independent one-shot page.
 const ONE_SHOT: [P; 8] = [p("TUNE", Fmt::Tune), p("PLAY", PLAY), p("BIT", RAW), p("SMP", RAW), p("STRT", RAW), p("LEN", RAW), p("LOOP", RAW), p("LEV", RAW)];
 const WERP: [P; 8] = [p("TUNE?", Fmt::Tune), None, p("BIT?", RAW), p("SMP", RAW), p("SEG", SEG), p("PLAY", PLAY), p("BARS", Fmt::Pow2), p("LEV", RAW)];
-const BARS_ONLY: [P; 8] = [None, None, p("BIT?", RAW), p("SMP", RAW), p("P5?", RAW), p("P6?", RAW), p("BARS", Fmt::Pow2), p("LEV", RAW)];
+/// STRETCH and REPITCH (both models): no TUNE; STRT and LEN at the
+/// one-shot places (defaults 0 and 120, the full sample).
+const BARS_STRT_LEN: [P; 8] = [None, None, p("BIT?", RAW), p("SMP", RAW), p("STRT", RAW), p("LEN", RAW), p("BARS", Fmt::Pow2), p("LEV", RAW)];
 const GRID_PAGE: [P; 8] = [p("TUNE?", Fmt::Tune), None, None, p("SMP", RAW), p("SLICE", Fmt::Slice), p("SLEN", Fmt::Plus1), p("GRID", GRID), p("LEV", RAW)];
 const DT1_SLICE: [P; 8] = [p("TUNE?", Fmt::Tune), None, p("BIT?", RAW), p("SMP", RAW), p("SLICE", Fmt::Slice), p("SLEN", Fmt::Plus1), p("GRID", GRID), p("LEV", RAW)];
 const DT2_SLICE: [P; 8] = [p("TUNE?", Fmt::Tune), None, None, p("SMP", RAW), p("SLICE", Fmt::Slice), p("SLEN", RAW), None, p("LEV", RAW)];
@@ -135,13 +139,13 @@ fn machine(m: Model, id: u8) -> Machine {
     match (m, id) {
         (_, 0) => mach("ONE SHOT", true, &ONE_SHOT),
         (DT, 1) | (DT2, 1) => mach("WERP", true, &WERP),
-        (DT, 2) => mach("REPITCH", true, &BARS_ONLY),
+        (DT, 2) => mach("REPITCH", true, &BARS_STRT_LEN),
         (DT, 3) => mach("SLICE", true, &DT1_SLICE),
         (DT, 6) => mach("POLY", false, &UNKNOWN),
         (DT, 9) => mach("DT-FM", false, &UNKNOWN),
         (DT, 28) => mach("CHORD", false, &UNKNOWN),
-        (DT2, 2) => mach("REPITCH/STRETCH? (2)", true, &BARS_ONLY),
-        (DT2, 3) => mach("REPITCH/STRETCH? (3)", true, &BARS_ONLY),
+        (DT2, 2) => mach("STRETCH", true, &BARS_STRT_LEN),
+        (DT2, 3) => mach("REPITCH", true, &BARS_STRT_LEN),
         (DT2, 4) => mach("GRID", true, &GRID_PAGE),
         (DT2, 5) => mach("MIDI", false, &NONE),
         (DT2, 6) => mach("SLICE", true, &DT2_SLICE),

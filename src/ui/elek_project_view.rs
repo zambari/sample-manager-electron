@@ -4,7 +4,9 @@
 //! whole patterns, or copy single tracks into other patterns; the result goes to the device with the same push as the
 //! sample order, so both pages edit one loaded project.
 
+use crate::device::library::PoolSound;
 use crate::device::patterns::{self, Patterns, Step, TrackSeq, NAME_MAX, PATTERNS};
+use crate::ui::elek_library_view::{is_default, machine_text, param_at, src_detail, SRC_SHOWN};
 use crate::device::{Cell, ElekProject, PatState};
 use crate::ui::elek_view::{self, ElekIntent, ElekState};
 use crate::ui::theme::{self, oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
@@ -100,6 +102,8 @@ pub struct ProjEd {
     bytes: bool,
     /// Folded-out rows.
     open: BTreeSet<usize>,
+    /// Folded-out rows whose SOUNDS foldout (kit track sounds) is open too.
+    snd_open: BTreeSet<usize>,
     /// Each row's rect last frame, and the list's visible area, to find the
     /// row under a drag.
     rows: Vec<(usize, Rect)>,
@@ -535,12 +539,14 @@ fn drop_sel(ed: &mut ProjEd, from: usize, to: usize, copy: bool) -> Result<Strin
         }
     });
     // Fold state follows the patterns.
-    let was: BTreeSet<usize> = ed.open.clone();
-    for (s, d) in src.iter().zip(&dst) {
-        if was.contains(s) {
-            ed.open.insert(*d);
-        } else {
-            ed.open.remove(d);
+    for set in [&mut ed.open, &mut ed.snd_open] {
+        let was: BTreeSet<usize> = set.clone();
+        for (s, d) in src.iter().zip(&dst) {
+            if was.contains(s) {
+                set.insert(*d);
+            } else {
+                set.remove(d);
+            }
         }
     }
     ed.sel = dst.iter().copied().collect();
@@ -926,7 +932,12 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     let editable = p.read_only.is_none() && !busy;
     // Audio tracks: 8 on the DT1 (then 8 MIDI tracks), 16 on the DT2.
     let audio = proj.model.kit_tracks();
+    let show_defaults = st.lib.show_defaults;
     let ed = &mut st.proj;
+    // The sound pool as read, to point kit track sounds at the pool sound
+    // they match (same name and sample); only while a SOUNDS foldout is open.
+    let pool_snd: Vec<PoolSound> = if ed.snd_open.is_empty() { Vec::new() } else { proj.pool_sounds().unwrap_or_default() };
+    let mut snd_toggles = Vec::new();
     let names = &st.names;
     let vis = ed.visible(p);
 
@@ -1034,7 +1045,11 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 let tracks = info.map(|n| shown_tracks(n.seq.len(), audio, |t| seq_of(p, cell, t, &blank).is_empty())).unwrap_or_default();
                 let mut step_hover: Option<String> = None;
                 let byte_rows = if ed.bytes && info.is_some() { 2.0 } else { 0.0 };
-                let extra = if open { 4.0 + (tracks.len().max(1) as f32 + byte_rows) * TRACK_H + 4.0 } else { 0.0 };
+                // Kit tracks with a decoded sound, for the SOUNDS foldout under the tracks.
+                let kit_n = info.map_or(0, |n| if tracks.is_empty() { 0 } else { n.tracks.len().min(audio) });
+                let snd_open = ed.snd_open.contains(&i);
+                let snd_rows = if kit_n == 0 { 0.0 } else { 1.0 + if snd_open { kit_n as f32 } else { 0.0 } };
+                let extra = if open { 4.0 + (tracks.len().max(1) as f32 + byte_rows + snd_rows) * TRACK_H + 4.0 } else { 0.0 };
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H + extra), Sense::hover());
                 let rect = rect.shrink2(egui::vec2(0.0, 1.0));
                 rows.push((i, rect));
@@ -1248,6 +1263,26 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                             }
                             ty += TRACK_H;
                         }
+                        if kit_n > 0 {
+                            ty = sound_foldout(SoundFold {
+                                ui,
+                                painter: &painter,
+                                p,
+                                cell,
+                                i,
+                                x0,
+                                right: rect.right(),
+                                ty,
+                                kit_n,
+                                open: snd_open,
+                                show_defaults,
+                                pool: &pool_snd,
+                                pointer,
+                                hover: &mut step_hover,
+                                toggle: &mut snd_toggles,
+                            });
+                            let _ = ty;
+                        }
                     }
                 } else if open {
                     painter.text(egui::pos2(x0 + 26.0, head.bottom() + 4.0 + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, "empty pattern", oled_font(10.0), OLED_DIM);
@@ -1393,6 +1428,11 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
             ed.open.insert(i);
         }
     }
+    for i in snd_toggles {
+        if !ed.snd_open.remove(&i) {
+            ed.snd_open.insert(i);
+        }
+    }
     if let Some((i, text)) = inline_done {
         ed.inline = None;
         if let Some(t) = text {
@@ -1502,6 +1542,125 @@ fn timing_tip(label: &str, n: &patterns::PatternInfo, tr: &[&TrackSeq]) -> Strin
         }
     }
     out.join("\n")
+}
+
+/// Where the SOUNDS foldout's columns start, from the row's left edge.
+const SND_NAME_X: f32 = 44.0;
+const SND_POOL_X: f32 = 160.0;
+const SND_MACH_X: f32 = 200.0;
+const SND_SRC_X: f32 = 274.0;
+const SND_SRC_W: f32 = 62.0;
+/// A kit track sound value that differs from the pool sound it matches.
+const SND_DIFFERS: Color32 = theme::CHANGED;
+
+/// What the SOUNDS foldout of one folded-out pattern row needs.
+struct SoundFold<'a, 'b> {
+    ui: &'a egui::Ui,
+    painter: &'a egui::Painter,
+    p: &'a Patterns,
+    cell: &'a Cell,
+    /// The pattern slot.
+    i: usize,
+    x0: f32,
+    right: f32,
+    ty: f32,
+    /// Kit (audio) tracks.
+    kit_n: usize,
+    open: bool,
+    show_defaults: bool,
+    /// The sound pool as read (empty when not read).
+    pool: &'a [PoolSound],
+    pointer: Option<egui::Pos2>,
+    hover: &'b mut Option<String>,
+    toggle: &'b mut Vec<usize>,
+}
+
+/// The SOUNDS line under a folded-out pattern's tracks and, when open, each
+/// kit track's sound decoded as on the Sounds page: name, the pool sound it
+/// matches (same name and sample), machine and SRC page. Values that differ
+/// from that pool sound are amber. Returns the y below it.
+fn sound_foldout(f: SoundFold) -> f32 {
+    let SoundFold { ui, painter, p, cell, i, x0, right, mut ty, kit_n, open, show_defaults, pool, pointer, hover, toggle } = f;
+    let head = Rect::from_min_max(egui::pos2(x0 + 18.0, ty), egui::pos2(x0 + SND_SRC_X, ty + TRACK_H));
+    let r = ui.interact(head, ui.scope_id().with(("psnd", i)), Sense::click());
+    let col = if r.hovered() || open { OLED } else { OLED_DIM };
+    triangle(painter, egui::pos2(x0 + 30.0, head.center().y), open, col);
+    painter.text(egui::pos2(x0 + SND_NAME_X, head.center().y), egui::Align2::LEFT_CENTER, "SOUNDS", oled_font(11.0), col);
+    if r.on_hover_text("Each kit track's sound: machine and SRC page, decoded like the Sounds page (some values may still read wrong). POOL: the pool sound with the same name and sample; amber values differ from it").clicked() {
+        toggle.push(i);
+    }
+    ty += TRACK_H;
+    if !open {
+        return ty;
+    }
+    for t in 0..kit_n {
+        let cy = ty + TRACK_H / 2.0;
+        let line = Rect::from_min_max(egui::pos2(x0 + 18.0, ty), egui::pos2(right - 4.0, ty + TRACK_H));
+        let Some(s) = cell.sound_src(t).and_then(|src| p.info[src as usize].tracks.get(t)).map(|ti| &ti.sound) else {
+            painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, format!("T{}", t + 1), oled_font(10.0), OLED_DIM);
+            painter.text(egui::pos2(x0 + SND_NAME_X, cy), egui::Align2::LEFT_CENTER, "—", oled_font(11.0), OLED_DIM);
+            ty += TRACK_H;
+            continue;
+        };
+        let pasted = cell.sounds.contains_key(&(t as u8));
+        painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, format!("T{}", t + 1), oled_font(10.0), if pasted { theme::DEVICE_ACCENT_BRIGHT } else { OLED_DIM });
+        let name = if s.name.is_empty() { "—" } else { s.name.as_str() };
+        let nr = Rect::from_min_size(egui::pos2(x0 + SND_NAME_X, ty), egui::vec2(SND_POOL_X - SND_NAME_X - 4.0, TRACK_H));
+        painter.with_clip_rect(nr).text(nr.left_center(), egui::Align2::LEFT_CENTER, name, oled_font(12.0), OLED);
+        // The pool sound this track was probably loaded from.
+        let from_pool = (!s.name.trim().is_empty()).then(|| pool.iter().find(|q| !q.blank && q.name == s.name && q.slot == s.slot)).flatten();
+        let pool_txt = from_pool.map_or_else(|| "—".to_owned(), |q| format!("{:03}", q.index + 1));
+        painter.text(egui::pos2(x0 + SND_POOL_X, cy), egui::Align2::LEFT_CENTER, pool_txt, oled_font(10.0), OLED_DIM);
+        let machine_differs = from_pool.is_some_and(|q| q.machine.as_ref().map(|m| m.0) != s.machine.as_ref().map(|m| m.0));
+        let mr = Rect::from_min_size(egui::pos2(x0 + SND_MACH_X, ty), egui::vec2(SND_SRC_X - SND_MACH_X - 4.0, TRACK_H));
+        painter.with_clip_rect(mr).text(mr.left_center(), egui::Align2::LEFT_CENTER, machine_text(s), oled_font(11.0), if machine_differs { SND_DIFFERS } else { OLED });
+        let mut diffs: Vec<String> = Vec::new();
+        for (k, place) in SRC_SHOWN.iter().enumerate() {
+            let Some(q) = param_at(s, *place) else { continue };
+            let pool_q = from_pool.and_then(|ps| param_at(ps, *place));
+            let differs = pool_q.is_some_and(|pq| pq.raw != q.raw);
+            if differs {
+                diffs.push(format!("{} {} (pool {})", q.name, q.text, pool_q.map_or("?", |pq| pq.text.as_str())));
+            }
+            if !show_defaults && is_default(q) && !differs {
+                continue;
+            }
+            let x = x0 + SND_SRC_X + k as f32 * SND_SRC_W;
+            if x + SND_SRC_W > right {
+                break;
+            }
+            let cr = Rect::from_min_size(egui::pos2(x, ty), egui::vec2(SND_SRC_W - 4.0, TRACK_H));
+            let cp = painter.with_clip_rect(cr);
+            let mut tx = cr.left();
+            if q.name != "PLAY" {
+                tx = cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, format!("{} ", q.name), oled_font(9.0), OLED_DIM).right();
+            }
+            cp.text(egui::pos2(tx, cy), egui::Align2::LEFT_CENTER, &q.text, oled_font(11.0), if differs { SND_DIFFERS } else { OLED });
+        }
+        if pointer.is_some_and(|pp| line.contains(pp)) {
+            painter.rect_stroke(line, 2.0, Stroke::new(1.0, OLED_DIM), egui::StrokeKind::Inside);
+            let mut tip = format!("T{} “{name}”: {}", t + 1, src_detail(s));
+            match from_pool {
+                Some(q) if diffs.is_empty() && !machine_differs => tip += &format!("\n\nSame SRC page as pool sound {:03}", q.index + 1),
+                Some(q) => {
+                    tip += &format!("\n\nDiffers from pool sound {:03}:", q.index + 1);
+                    if machine_differs {
+                        tip += &format!("\n  machine (pool {})", machine_text(q));
+                    }
+                    for d in &diffs {
+                        tip += &format!("\n  {d}");
+                    }
+                }
+                None => tip += "\n\nNo pool sound with this name and sample",
+            }
+            if pasted {
+                tip += "\n(sound pasted from another pattern)";
+            }
+            *hover = Some(tip);
+        }
+        ty += TRACK_H;
+    }
+    ty
 }
 
 fn step_tip(seq: &TrackSeq, k: usize, track: &str, sample_name: &dyn Fn(usize) -> String) -> String {
