@@ -1,23 +1,34 @@
 # Sample Manager
 
-A desktop app for organising audio samples and moving them onto an
-Elektron Digitakt.
+A desktop app for digging through a sample library, cutting out the good
+bits, and getting them onto an Elektron Digitakt, then tidying up the
+project on the device without menu-diving on its screen.
+
+<p align="center">
+  <img src="docs/editor.png" width="49%" alt="Sample editor with the standard panels: gain, tools, file row, waveform, numbers and scalpel close-up">
+  <img src="docs/editor_expanded.png" width="49%" alt="Sample editor with every panel open: histogram, map, stats, loudness and phase meter">
+</p>
+<p align="center"><sub>The sample editor with its everyday panels (left) and with every panel switched on (right).</sub></p>
 
 - **File browser** with list and tree views, an audio-only filter,
   favourites, cut/copy/paste, duplicate removal and reveal in Finder.
-- **Sample editor** with playback, in/out points, looping, trim, gain,
-  normalise, loudness and spectrum stats, and export.
+- **Sample editor** with playback, in/out points, a scalpel close-up,
+  looping, trim, gain with a soft limiter, normalise, mono folding,
+  loudness, histogram and spectrum stats, and export straight to a folder,
+  the +Drive or a pool slot.
+- **Slice kits**: collect slices from many samples into one file, free-form
+  or on an equal 4/8/16 grid for the Digitakt 1, with automatic tail
+  trimming and fades. Every slice remembers where it came from.
 - **Digitakt +Drive access over USB MIDI**: browse, create folders, rename,
   move, delete (to `/trash`, so mistakes can be undone), and transfer
   samples both ways.
-- **Project view** for the project loaded on the Digitakt: reorder and
-  clean up the sample pool, move, copy and rename patterns, preview
-  on-device samples from a local cache, and back up or restore projects
-  with their samples.
+- **Device view** for the project loaded on a Digitakt or Digitakt II:
+  reorder and clean up the sample pool, move, copy and rename patterns,
+  copy tracks and sounds between patterns, edit the sound pool, preview
+  on-device samples from a local cache, watch sample memory, and back up
+  or restore projects with their samples.
 
 Built in Rust with [egui](https://github.com/emilk/egui).
-
-![Sample Manager: source browser, sample editor and destination browser](docs/screenshot1.png)
 
 ## How it works
 
@@ -126,6 +137,9 @@ single file (handy for chains of drum hits).
   another. *Export and close* writes a kit and closes it in one step.
 - **⌘Z** while browsing takes back the last slice **K** added (if nothing
   happened since); **⇧⌘Z** puts it back.
+- Each slice remembers the file it was cut from. Right-click a slice to
+  **reveal its source** in the file pane or find it in the device's
+  sample pool.
 
 **Trim.** Turn on the *Trim* panel to free up sample memory: it cuts each
 slice's tail where the sound drops below a threshold and fades out slices
@@ -157,8 +171,8 @@ its real start on the device.
 ### Elektron device view
 
 Click **Device** next to the editor title to work on the project loaded on
-a Digitakt or Digitakt II, in place of the editor. It has two pages,
-**Samples** and **Patterns**. *Load* reads whatever project is open on the
+a Digitakt or Digitakt II, in place of the editor. It has three pages,
+**Samples**, **Patterns** and **Sounds**. *Load* reads whatever project is open on the
 device now (load another one on the device with PROJECT › LOAD first).
 Patterns arrive one by one, folded-out banks first; a bank can be edited
 as soon as all of it is in, and **Stop** ends a read early, keeping the
@@ -188,8 +202,12 @@ notices when the device is plugged in or out and reconnects on its own.
 - Drop audio files onto empty slots to add them to the project: they're
   uploaded into the +Drive folder open in a file tab (files already on the
   +Drive are just linked).
+- Right-click a slot to play it, open it in the editor, find its local
+  original, rename it on the +Drive, or cut, copy and paste samples
+  between slots. A bar under the panes shows how much sample memory the
+  project uses and how much that changed since it was read.
 
-![Elek Sample Order: two bank panes of a Digitakt II project](docs/elek_sample_order.png)
+![Samples page: two bank panes of a Digitakt II project, with the right-click menu of a pool slot](docs/sample_pool_menu.webp)
 
 #### Patterns: organise and rename (experimental)
 
@@ -204,8 +222,22 @@ notices when the device is plugged in or out and reconnects on its own.
   keeps the current name (e.g. `VERSE {n}`). A preview shows the result.
 - *Fold all* / *Open all banks* and *Hide empty* keep long projects
   manageable.
+- **Fold out a pattern** to see its tracks, their sounds and step dots.
+  Select tracks and **copy and paste** them into other patterns: the whole
+  track (trigs, p-locks and sound), just its events, or just its sound.
+  The app asks before a paste would overwrite trigs.
+
+![Patterns page: four tracks of a folded-out pattern selected, with the Copy menu open](docs/pattern_track_menu.png)
 
 Digitakt II pattern support is newer and less tested than Digitakt 1.
+
+#### Sounds: the project's sound pool
+
+The **Sounds** page lists the project's 128 pool sounds with their
+machine, sample and SRC settings. Drag sounds to reorder them, rename or
+delete them, or paste a track sound copied on the Patterns page into the
+pool. Patterns that lock a pool sound are renumbered to follow it, so
+nothing that plays changes.
 
 #### Preview cache for samples on the device
 
