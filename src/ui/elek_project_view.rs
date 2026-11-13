@@ -24,7 +24,8 @@ const NAME_W: f32 = 170.0;
 /// Where the step dots start, in folded-out rows.
 const DOTS_X: f32 = 370.0;
 const WARN: Color32 = Color32::from_rgb(230, 120, 90);
-const SEL_FILL: Color32 = Color32::from_rgb(70, 38, 14);
+/// Outline of a selected pattern row (no fill, so the row stays readable).
+const SEL_EDGE: Color32 = Color32::from_rgb(190, 104, 40);
 const ROW_FILL: Color32 = Color32::from_rgb(18, 21, 21);
 const DOT_OFF: Color32 = Color32::from_rgb(38, 45, 44);
 const DOT_BEAT: Color32 = Color32::from_rgb(62, 72, 70);
@@ -1068,9 +1069,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 }
                 let resp = ui.interact(rect, ui.scope_id().with(("prow", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
                 let selected = ed.sel.contains(&i);
-                let fill = if selected {
-                    SEL_FILL
-                } else if resp.hovered() {
+                let fill = if resp.hovered() {
                     OLED_HOVER
                 } else {
                     ROW_FILL
@@ -1080,6 +1079,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 let changed = *cell != Cell::as_read(i);
                 if landing.contains(&i) {
                     painter.rect_stroke(rect, 2.0, Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT), egui::StrokeKind::Inside);
+                } else if selected {
+                    painter.rect_stroke(rect, 2.0, Stroke::new(1.0, SEL_EDGE), egui::StrokeKind::Inside);
                 } else if ed.cursor == Some(i) {
                     painter.rect_stroke(rect, 2.0, Stroke::new(1.0, OLED_DIM), egui::StrokeKind::Inside);
                 }
