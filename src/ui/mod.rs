@@ -9,4 +9,5 @@ pub mod file_table;
 pub mod infobox;
 pub mod rename_view;
 pub mod slot_list;
+pub mod sound_tags;
 pub mod theme;

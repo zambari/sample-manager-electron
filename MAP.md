@@ -117,6 +117,20 @@ Shared modals are functions in `src/ui/dialogs.rs` (conflicts, trash, duplicates
 device load, rename local copy, slot download, leave editor, save scope, name export, name kit, send back). Each
 is opened by a pending field on `App` and answered at the end of `App::ui`.
 
+### Sound tags (Patterns and Sounds)
+
+- Tiny uppercase, tag-shaped badges beside sound names in the Sounds pool
+  and Patterns → SOUNDS foldouts; click a badge or **+ TAGS** to toggle any
+  of the 32 flags. Right-click the tag field or use its popup for **Copy tags** /
+  **Paste tags** (replaces the bitmap, also across pages). Hover lists full names;
+  overflowing badges end in an ellipsis. UI and independent tag clipboard:
+  `src/ui/sound_tags.rs`; names / device bit order: `presets::TAG_NAMES`.
+- `PoolSound::tags` decodes sound-header bytes 8–11 (big endian).
+  `SoundCell::tags` stages pool flags; `Cell::tags` stages kit-track flags.
+  Both use the existing undo and project push / edited-file export paths.
+  Track writes change only those four bytes (`Patterns::put_track_tags`),
+  preserving the MIDI bit and all sound parameters. Sound copies retain edits.
+
 ### Sound clipboard between Sounds and Presets
 
 - `PoolClip` / `ProjEd::set_pool_clip` in `src/ui/elek_project_view.rs` is shared

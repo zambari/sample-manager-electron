@@ -301,6 +301,14 @@ delete them, copy/paste sounds between this pool and **Presets**, or paste a
 track sound copied on the Patterns page into the pool. Patterns that lock a pool sound are renumbered to follow it, so
 nothing that plays changes.
 
+Sound tags appear as tiny uppercase badges beside the sound name, here and
+in **Patterns → SOUNDS**. Click any badge (or **+ TAGS**) to add or remove
+flags using their full names. Hover to read all assigned tags; an ellipsis
+means more tags are present than fit in the row. **Copy tags** / **Paste tags**
+in the popup or the tag field's right-click menu replaces just the flags,
+including between Patterns and Sounds. Tags use a separate clipboard from
+sounds. Edits support Undo and are sent with **Push to device**.
+
 #### Preview cache for samples on the device
 
 Click a pool slot, or move onto it with ↑/↓, to hear it. When the app has a

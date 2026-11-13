@@ -963,6 +963,9 @@ impl ElekProject {
                                 return None;
                             }
                         }
+                        for (&t, &tags) in &c.tags {
+                            pats.put_track_tags(&mut d, t as usize, tags)?;
+                        }
                         Some((pats.msg_of(i)?, d))
                     })
                     .collect();

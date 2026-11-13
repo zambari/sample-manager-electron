@@ -17,6 +17,7 @@ use crate::ui::elek_project_view::PoolClip;
 use crate::device::patterns::{self, PATTERNS};
 use crate::device::ElekProject;
 use crate::ui::elek_view::{self, ElekIntent, ElekState};
+use crate::ui::sound_tags;
 use crate::ui::theme::{self, oled_font, OLED, OLED_BG, OLED_DIM};
 use egui::{Color32, RichText};
 use std::collections::HashMap;
@@ -122,7 +123,7 @@ impl LibraryView {
     }
 
     fn delete_sound(&mut self, i: usize) {
-        self.cells_mut()[i] = SoundCell { src: SoundSrc::Empty, name: None };
+        self.cells_mut()[i] = SoundCell { src: SoundSrc::Empty, name: None, tags: None };
     }
 
     fn undo_sounds(&mut self) {
@@ -494,6 +495,7 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
     let mut selected = st.lib.selected;
     // An edit gesture on a locked sound pool: what was tried.
     let mut blocked: Option<&str> = None;
+    let mut tag_edit = None;
     let sel_bg = Color32::from_rgba_unmultiplied(255, 255, 255, 22);
     let cell_of = |i: usize| cells.get(i).cloned().unwrap_or_else(|| SoundCell::as_read(i));
     // Locks follow the sound: count them by where it was read.
@@ -520,7 +522,7 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
         .filter(|s| !st.lib.hide_blank || !s.blank)
         .filter(|s| {
             let n = sample(p, &st.fills, &st.names, s.slot).0;
-            matches(&filter, &[&s.name, &n])
+            matches(&filter, &[&s.name, &n, &crate::device::presets::tag_names(s.tags).collect::<Vec<_>>().join(" ")])
         })
         .map(|s| (s, kit_uses(p, s)))
         .collect();
@@ -528,6 +530,7 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
     ui.horizontal(|ui| {
         cell(ui, NUM_W, head("#"));
         cell(ui, NAME_W, head("SOUND"));
+        cell(ui, sound_tags::WIDTH, head("TAGS"));
         cell(ui, SAMPLE_W, head("SAMPLE"));
         cell(ui, MACHINE_W, head("MACHINE")).on_hover_text("The sound's machine, from its machine byte. Names ending in ? are guesses");
         for i in SRC_SHOWN {
@@ -586,6 +589,12 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
                     None => {
                         let name = if s.name.is_empty() { "—" } else { &s.name };
                         name_hit = cell(ui, NAME_W, RichText::new(name).font(oled_font(F_NAME)).color(color)).on_hover_text(src_detail(s)).clicked();
+                    }
+                }
+                let (tr, _) = ui.allocate_exact_size(egui::vec2(sound_tags::WIDTH, ROW_H), egui::Sense::hover());
+                if !s.blank {
+                    if let Some(tags) = sound_tags::show(ui, tr, ui.scope_id().with(("pool_tags", s.index)), s.tags, editable, edited) {
+                        tag_edit = Some((s.index, tags));
                     }
                 }
                 let (n, key) = sample(p, &st.fills, &st.names, s.slot);
@@ -763,6 +772,10 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
         Some(None) => renaming = None,
         None => {}
     }
+    if let Some((i, tags)) = tag_edit {
+        st.lib.cells_mut()[i].tags = Some(tags);
+        st.status = format!("Pool sound {:03} tags changed. Push to send them", i + 1);
+    }
     st.lib.renaming = renaming;
     st.lib.selected = selected;
     if let Some((i, MenuPick::Rename)) = menu {
@@ -886,13 +899,20 @@ fn paste_sounds(st: &mut ElekState, at: usize, sounds: &[PoolSound], over: bool)
         return format!("Pool sound {:03} isn't empty: right-click it → Paste … over this one to replace it", at + 1);
     }
     let mut problems = Vec::new();
-    let good: Vec<(u8, u8)> = copied
+    let good: Vec<(u8, u8, Option<SoundCell>)> = copied
         .iter()
-        .filter_map(|&(t, pat)| match p.track_sound_for_pool(pat, t, &[]) {
-            Ok(_) => pat.map(|pat| (pat, t)),
-            Err(e) => {
-                problems.push(e);
-                None
+        .filter_map(|&(t, pat)| {
+            let cell = st.proj.copied_sound_cell(t);
+            let valid = match &cell {
+                Some(c) => p.pool_sound_for_track(c).map(|_| ()),
+                None => p.track_sound_for_pool(pat, t, &[]).map(|_| ()),
+            };
+            match valid {
+                Ok(_) => pat.map(|pat| (pat, t, cell)),
+                Err(e) => {
+                    problems.push(e);
+                    None
+                }
             }
         })
         .collect();
@@ -912,13 +932,13 @@ fn paste_sounds(st: &mut ElekState, at: usize, sounds: &[PoolSound], over: bool)
         return format!("Nothing pasted: {}", problems.join("; "));
     }
     let cells = st.lib.cells_mut();
-    for (&i, &(pattern, track)) in targets.iter().zip(&good) {
-        cells[i] = SoundCell { src: SoundSrc::Track { pattern, track }, name: None };
+    for (&i, (pattern, track, cell)) in targets.iter().zip(&good) {
+        cells[i] = cell.clone().unwrap_or(SoundCell { src: SoundSrc::Track { pattern: *pattern, track: *track }, name: None, tags: None });
     }
     st.lib.selected = Some(at);
     let mut msg = if n == 1 {
-        let (pat, t) = good[0];
-        format!("Track {} sound of {} pasted into pool sound {:03}. Push to send it", t as usize + 1, patterns::label(pat as usize), at + 1)
+        let (pat, t, _) = &good[0];
+        format!("Track {} sound of {} pasted into pool sound {:03}. Push to send it", *t as usize + 1, patterns::label(*pat as usize), at + 1)
     } else {
         format!("{n} track sounds pasted into pool sounds {}. Push to send them", targets[..n].iter().map(|i| format!("{:03}", i + 1)).collect::<Vec<_>>().join(", "))
     };

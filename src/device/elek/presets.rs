@@ -46,16 +46,17 @@ impl Preset {
 /// dump: B001 = 0x400 (Bass), B002 = 0x40 (Hat), B003 = 0x10400
 /// (Bass + Electronic). The mask occupies all 32 bits, including Favourite.
 pub fn tag_names(mask: u32) -> impl Iterator<Item = &'static str> {
-    const NAMES: [&str; 32] = [
-        "Kick", "Snare", "Rim", "Clap", "Top", "Perc", "Hat", "Cymbal",
-        "Cowbell", "Synth", "Bass", "Lead", "Pad", "Texture", "Chords", "Sound Fx",
-        "Electronic", "Metallic", "Acoustic", "Atmosphere", "Noisy", "Glitch",
-        "Hard", "Soft", "Dark", "Bright", "Vintage", "Epic", "Fail", "Loop",
-        "Mine", "Favourite",
-    ];
-    NAMES.into_iter().enumerate()
+    TAG_NAMES.into_iter().enumerate()
         .filter_map(move |(bit, name)| (mask & (1u32 << bit) != 0).then_some(name))
 }
+
+pub const TAG_NAMES: [&str; 32] = [
+    "Kick", "Snare", "Rim", "Clap", "Top", "Perc", "Hat", "Cymbal",
+    "Cowbell", "Synth", "Bass", "Lead", "Pad", "Texture", "Chords", "Sound Fx",
+    "Electronic", "Metallic", "Acoustic", "Atmosphere", "Noisy", "Glitch",
+    "Hard", "Soft", "Dark", "Bright", "Vintage", "Epic", "Fail", "Loop",
+    "Mine", "Favourite",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PresetSlot {

@@ -856,6 +856,7 @@ pub(crate) fn finish_copy(st: &mut ElekState, ctx: &egui::Context) {
     let cell = crate::device::library::SoundCell {
         src: crate::device::library::SoundSrc::Preset { model: preset.model, data: preset.data },
         name: None,
+        tags: None,
     };
     let track_ok = st.project.as_deref().ok_or_else(|| "No project loaded".to_owned())
         .and_then(|p| p.accepts_preset(preset.model, match &cell.src {

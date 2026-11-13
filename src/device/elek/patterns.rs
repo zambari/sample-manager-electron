@@ -281,19 +281,21 @@ pub struct Cell {
     /// track → the pool sound as it was when copied (where it was read from
     /// and its name). Never on a track that is also in `sounds`.
     pub pool: BTreeMap<u8, super::library::SoundCell>,
+    /// Replacement tag bitmaps on kit track sounds, applied after sound pastes.
+    pub tags: BTreeMap<u8, u32>,
 }
 
 impl Cell {
     pub fn as_read(slot: usize) -> Self {
-        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new() }
+        Self { src: Some(slot as u8), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new(), tags: BTreeMap::new() }
     }
 
     pub fn empty() -> Self {
-        Self { src: None, name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new() }
+        Self { src: None, name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new(), tags: BTreeMap::new() }
     }
 
     pub fn with_src(src: u8) -> Self {
-        Self { src: Some(src), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new() }
+        Self { src: Some(src), name: None, tracks: BTreeMap::new(), sounds: BTreeMap::new(), pool: BTreeMap::new(), tags: BTreeMap::new() }
     }
 
     /// The pattern track `t` comes from (`None`: an empty pattern).
@@ -318,6 +320,7 @@ impl Cell {
 
     /// Take track `t`'s sound from pattern `from`, like `set_track`.
     pub fn set_sound(&mut self, t: usize, from: Option<u8>) {
+        self.tags.remove(&(t as u8));
         self.pool.remove(&(t as u8));
         if from == self.src {
             self.sounds.remove(&(t as u8));
@@ -328,13 +331,14 @@ impl Cell {
 
     /// Give track `t` pool sound `c` (as copied on the Sounds page).
     pub fn set_pool_sound(&mut self, t: usize, c: super::library::SoundCell) {
+        self.tags.remove(&(t as u8));
         self.sounds.remove(&(t as u8));
         self.pool.insert(t as u8, c);
     }
 
     /// Tracks with pasted events or sound.
     pub fn pasted_tracks(&self) -> BTreeSet<u8> {
-        self.tracks.keys().chain(self.sounds.keys()).chain(self.pool.keys()).copied().collect()
+        self.tracks.keys().chain(self.sounds.keys()).chain(self.pool.keys()).chain(self.tags.keys()).copied().collect()
     }
 
     /// Every pattern this cell reads from.
@@ -797,6 +801,15 @@ impl Patterns {
         let snd = d.get(at..at + sz)?;
         let midi = g.midi_mask.is_some_and(|m| be16(d, m).unwrap_or(0) & (1u16 << t) != 0);
         Some((snd, midi))
+    }
+
+    /// Change only a kit sound's tag bytes, preserving its MIDI bit and parameters.
+    pub(super) fn put_track_tags(&self, d: &mut [u8], t: usize, tags: u32) -> Option<()> {
+        self.track_sound(d, t)?;
+        let g = &self.geo;
+        let at = g.kit + g.sounds? + t * g.ssize? + 8;
+        d.get_mut(at..at + 4)?.copy_from_slice(&tags.to_be_bytes());
+        Some(())
     }
 
     /// Put sound struct `snd` (a pool sound) on kit track `t` of payload

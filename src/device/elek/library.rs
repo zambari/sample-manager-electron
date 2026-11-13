@@ -31,11 +31,13 @@ pub enum SoundSrc {
 pub struct SoundCell {
     pub src: SoundSrc,
     pub name: Option<String>,
+    /// Replacement tag bitmap; None keeps the source sound's tags.
+    pub tags: Option<u32>,
 }
 
 impl SoundCell {
     pub fn as_read(i: usize) -> Self {
-        Self { src: SoundSrc::Read(i as u8), name: None }
+        Self { src: SoundSrc::Read(i as u8), name: None, tags: None }
     }
 }
 
@@ -270,6 +272,9 @@ impl ElekProject {
         if let Some(n) = &cell.name {
             set_sound_name(&mut d, n);
         }
+        if let Some(tags) = cell.tags {
+            d.get_mut(8..12)?.copy_from_slice(&tags.to_be_bytes());
+        }
         Some(d)
     }
 
@@ -402,6 +407,8 @@ const SOUND_WAIT: Duration = Duration::from_millis(1500);
 pub struct PoolSound {
     pub index: usize,
     pub name: String,
+    /// Sound-header tag bitmap, least-significant bit first.
+    pub tags: u32,
     /// Pool sample slot (0 = none).
     pub slot: usize,
     /// No sound here: not a sound struct, or no name and no sample.
@@ -459,7 +466,7 @@ pub(crate) fn parse_sound(m: Model, index: usize, d: &[u8]) -> PoolSound {
     let id = machine_id(m, sv, d);
     let params = src_params(m, id.unwrap_or(0), &src);
     let machine = id.map(|i| (i, machine_name(m, i)));
-    PoolSound { index, name, slot, blank, src, machine, params }
+    PoolSound { index, name, tags: be32(d, 8).unwrap_or(0), slot, blank, src, machine, params }
 }
 
 /// All 128 pool sounds from the sound messages there are (blank for the rest).

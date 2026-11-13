@@ -9,6 +9,7 @@ use crate::device::patterns::{self, Patterns, Step, TrackSeq, NAME_MAX, PATTERNS
 use crate::ui::elek_library_view::{is_default, machine_text, param_at, src_detail, SRC_SHOWN};
 use crate::device::{Cell, ElekProject, PatState};
 use crate::ui::elek_view::{self, ElekIntent, ElekState};
+use crate::ui::sound_tags;
 use crate::ui::theme::{self, oled_font, OLED, OLED_BG, OLED_DIM, OLED_HOVER};
 use egui::{Color32, Rect, RichText, Sense, Stroke};
 use std::collections::BTreeSet;
@@ -63,6 +64,9 @@ impl Part {
 struct TrackClip {
     tracks: Vec<(u8, Option<u8>)>,
     from: usize,
+    /// Sound overrides as copied, including tag edits and pool pastes.
+    overrides: std::collections::BTreeMap<u8, SoundCell>,
+    tags: std::collections::BTreeMap<u8, u32>,
 }
 
 /// A pool sound copied on the Sounds page, to paste into another pool
@@ -362,6 +366,19 @@ impl ProjEd {
         self.tclip_snd.as_ref().map(|c| c.tracks.clone()).unwrap_or_default()
     }
 
+    pub fn copied_sound_cell(&self, track: u8) -> Option<SoundCell> {
+        let clip = self.tclip_snd.as_ref()?;
+        let mut cell = if let Some(sc) = clip.overrides.get(&track) {
+            sc.clone()
+        } else {
+            clip.tags.get(&track)?;
+            let pattern = clip.tracks.iter().find(|(t, _)| *t == track)?.1?;
+            SoundCell { src: SoundSrc::Track { pattern, track }, name: None, tags: None }
+        };
+        if let Some(&tags) = clip.tags.get(&track) { cell.tags = Some(tags); }
+        Some(cell)
+    }
+
     fn has_tclip(&self) -> bool {
         self.tclip_ev.is_some() || self.tclip_snd.is_some()
     }
@@ -405,8 +422,12 @@ fn copy_tracks(ed: &mut ProjEd, part: Part, audio: usize) -> String {
         return "Select tracks first (click a track name in a folded-out pattern)".into();
     };
     let c = &ed.cells[i];
-    let ev = TrackClip { tracks: ed.tsel.iter().map(|&t| (t, c.track_src(t as usize))).collect(), from: i };
-    let snd = TrackClip { tracks: ed.tsel.iter().map(|&t| (t, c.sound_src(t as usize))).collect(), from: i };
+    let ev = TrackClip { tracks: ed.tsel.iter().map(|&t| (t, c.track_src(t as usize))).collect(), from: i, overrides: Default::default(), tags: Default::default() };
+    let snd = TrackClip {
+        tracks: ed.tsel.iter().map(|&t| (t, c.sound_src(t as usize))).collect(), from: i,
+        overrides: c.pool.iter().filter(|(t, _)| ed.tsel.contains(t)).map(|(&t, s)| (t, s.clone())).collect(),
+        tags: c.tags.iter().filter(|(t, _)| ed.tsel.contains(t)).map(|(&t, &tags)| (t, tags)).collect(),
+    };
     match part {
         Part::Track => (ed.tclip_ev, ed.tclip_snd) = (Some(ev), Some(snd)),
         Part::Sound => ed.tclip_snd = Some(snd),
@@ -477,7 +498,14 @@ fn apply_tracks(ed: &mut ProjEd, into: &[usize], part: Part, audio: usize) -> St
                 cells[i].set_track(t as usize, from);
             }
             for &(t, from) in snd.iter().flat_map(|c| &c.tracks) {
-                cells[i].set_sound(t as usize, from);
+                if let Some(sc) = snd.as_ref().and_then(|c| c.overrides.get(&t)) {
+                    cells[i].set_pool_sound(t as usize, sc.clone());
+                } else {
+                    cells[i].set_sound(t as usize, from);
+                }
+                if let Some(&tags) = snd.as_ref().and_then(|c| c.tags.get(&t)) {
+                    cells[i].tags.insert(t, tags);
+                }
             }
         }
     });
@@ -523,7 +551,20 @@ fn pool_cell_sound(p: &Patterns, pool: &[PoolSound], c: &SoundCell) -> Option<Po
     if let Some(n) = &c.name {
         s.name = patterns::clean_name(n);
     }
+    if let Some(tags) = c.tags { s.tags = tags; }
     Some(s)
+}
+
+/// Snapshot the sound source and its staged flags when a track has overrides.
+fn edited_track_cell(c: &Cell, t: usize) -> Option<SoundCell> {
+    let mut sound = if let Some(sc) = c.pool.get(&(t as u8)) {
+        sc.clone()
+    } else {
+        let tags = c.tags.get(&(t as u8))?;
+        SoundCell { src: SoundSrc::Track { pattern: c.sound_src(t)?, track: t as u8 }, name: None, tags: Some(*tags) }
+    };
+    if let Some(&tags) = c.tags.get(&(t as u8)) { sound.tags = Some(tags); }
+    Some(sound)
 }
 
 /// The Copy track / sound / events items of a track's menu.
@@ -1069,6 +1110,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     let mut snd_toggles = Vec::new();
     // A SOUNDS foldout line's Copy: (pattern slot, track).
     let mut snd_copy: Option<(usize, usize)> = None;
+    let mut tag_edit = None;
     let names = &st.names;
     let vis = ed.visible(p);
 
@@ -1428,6 +1470,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                                 copy: &mut snd_copy,
                                 paste_label: pool_label.as_deref().filter(|_| editable),
                                 paste: &mut snd_paste,
+                                editable,
+                                tag_edit: &mut tag_edit,
                             });
                             let _ = ty;
                         }
@@ -1582,12 +1626,16 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
             ed.snd_open.insert(i);
         }
     }
+    if let Some((i, t, tags)) = tag_edit {
+        ed.edit(|cells| { cells[i].tags.insert(t as u8, tags); });
+        status = Some(format!("{} T{} tags changed. Push to send them", patterns::label(i), t + 1));
+    }
     if let Some((i, t)) = snd_paste {
         status = Some(paste_pool_sound(ed, p, i, &[t as u8], audio));
     }
-    if let Some((i, t)) = snd_copy.filter(|(i, t)| ed.cells[*i].pool.contains_key(&(*t as u8))) {
-        // A track given a pool sound: copy that pool sound again.
-        let cell = ed.cells[i].pool[&(t as u8)].clone();
+    if let Some((i, t)) = snd_copy.filter(|(i, t)| edited_track_cell(&ed.cells[*i], *t).is_some()) {
+        // Copy the sound as edited, including pending tag changes.
+        let cell = edited_track_cell(&ed.cells[i], t).expect("overridden sound");
         let at = match cell.src {
             SoundSrc::Read(o) => o as usize,
             _ => 0,
@@ -1600,7 +1648,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
         status = Some(msg);
     } else if let Some((i, t)) = snd_copy {
         let src = ed.cells[i].sound_src(t);
-        ed.tclip_snd = Some(TrackClip { tracks: vec![(t as u8, src)], from: i });
+        ed.tclip_snd = Some(TrackClip { tracks: vec![(t as u8, src)], from: i, overrides: Default::default(), tags: Default::default() });
         ed.pool_clip = None;
         let msg = format!("Copied the sound of {}; paste it into the sound pool on the Sounds page (⌘V on a highlighted sound, or right-click → Paste), or into other patterns", clip_desc(ed.tclip_snd.as_ref().expect("just set"), audio));
         ui.ctx().copy_text(msg.clone());
@@ -1719,9 +1767,10 @@ fn timing_tip(label: &str, n: &patterns::PatternInfo, tr: &[&TrackSeq]) -> Strin
 
 /// Where the SOUNDS foldout's columns start, from the row's left edge.
 const SND_NAME_X: f32 = 44.0;
-const SND_POOL_X: f32 = 160.0;
-const SND_MACH_X: f32 = 200.0;
-const SND_SRC_X: f32 = 274.0;
+const SND_TAG_X: f32 = 160.0;
+const SND_POOL_X: f32 = SND_TAG_X + sound_tags::WIDTH + 6.0;
+const SND_MACH_X: f32 = SND_POOL_X + 40.0;
+const SND_SRC_X: f32 = SND_MACH_X + 74.0;
 const SND_SRC_W: f32 = 62.0;
 /// A kit track sound value that differs from the pool sound it matches.
 const SND_DIFFERS: Color32 = theme::CHANGED;
@@ -1755,6 +1804,8 @@ struct SoundFold<'a, 'b> {
     paste_label: Option<&'a str>,
     /// Set to (pattern slot, track) when a sound line's Paste is picked.
     paste: &'b mut Option<(usize, usize)>,
+    editable: bool,
+    tag_edit: &'b mut Option<(usize, usize, u32)>,
 }
 
 /// The SOUNDS line under a folded-out pattern's tracks and, when open, each
@@ -1762,7 +1813,7 @@ struct SoundFold<'a, 'b> {
 /// matches (same name and sample), machine and SRC page. Values that differ
 /// from that pool sound are amber. Returns the y below it.
 fn sound_foldout(f: SoundFold) -> f32 {
-    let SoundFold { ui, painter, p, cell, i, x0, right, mut ty, kit_n, kit_tracks, pattern_color, open, show_defaults, pool, pointer, hover, toggle, copy, paste_label, paste } = f;
+    let SoundFold { ui, painter, p, cell, i, x0, right, mut ty, kit_n, kit_tracks, pattern_color, open, show_defaults, pool, pointer, hover, toggle, copy, paste_label, paste, editable, tag_edit } = f;
     let head = Rect::from_min_max(egui::pos2(x0 + 18.0, ty), egui::pos2(x0 + SND_SRC_X, ty + TRACK_H));
     let r = ui.interact(head, ui.scope_id().with(("psnd", i)), Sense::click());
     let col = if r.hovered() || open { OLED } else { OLED_DIM };
@@ -1770,6 +1821,9 @@ fn sound_foldout(f: SoundFold) -> f32 {
     painter.text(egui::pos2(x0 + SND_NAME_X, head.center().y), egui::Align2::LEFT_CENTER, "SOUNDS", oled_font(11.0), col);
     if r.on_hover_text("Each kit track's sound: machine and SRC page, decoded like the Sounds page (some values may still read wrong). POOL: the pool sound with the same name and sample; amber values differ from it").clicked() {
         toggle.push(i);
+    }
+    if open {
+        painter.text(egui::pos2(x0 + SND_TAG_X, head.center().y), egui::Align2::LEFT_CENTER, "TAGS", oled_font(9.0), OLED_DIM);
     }
     ty += TRACK_H;
     if !open {
@@ -1786,6 +1840,9 @@ fn sound_foldout(f: SoundFold) -> f32 {
             ty += TRACK_H;
             continue;
         };
+        let mut s = s.clone();
+        if let Some(&tags) = cell.tags.get(&(t as u8)) { s.tags = tags; }
+        let s = &s;
         let pasted = cell.sounds.contains_key(&(t as u8)) || cell.pool.contains_key(&(t as u8));
         // Right-click: copy this sound (for the sound pool or other patterns).
         let lr = ui.interact(line, ui.scope_id().with(("psnd_line", i, t)), Sense::click());
@@ -1805,8 +1862,14 @@ fn sound_foldout(f: SoundFold) -> f32 {
         });
         painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, format!("T{}", t + 1), oled_font(10.0), if pasted { theme::DEVICE_ACCENT_BRIGHT } else { OLED_DIM });
         let name = if s.name.is_empty() { "—" } else { s.name.as_str() };
-        let nr = Rect::from_min_size(egui::pos2(x0 + SND_NAME_X, ty), egui::vec2(SND_POOL_X - SND_NAME_X - 4.0, TRACK_H));
+        let nr = Rect::from_min_size(egui::pos2(x0 + SND_NAME_X, ty), egui::vec2(SND_TAG_X - SND_NAME_X - 4.0, TRACK_H));
         painter.with_clip_rect(nr).text(nr.left_center(), egui::Align2::LEFT_CENTER, name, oled_font(12.0), OLED);
+        let tags_rect = Rect::from_min_max(egui::pos2(x0 + SND_TAG_X, ty), egui::pos2((x0 + SND_POOL_X - 6.0).min(right - 4.0), ty + TRACK_H));
+        if tags_rect.is_positive() {
+            if let Some(tags) = sound_tags::show(ui, tags_rect, ui.scope_id().with(("pattern_tags", i, t)), s.tags, editable, cell.tags.contains_key(&(t as u8))) {
+                *tag_edit = Some((i, t, tags));
+            }
+        }
         // The pool sound this track was probably loaded from.
         let from_pool = (!s.name.trim().is_empty()).then(|| pool.iter().find(|q| !q.blank && q.name == s.name && q.slot == s.slot)).flatten();
         let pool_txt = from_pool.map_or_else(|| "—".to_owned(), |q| format!("{:03}", q.index + 1));
