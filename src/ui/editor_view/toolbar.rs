@@ -9,11 +9,8 @@ pub(super) fn header(ui: &mut Ui, ed: &mut Editor, focused: bool, drive_shown: b
         }
         ui.add_space(14.0);
         crate::ui::theme::device_group(ui, |ui| {
-            if crate::ui::theme::device_switch(ui, false, false)
-                .on_hover_text("The project loaded on the Digitakt (Samples / Patterns), in place of the editor. Its ⇥ Dock button puts the sample pool in the right column instead.")
-                .clicked()
-            {
-                out.push(EdIntent::ElekMode);
+            if crate::ui::theme::device_switch(ui, false, false).clicked() {
+                out.push(EdIntent::ToggleDevice);
             }
             if crate::device::presence().available() {
                 use crate::ui::elek_view::DevicePick;

@@ -104,6 +104,10 @@ pub struct ElekState {
     /// After a push with sound pool edits: each pool sound's name the
     /// device should now hold ("" = empty).
     pub expect_sounds: Option<Vec<String>>,
+    /// After a push: the empty patterns it left as read, which the read-back
+    /// takes from here instead of asking the device (a manual reload reads
+    /// everything).
+    pub keep_blank: Vec<crate::device::DumpMsg>,
     /// While a read runs: which banks to read first, and its stop flag.
     pub reading: Option<std::sync::Arc<crate::device::ReadCtl>>,
     /// The running read's pool has arrived and is what's shown.
@@ -147,6 +151,8 @@ pub enum ElekPage {
 
 pub enum ElekIntent {
     BackToEditor,
+    /// The DEVICE switch: close the device panels and its MIDI ports.
+    ToggleDevice,
     /// The +Drive tab next to Patterns: show the +Drive in the right column.
     ShowDrive,
     ListProjects,
@@ -373,6 +379,7 @@ impl ElekState {
         self.proj = Default::default();
         self.expect_patterns = None;
         self.expect_sounds = None;
+        self.keep_blank.clear();
         self.lib.sounds.clear();
         if let Some(ctl) = &self.reading {
             ctl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1027,8 +1034,10 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
     }
     ui.add_space(14.0);
     theme::device_group(ui, |ui| {
-        theme::device_switch(ui, true, true);
-        if crate::device::presence().available() || st.project.is_some() {
+        if theme::device_switch(ui, true, true).clicked() {
+            out.push(ElekIntent::ToggleDevice);
+        }
+        if crate::device::presence().available() {
             // The top tabs pick one place at a time: here a page is, so
             // +Drive isn't lit even when the right column shows it.
             match device_pages(ui, Some(st.page), false) {
@@ -1048,10 +1057,15 @@ pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<E
         }
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui
-            .button("⇥ Dock beside files")
-            .on_hover_text("Back to the editor, with the pool as one pane in the right column")
-            .clicked()
+        // Only the Samples page is the pool, so only it can dock.
+        if st.page == ElekPage::Order
+            && ui
+                .add(
+                    egui::Button::new(RichText::new("⇥ Dock beside files").color(theme::ON_ACCENT))
+                        .fill(theme::ACCENT),
+                )
+                .on_hover_text("Back to the editor, with the pool as one pane in the right column")
+                .clicked()
         {
             out.push(ElekIntent::Dock);
         }

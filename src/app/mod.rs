@@ -161,6 +161,9 @@ pub struct App {
     device_status: Option<Result<String, String>>,
     /// The device presence seen last frame, to act when the cable goes in or out.
     last_presence: crate::device::Presence,
+    /// The device subpage last shown (a centre page, or the +Drive on
+    /// the right), reopened when the device comes back.
+    device_last: Option<crate::ui::elek_view::DevicePick>,
     staged_upload: Option<StagedUpload>,
     /// A pool sample in the editor, saved back into its slot.
     pool_edit: Option<pool_edit::PoolEdit>,
@@ -353,6 +356,9 @@ pub struct App {
     /// That first read is running: once the names are in, show the
     /// Patterns page with the pool docked beside it.
     first_dock: bool,
+    /// The device came back while unpushed project edits were open: ask
+    /// whether to drop them and read the device again. Holds the count.
+    reconnect_ask: Option<usize>,
     pool_fetch: elek::PoolFetch,
     /// Device files we have a local copy of (see [`crate::links`]).
     links: crate::links::Links,
@@ -466,6 +472,7 @@ impl App {
             device,
             device_status: None,
             last_presence: Default::default(),
+            device_last: None,
             staged_upload: None,
             pool_edit: None,
             slot_save: None,
@@ -545,6 +552,7 @@ impl App {
             pool_rect: None,
             elek_greeted: false,
             first_dock: false,
+            reconnect_ask: None,
             pool_fetch: Default::default(),
             jobs,
             keymap: Keymap::platform_default(),
@@ -890,6 +898,13 @@ impl eframe::App for App {
             if let Some(choice) = dialogs::slot_prefix(ui.ctx(), &examples, p.paths.len()) {
                 let p = self.slot_prefix_pending.take().expect("checked above");
                 self.answer_slot_prefix(p, choice);
+            }
+        }
+
+        if let Some(n) = self.reconnect_ask {
+            if let Some(read) = dialogs::device_reconnected(ui.ctx(), n) {
+                self.reconnect_ask = None;
+                self.answer_reconnect(read);
             }
         }
 

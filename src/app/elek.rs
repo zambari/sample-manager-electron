@@ -124,7 +124,63 @@ impl App {
             return;
         }
         self.first_dock = true;
-        self.elek_read();
+        self.elek_read(Vec::new());
+    }
+
+    /// The device is back after being unplugged or switched off. Nothing
+    /// read before can be trusted: it may have been edited on its own, had
+    /// another project loaded, or be another machine altogether (two units
+    /// of one model look the same on the port list). So forget what came
+    /// from its +Drive and read its project again. Unpushed edits here are
+    /// not dropped without asking; a project opened from a file is kept
+    /// (it is meant to be pushed, and the push checks for staleness).
+    pub(super) fn device_reconnected(&mut self) {
+        let st = &mut self.elek;
+        // Paths and listings belong to whichever machine answered last.
+        st.names.clear();
+        st.lib.presets.clear();
+        st.lib.preset_pending.clear();
+        st.lib.data.clear();
+        st.lib.data_pending.clear();
+        if st.project.as_ref().is_some_and(|p| p.from_file.is_some()) {
+            st.status = "Device reconnected; the project opened from a file is kept (not read from the device)".into();
+            return;
+        }
+        if st.project.is_none() && !self.elek_greeted {
+            // Never read: the first visit to the device view reads it.
+            return;
+        }
+        let edits = st.changed() + st.filling.len();
+        crate::log::line(format!("elek: device reconnected, {edits} unpushed edit(s); reading the project again"));
+        if edits > 0 {
+            self.reconnect_ask = Some(edits);
+            return;
+        }
+        self.reread_after_reconnect();
+    }
+
+    /// The reconnect question: `true` drops the edits and reads.
+    pub(super) fn answer_reconnect(&mut self, read: bool) {
+        if read {
+            self.reread_after_reconnect();
+        } else {
+            self.elek.status = "Kept your unpushed edits; the project shown may not match the device. \
+                A push checks first and holds back if the device's project changed."
+                .into();
+        }
+    }
+
+    fn reread_after_reconnect(&mut self) {
+        let st = &mut self.elek;
+        if let Some(ctl) = st.reading.take() {
+            ctl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        st.busy = None;
+        st.expect = None;
+        st.expect_patterns = None;
+        st.expect_sounds = None;
+        st.status = "Device reconnected: reading its project again".into();
+        self.elek_read(Vec::new());
     }
 
     /// The first read has its sample names: Patterns in the centre (if
@@ -135,10 +191,7 @@ impl App {
         self.pool_focused = false;
         // The docked pool lives in the right column, which this hides.
         self.elek.hide_files = false;
-        if self.elek_mode {
-            self.elek.page = elek_view::ElekPage::Project;
-        }
-        self.status = "Project loaded: patterns in the middle, the sample pool docked on the right. \
+        self.status = "Project loaded: the sample pool is docked on the right. \
             Switch the right column with Files / Sample pool / +Drive."
             .into();
     }
@@ -161,6 +214,44 @@ impl App {
     /// device tab).
     pub(super) fn drive_in_col(&self) -> bool {
         !self.pool_in_col() && !(self.elek_mode && self.elek.hide_files) && self.pane(Role::Dest).active_tab().device
+    }
+
+    /// The DEVICE switch: off closes every device panel and the MIDI ports
+    /// (so a DAW can have the device) and stops watching for it; on
+    /// connects again.
+    pub(super) fn toggle_device(&mut self) {
+        let off = !crate::device::switched_off();
+        if off {
+            self.fold_device();
+        }
+        self.device.switch_off(off);
+        self.status = if off {
+            "Device switched off: MIDI ports closed. Click DEVICE to connect again.".into()
+        } else {
+            "Device switched on".into()
+        };
+    }
+
+    /// Close every device panel: the device view, the docked pool, and
+    /// +Drive tabs in both panes. The project stays in memory.
+    pub(super) fn fold_device(&mut self) {
+        self.elek_mode = false;
+        self.dock_pool = false;
+        self.pool_focused = false;
+        self.leave_device_tabs();
+    }
+
+    /// Move both panes off their +Drive tabs (opening a home tab where a
+    /// pane has no local one).
+    pub(super) fn leave_device_tabs(&mut self) {
+        for role in [Role::Source, Role::Dest] {
+            if !self.pane_mut(role).leave_device() {
+                let id = self.new_tab_id();
+                self.pane_mut(role).add_tab(crate::tab::DirTab::new(id, crate::app::dirs_home()));
+                let i = self.pane(role).active;
+                self.reload(role, i);
+            }
+        }
     }
 
     /// Back to the editor with the pool in the right column.
@@ -282,7 +373,8 @@ impl App {
         let pool = self.pool_in_col();
         let drive = self.drive_in_col();
         let pane_lit = self.focused == Role::Dest && !self.editor_focused && !self.pool_focused;
-        let pool_offered = self.pool_offered();
+        let present = crate::device::presence().available();
+        let pool_offered = present && self.pool_offered();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             if ui
@@ -302,13 +394,12 @@ impl App {
                 self.pool_focused = true;
                 self.editor_focused = false;
             }
-            let mut resp = ui
-                .add(theme::column_switch("+Drive", drive, drive && pane_lit, true))
-                .on_hover_text("The device's +Drive storage. Commit and drops land here while it shows.");
-            if let Some(why) = crate::device::presence().problem() {
-                resp = resp.on_hover_text(why);
-            }
-            if resp.clicked() {
+            if present
+                && ui
+                    .add(theme::column_switch("+Drive", drive, drive && pane_lit, true))
+                    .on_hover_text("The device's +Drive storage. Commit and drops land here while it shows.")
+                    .clicked()
+            {
                 self.show_drive();
             }
         });
@@ -376,6 +467,7 @@ impl App {
                 ElekIntent::BackToEditor => {
                     self.elek_mode = false;
                 }
+                ElekIntent::ToggleDevice => self.toggle_device(),
                 ElekIntent::Dock => self.dock_elek(),
                 // Picked from the top tabs, +Drive is a place of its own
                 // like Samples / Patterns: the editor in the centre, the
@@ -411,7 +503,7 @@ impl App {
                     self.elek.projects = None;
                     self.device.elek(ElekCmd::ListProjects);
                 }
-                ElekIntent::Read => self.elek_read(),
+                ElekIntent::Read => self.elek_read(Vec::new()),
                 ElekIntent::ReadSounds => {
                     self.elek.lib.sound_progress = Some((0, crate::device::library::SOUND_POOL));
                     self.device.elek(ElekCmd::ReadSounds);
@@ -528,6 +620,7 @@ impl App {
         ));
         let model = p.model;
         let settings = p.settings_data().to_vec();
+        self.elek.keep_blank = p.untouched_blanks(&self.elek.order, &self.elek.fills, cells, sounds);
         self.elek.expect = Some(self.elek.new_pool());
         self.elek.busy = Some((if live { "Live push" } else { "Sending to device" }.into(), 0, msgs.len()));
         self.device.elek(ElekCmd::Push { msgs, settings, force, model });
@@ -1433,14 +1526,25 @@ impl App {
         self.start_import(msg, &path, lookup, false);
     }
 
-    fn elek_read(&mut self) {
+    /// Read the project from the device. `cached`: empty patterns known
+    /// unchanged since the last read (a read-back after a push), not asked
+    /// for again; empty for a full read.
+    fn elek_read(&mut self, cached: Vec<crate::device::DumpMsg>) {
+        self.elek.keep_blank.clear();
         self.elek.busy = Some(("Reading project".into(), 0, 129));
         let known = self.elek.names.keys().copied().collect();
         let ctl = std::sync::Arc::new(crate::device::ReadCtl::default());
         ctl.open.store(self.elek.proj.bank_mask(), std::sync::atomic::Ordering::Relaxed);
         self.elek.reading = Some(ctl.clone());
         self.elek.read_shown = false;
-        self.device.elek(ElekCmd::Read { known, ctl });
+        // What the page in view shows comes first; the docked pool (or the
+        // Samples page) wants its names.
+        let first = match (self.elek_mode, self.elek.page) {
+            (true, elek_view::ElekPage::Project) => crate::device::ReadFirst::Patterns,
+            (true, elek_view::ElekPage::Library) => crate::device::ReadFirst::Sounds,
+            _ => crate::device::ReadFirst::Names,
+        };
+        self.device.elek(ElekCmd::Read { known, ctl, cached, first });
     }
 
     pub(super) fn elek_event(&mut self, e: ElekEv) {
@@ -1678,6 +1782,7 @@ impl App {
             }
             ElekEv::PushStale => {
                 st.busy = None;
+                st.keep_blank.clear();
                 st.expect = None;
                 st.expect_patterns = None;
                 st.status = "Not pushed: the project on the device changed since it was read".into();
@@ -1686,13 +1791,15 @@ impl App {
             ElekEv::Pushed(r) => match r {
                 Ok(n) => {
                     st.status = format!("Sent {n} messages; reading back to check…");
-                    self.elek_read();
+                    let cached = std::mem::take(&mut st.keep_blank);
+                    self.elek_read(cached);
                 }
                 Err(e) => {
                     st.busy = None;
                     st.expect = None;
                     st.expect_patterns = None;
                     st.expect_sounds = None;
+                    st.keep_blank.clear();
                     st.status = format!("Push failed: {e}");
                     self.errors.push(format!("push to device: {e}"));
                 }

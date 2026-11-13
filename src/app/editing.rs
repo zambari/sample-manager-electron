@@ -994,7 +994,7 @@ impl App {
                 }
                 EdIntent::SwitchKit(i) => self.switch_kit(i),
                 EdIntent::NewKit => self.new_kit(),
-                EdIntent::ElekMode => self.enter_full_elek(),
+                EdIntent::ToggleDevice => self.toggle_device(),
                 EdIntent::ShowDrive => self.show_drive(),
                 EdIntent::DevicePage(page) => {
                     self.elek.page = page;

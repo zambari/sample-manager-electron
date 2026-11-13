@@ -208,8 +208,18 @@ impl Worker {
                     self.busy.clear();
                 }
                 Cmd::Elek(cmd) => self.elek(cmd),
+                Cmd::Release => self.release(),
             }
         }
+    }
+
+    /// Switched off: close the ports, quietly (no "lost" event: the UI
+    /// already folded the device panels).
+    pub(super) fn release(&mut self) {
+        if self.conn.take().is_some() {
+            crate::log::line("device: ports closed (switched off)".to_owned());
+        }
+        self.em.send(Ev::DeviceStatus(Err("Switched off".into())));
     }
 
     pub(super) fn list_now(&mut self, path: PathBuf, generation: u64) {
@@ -224,6 +234,12 @@ impl Worker {
 
     /// Drop the connection if the device's port is gone.
     pub(super) fn check_alive(&mut self) {
+        if super::switched_off() {
+            if self.conn.is_some() {
+                self.release();
+            }
+            return;
+        }
         if self.conn.as_mut().is_some_and(|c| !c.probe()) {
             self.link_failed("Device disconnected".into());
         }
@@ -253,6 +269,7 @@ impl Worker {
                 Cmd::Job { job, cancel, task } if jumps_queue(&task, &self.busy, &self.later) => {
                     self.job(job, &cancel, task)
                 }
+                Cmd::Release => self.release(),
                 job => self.later.push_back(job),
             }
         }
@@ -328,6 +345,10 @@ impl Worker {
     /// Run `f` on the connection, opening it first if needed. A link failure
     /// closes it again so the next call starts fresh.
     pub(super) fn with_conn<T>(&mut self, f: impl FnOnce(&mut Conn) -> R<T>) -> Result<T, String> {
+        if super::switched_off() {
+            self.conn = None;
+            return Err("Device switched off (click DEVICE to connect)".into());
+        }
         if self.conn.is_none() {
             match Conn::open() {
                 Ok(c) => {

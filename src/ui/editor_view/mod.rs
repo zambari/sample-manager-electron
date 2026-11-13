@@ -69,8 +69,9 @@ pub enum EdIntent {
     SwitchKit(usize),
     /// Start another kit from the sample's selection.
     NewKit,
-    /// Open the Device view in the editor's place.
-    ElekMode,
+    /// The DEVICE switch: close the device panels and its MIDI ports, or
+    /// connect again.
+    ToggleDevice,
     /// Open the Device view on this page (Samples / Patterns).
     DevicePage(crate::ui::elek_view::ElekPage),
     /// The +Drive tab next to Patterns: show the +Drive in the right column.

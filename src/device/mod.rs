@@ -13,9 +13,9 @@
 
 mod conn;
 mod elek;
-pub use elek::{file, library, patterns, Cell, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, ReadCtl, SavedProject};
+pub use elek::{file, library, machines, patterns, Cell, DumpMsg, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, ReadCtl, ReadFirst, SavedProject};
 mod presence;
-pub use presence::{Presence, presence, start as watch_presence};
+pub use presence::{Presence, presence, start as watch_presence, switched_off};
 mod proto;
 pub(crate) mod sample;
 mod transfer;
@@ -98,6 +98,8 @@ enum Cmd {
         task: Task,
     },
     Elek(ElekCmd),
+    /// Close the MIDI ports (the device was switched off).
+    Release,
 }
 
 pub struct Device {
@@ -137,6 +139,15 @@ impl Device {
     /// Project dump work (see [`elek`]): runs in turn with other jobs.
     pub fn elek(&self, cmd: ElekCmd) {
         let _ = self.tx.send(Cmd::Elek(cmd));
+    }
+
+    /// Switch the device off or on. Off closes the MIDI ports and refuses
+    /// every request until it is switched on again.
+    pub fn switch_off(&self, off: bool) {
+        presence::set_off(off);
+        if off {
+            let _ = self.tx.send(Cmd::Release);
+        }
     }
 }
 

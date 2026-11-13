@@ -334,6 +334,47 @@ pub fn confirm_device_load(ctx: &Context, path: &std::path::Path, bytes: u64) ->
     answer
 }
 
+/// The device came back (replugged, switched on, or another machine)
+/// while `edits` unpushed project edits were open. `Some(true)` = drop them
+/// and read the device, `Some(false)` = keep them, `None` = still open.
+pub fn device_reconnected(ctx: &Context, edits: usize) -> Option<bool> {
+    let mut answer = None;
+    Modal::new(Id::unique("device_reconnected_modal")).show(ctx, |ui| {
+        ui.set_width(440.0);
+        ui.heading("Device reconnected");
+        ui.add_space(6.0);
+        ui.label(
+            "The device was disconnected, so its project may have changed meanwhile \
+             (edited on the machine, another project loaded, or a different unit plugged in).",
+        );
+        ui.add_space(4.0);
+        ui.label(format!(
+            "You have {edits} unpushed edit(s). Reading the project again drops them. \
+             Keeping them shows a project that may not match the device; a push still checks \
+             first and holds back if the device's project changed."
+        ));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Keep my edits").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Read the device").on_hover_text("↩").clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    });
+    ctx.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            answer = Some(false);
+        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+            answer = Some(true);
+        }
+    });
+    answer
+}
+
 /// A device file was renamed and has a local copy: rename that too?
 /// `Some(true)` = rename, `Some(false)` = leave it, `None` = still open.
 pub fn rename_local(ctx: &Context, from: &std::path::Path, to: &std::path::Path) -> Option<bool> {

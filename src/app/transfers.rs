@@ -766,16 +766,7 @@ impl App {
                     self.device_status = Some(s)
                 }
                 Ev::Elek(e) => self.elek_event(e),
-                Ev::DeviceLost => {
-                    for role in [Role::Source, Role::Dest] {
-                        if !self.pane_mut(role).leave_device() {
-                            let id = self.new_tab_id();
-                            self.pane_mut(role).add_tab(DirTab::new(id, dirs_home()));
-                            let i = self.pane(role).active;
-                            self.reload(role, i);
-                        }
-                    }
-                }
+                Ev::DeviceLost => self.leave_device_tabs(),
                 Ev::DirSize { path, bytes, files } => {
                     self.sizes.set(path, bytes, files);
                 }

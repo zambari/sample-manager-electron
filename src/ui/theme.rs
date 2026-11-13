@@ -112,12 +112,14 @@ pub fn pane_title(label: &str, focused: bool) -> impl egui::Widget + '_ {
 /// the active mode is always underlined so you can tell which one you're in;
 /// it lights up orange only when its column also has keyboard focus.
 pub fn mode_title(label: &str, active: bool, focused: bool) -> impl egui::Widget + '_ {
-    accent_title(label, active, focused, ACCENT, ACCENT_BRIGHT)
+    accent_title(label, active, focused, false, ACCENT, ACCENT_BRIGHT)
 }
 
 /// [`mode_title`] in the given accent colours (`fill` for the underline,
 /// `bright` for focused text).
-fn accent_title(label: &str, active: bool, focused: bool, fill: Color32, bright: Color32) -> impl egui::Widget + '_ {
+/// `lit`: drawn white even when not active (the DEVICE switch with a
+/// device connected).
+fn accent_title(label: &str, active: bool, focused: bool, lit: bool, fill: Color32, bright: Color32) -> impl egui::Widget + '_ {
     move |ui: &mut egui::Ui| {
         let text = egui::RichText::new(label.to_uppercase())
             .size(12.0)
@@ -126,6 +128,8 @@ fn accent_title(label: &str, active: bool, focused: bool, fill: Color32, bright:
             text.color(bright)
         } else if active {
             text.color(ui.visuals().strong_text_color())
+        } else if lit {
+            text.color(Color32::WHITE)
         } else {
             text.color(ui.visuals().weak_text_color())
         };
@@ -217,13 +221,20 @@ pub fn device_group<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) 
 pub fn device_switch(ui: &mut egui::Ui, active: bool, focused: bool) -> egui::Response {
     let presence = crate::device::presence();
     let label = device_label("Device");
-    let mut resp = device_dimmed(ui, |ui| ui.add(accent_title(&label, active, focused, DEVICE_ACCENT, DEVICE_ACCENT_BRIGHT)));
+    let connected = matches!(presence, crate::device::Presence::One(_) | crate::device::Presence::Many(_));
+    let mut resp = device_dimmed(ui, |ui| ui.add(accent_title(&label, active, focused, connected, DEVICE_ACCENT, DEVICE_ACCENT_BRIGHT)));
     if matches!(presence, crate::device::Presence::Many(_)) {
         let err = ui.visuals().error_fg_color;
         resp |= ui.label(egui::RichText::new("⚠").color(err).strong());
     }
+    if presence == crate::device::Presence::Off {
+        resp |= ui.label(egui::RichText::new("OFF").font(oled_font(10.0)).weak());
+    }
     if let Some(why) = presence.problem() {
         resp = resp.on_hover_text(why);
+    }
+    if presence != crate::device::Presence::Off {
+        resp = resp.on_hover_text("Click to switch the device off: closes its panels and MIDI ports so another app (a DAW) can use it.");
     }
     resp
 }

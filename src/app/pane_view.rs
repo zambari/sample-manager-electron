@@ -327,6 +327,12 @@ impl App {
     /// back re-list device tabs so they reconnect without a manual Refresh.
     pub(super) fn track_presence(&mut self) {
         use crate::device::Presence;
+        use crate::ui::elek_view::DevicePick;
+        if self.elek_mode {
+            self.device_last = Some(DevicePick::Page(self.elek.page));
+        } else if self.drive_in_col() {
+            self.device_last = Some(DevicePick::Drive);
+        }
         let now = crate::device::presence();
         if now == self.last_presence {
             return;
@@ -335,8 +341,16 @@ impl App {
         match now {
             Presence::Absent => {
                 self.device_status = Some(Err("Disconnected: no Elektron device on USB MIDI".into()));
+                // Unplugged: fold the device panels like the switch does,
+                // but keep watching, so plugging back in lights it up again.
+                if before != Presence::Unknown {
+                    self.fold_device();
+                }
             }
-            Presence::One(_) if matches!(before, Presence::Absent | Presence::Many(_)) => {
+            Presence::Off => {
+                self.device_status = Some(Err("Switched off".into()));
+            }
+            Presence::One(_) if matches!(before, Presence::Absent | Presence::Many(_) | Presence::Off) => {
                 self.device_status = None;
                 for role in [Role::Source, Role::Dest] {
                     for i in 0..self.pane(role).tabs.len() {
@@ -349,6 +363,16 @@ impl App {
                     self.elek.projects = None;
                     self.device.elek(crate::device::ElekCmd::ListProjects);
                 }
+                self.device_reconnected();
+                // Back where the user was in the device group.
+                match self.device_last {
+                    Some(DevicePick::Page(page)) => {
+                        self.elek.page = page;
+                        self.enter_full_elek();
+                    }
+                    Some(DevicePick::Drive) => self.show_drive(),
+                    None => {}
+                }
             }
             _ => {}
         }
@@ -357,7 +381,8 @@ impl App {
     pub(super) fn device_badge(&mut self, ui: &mut egui::Ui) {
         if let Some(tip) = crate::device::presence().problem() {
             let many = matches!(crate::device::presence(), crate::device::Presence::Many(_));
-            let text = if many { "⚠ several devices" } else { "● disconnected" };
+            let off = crate::device::presence() == crate::device::Presence::Off;
+            let text = if many { "⚠ several devices" } else if off { "○ switched off" } else { "● disconnected" };
             ui.label(egui::RichText::new(text).color(ui.visuals().error_fg_color).small())
                 .on_hover_text(tip);
             return;

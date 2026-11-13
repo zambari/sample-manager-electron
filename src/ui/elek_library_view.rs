@@ -11,17 +11,20 @@
 //!   track names.
 //! - **Samples**: each pool sample and what plays it (kit tracks, sound pool,
 //!   use count including sample locks), to spot unused ones.
+//! - **Presets**: the sound presets under `/soundbanks`; right-click or
+//!   double-click one to put it into the first empty pool sound.
 //! - **+Drive data**: the device's data tree (`/soundbanks` for presets,
 //!   `/projects`, …), folders listed when opened.
 //!
 //! The sound pool can be edited (with the whole project read): drag a sound
 //! onto another to swap them (onto an empty one to move it), right-click to
-//! rename or delete, drag a preset from the panel beside it onto an empty
+//! rename or delete, add a preset from the Presets tab into the first empty
 //! sound. Edits sit in `LibraryView::sounds` and go out with the project
 //! push (`ElekProject::build_push`), sound locks renumbered. The other tabs
 //! are read-only. Data comes from `device::library` and the patterns as
 //! read (`Patterns::info`).
 
+use crate::device::machines::{plays_sample, SrcParam};
 use crate::device::library::{data_child, sounds_as_read, sounds_changed, DataItem, PoolSound, Preset, SoundCell, SoundSrc, SOUND_POOL, SRC_NAMES};
 use crate::device::patterns::{self, PatState, PATTERNS};
 use crate::device::ElekProject;
@@ -41,6 +44,7 @@ pub enum LibTab {
     SoundPool,
     Kits,
     Samples,
+    Presets,
     Drive,
 }
 
@@ -257,6 +261,7 @@ pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElekState) {
         (LibTab::SoundPool, "Sound pool", "The project's 128 pool sounds, the sample each plays and the kit tracks carrying the same sound"),
         (LibTab::Kits, "Kits", "Each pattern's kit, grouped when their track sounds are the same"),
         (LibTab::Samples, "Samples", "Each pool sample and what plays it"),
+        (LibTab::Presets, "Presets", "Sound presets saved on the +Drive (/soundbanks), to add to the sound pool"),
         (LibTab::Drive, "+Drive data", "Sound presets (/soundbanks), saved projects and the rest of the device's data tree"),
     ] {
         ui.selectable_value(&mut lib.tab, tab, label).on_hover_text(tip);
@@ -281,7 +286,7 @@ pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElekState) {
         LibTab::SoundPool => {
             ui.add(theme::soft_toggle(&mut lib.hide_blank, "Hide empty"));
         }
-        LibTab::Drive => {}
+        LibTab::Presets | LibTab::Drive => {}
     }
 }
 
@@ -291,14 +296,16 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     // Without a project the tabs still show: the +Drive tree doesn't need one.
     if st.project.is_none() {
         ui.horizontal_wrapped(|ui| view_tools(ui, st));
-        if st.lib.tab != LibTab::Drive {
+        if !matches!(st.lib.tab, LibTab::Drive | LibTab::Presets) {
             elek_view::load_screen(ui, st, &mut out);
             elek_view::finish(ui, st, &mut out);
             return out;
         }
     }
     let hint = if st.lib.tab == LibTab::SoundPool && sounds_locked(st).is_none() {
-        "Drag a sound onto another to swap them (onto an empty one to move it); right-click to rename or delete; drag presets from the right onto an empty sound. ⬆ Push to device sends the changes, with every pattern's sound locks following their sounds."
+        "Drag a sound onto another to swap them (onto an empty one to move it); right-click to rename or delete; add presets from the Presets tab. ⬆ Push to device sends the changes, with every pattern's sound locks following their sounds."
+    } else if st.lib.tab == LibTab::Presets {
+        "Right-click a preset (or double-click it) to put it into the first empty pool sound; click to read it. Needs the whole project read."
     } else {
         "Read-only: nothing on this tab changes the project or the device. Kits and samples are as read from the device."
     };
@@ -308,6 +315,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         LibTab::Kits => kits(ui, st, &mut ping, &mut out),
         LibTab::Samples => samples(ui, st, &mut ping, &mut out),
         LibTab::SoundPool => sound_pool(ui, st, &mut ping, &mut out),
+        LibTab::Presets => presets_panel(ui, st, &mut out),
         LibTab::Drive => drive(ui, st, &mut out),
     }
     if let Some(key) = ping {
@@ -542,27 +550,40 @@ fn kit_uses(p: &ElekProject, s: &PoolSound) -> Vec<(usize, usize)> {
     out
 }
 
-/// SRC page columns shown (SMP is the sample column).
+/// SRC page places shown as columns (place 3, SMP, is the sample column).
 const SRC_SHOWN: [usize; 7] = [0, 1, 2, 4, 5, 6, 7];
-const SRC_W: f32 = 40.0;
+const SRC_W: f32 = 44.0;
+const MACHINE_W: f32 = 90.0;
 
-/// One SRC value as the device shows it: TUNE around 64, the rest raw.
-fn src_text(i: usize, (v, _fine): (u8, u8)) -> String {
-    if i == 0 {
-        let t = v as i32 - 64;
-        if t > 0 { format!("+{t}") } else { t.to_string() }
-    } else {
-        v.to_string()
-    }
+/// The parameter the sound's machine keeps in SRC place `place`, if any.
+fn param_at(s: &PoolSound, place: usize) -> Option<&SrcParam> {
+    s.params.iter().find(|q| q.place == place)
+}
+
+/// The machine name, or "—" when its byte isn't known for this sound version.
+fn machine_text(s: &PoolSound) -> String {
+    s.machine.as_ref().map(|(_, n)| n.clone()).unwrap_or_else(|| "—".into())
 }
 
 /// The whole SRC page, with fine bytes, for a tooltip.
-fn src_detail(src: &[(u8, u8)]) -> String {
-    if src.is_empty() {
+fn src_detail(s: &PoolSound) -> String {
+    if s.src.is_empty() {
         return "SRC page layout not known for this sound version".into();
     }
-    let vals: Vec<String> = src.iter().zip(SRC_NAMES).map(|((v, f), n)| format!("{n} {v} (fine {f})")).collect();
-    format!("SRC page as stored (read as a one-shot sound; other Digitakt II machines use these places for their own parameters):\n{}", vals.join("\n"))
+    let head = match &s.machine {
+        Some((id, n)) => format!("Machine {n} (byte {id}). SRC page as stored; names ending in ? are guesses, see src/device/elek/machines.rs:"),
+        None => "SRC page as stored, read as a one-shot sound (machine byte not known for this sound version):".into(),
+    };
+    let vals: Vec<String> = s
+        .src
+        .iter()
+        .enumerate()
+        .map(|(i, (v, f))| match param_at(s, i) {
+            Some(q) => format!("{} {}  (stored {v}, fine {f})", q.name, q.text),
+            None => format!("place {}: unused  (stored {v}, fine {f})", i + 1),
+        })
+        .collect();
+    format!("{head}\n{}", vals.join("\n"))
 }
 
 /// Pool sounds with the same name and sample file as `s`.
@@ -643,18 +664,7 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
     if p.partial {
         ui.colored_label(WARN, "Not every pattern was read: the kit column is short.");
     }
-    // The pool on the left, presets to drag in on the right.
-    let avail = ui.available_rect_before_wrap();
-    let side = if editable { 280.0f32.min(avail.width() * 0.4) } else { 0.0 };
-    let left = egui::Rect::from_min_max(avail.min, egui::pos2(avail.max.x - side, avail.max.y));
-    let mut lui = ui.new_child(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::top_down(egui::Align::Min)));
-    let drop = sound_rows(&mut lui, st, &sounds, editable, ping);
-    if editable {
-        let right = egui::Rect::from_min_max(egui::pos2(avail.max.x - side + 8.0, avail.min.y), avail.max);
-        let mut rui = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::top_down(egui::Align::Min)));
-        presets_panel(&mut rui, st, out);
-    }
-    ui.allocate_rect(avail, egui::Sense::hover());
+    let drop = sound_rows(ui, st, &sounds, editable, ping);
     // The dragged thing follows the pointer.
     let ctx = ui.ctx().clone();
     if let (Some(d), Some(pos)) = (egui::DragAndDrop::payload::<SoundDrag>(&ctx), ctx.pointer_latest_pos()) {
@@ -662,7 +672,7 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
             SoundDrag::Pool(i) => format!("{:03} {}", i + 1, sounds.get(*i).map(|s| s.name.as_str()).unwrap_or("")),
             SoundDrag::Preset(_, name) => format!("preset {name}"),
         };
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("sound_drag")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("sound_drag")));
         let font = egui::FontId::proportional(13.0);
         let galley = painter.layout_no_wrap(label, font, OLED);
         let r = egui::Rect::from_min_size(pos + egui::vec2(14.0, -8.0), galley.size() + egui::vec2(8.0, 4.0));
@@ -699,12 +709,16 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
         .map(|s| (s, kit_uses(p, s)))
         .collect();
     ui.horizontal(|ui| {
-        cell(ui, 50.0, RichText::new("#").small().weak());
+        cell(ui, 30.0, RichText::new("#").small().weak());
         cell(ui, 160.0, RichText::new("Sound").small().weak());
-        cell(ui, 220.0, RichText::new("Sample").small().weak());
+        cell(ui, 150.0, RichText::new("Sample").small().weak());
+        cell(ui, MACHINE_W, RichText::new("Machine").small().weak()).on_hover_text("The sound's machine, from its machine byte. Names ending in ? are guesses");
         for i in SRC_SHOWN {
-            cell(ui, SRC_W, RichText::new(SRC_NAMES[i]).small().weak())
-                .on_hover_text("SRC page, as stored. Read as a one-shot sound: on the Digitakt II other machines keep their own parameters here");
+            cell(ui, SRC_W, RichText::new(format!("SRC {}", i + 1)).small().weak()).on_hover_text(format!(
+                "SRC page place {} (one-shot: {}). Each machine keeps its own parameter here, named in the cell; ? = not confirmed yet",
+                i + 1,
+                SRC_NAMES[i]
+            ));
         }
         cell(ui, 60.0, RichText::new("Kit tracks").small().weak())
             .on_hover_text("Kit tracks with the same sound name and sample: probably loaded from this pool sound (or saved into it)");
@@ -720,16 +734,29 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
             let edited = editable && cell_of(s.index) != SoundCell::as_read(s.index);
             let row = ui.horizontal(|ui| {
                 let color = if s.blank { OLED_DIM } else if edited { DIFFERS } else { OLED };
-                cell(ui, 50.0, RichText::new(format!("{:03}", s.index + 1)).color(OLED_DIM));
-                cell(ui, 160.0, RichText::new(if s.name.is_empty() { "—" } else { &s.name }).color(color)).on_hover_text(src_detail(&s.src));
+                cell(ui, 30.0, RichText::new(format!("{:03}", s.index + 1)).color(OLED_DIM));
+                cell(ui, 160.0, RichText::new(if s.name.is_empty() { "—" } else { &s.name }).color(color)).on_hover_text(src_detail(s));
                 let (n, key) = sample(p, &st.names, s.slot);
-                let r = cell(ui, 220.0, RichText::new(n).color(if s.slot == 0 { OLED_DIM } else { color }));
+                let no_sample = s.machine.as_ref().is_some_and(|(id, _)| !plays_sample(p.model, *id));
+                let n = if no_sample { "— (synth)".to_owned() } else { n };
+                let r = cell(ui, 150.0, RichText::new(n).color(if s.slot == 0 || no_sample { OLED_DIM } else { color }));
                 if let (true, Some(k)) = (r.on_hover_text("Click: point it out in the docked pool").clicked(), key) {
                     *ping = Some(k);
                 }
+                cell(ui, MACHINE_W, RichText::new(if s.blank { String::new() } else { machine_text(s) }).color(color)).on_hover_text(src_detail(s));
                 for i in SRC_SHOWN {
-                    let t = s.src.get(i).map(|&v| src_text(i, v)).unwrap_or_default();
-                    cell(ui, SRC_W, RichText::new(t).color(color));
+                    match param_at(s, i).filter(|_| !s.blank) {
+                        Some(q) => {
+                            let mut job = egui::text::LayoutJob::default();
+                            let (style, fs, al) = (ui.style().clone(), egui::FontSelection::Default, egui::Align::Center);
+                            RichText::new(format!("{} ", q.name)).small().color(OLED_DIM).append_to(&mut job, &style, fs, al);
+                            RichText::new(&q.text).color(color).append_to(&mut job, &style, egui::FontSelection::Default, al);
+                            cell(ui, SRC_W, job).on_hover_text(format!("{} {}: stored {}, fine {}", q.name, q.text, q.raw.0, q.raw.1));
+                        }
+                        None => {
+                            cell(ui, SRC_W, "");
+                        }
+                    }
                 }
                 cell(ui, 60.0, RichText::new(if uses.is_empty() { "—".into() } else { uses.len().to_string() }).color(color));
                 let mut pats: Vec<usize> = uses.iter().map(|u| u.0).collect();
@@ -751,8 +778,8 @@ fn sound_rows(ui: &mut egui::Ui, st: &mut ElekState, sounds: &[PoolSound], edita
             // The row as a whole: dragged by its number and name, dropped
             // on anywhere, right-clicked anywhere.
             let rect = row.response.rect;
-            let grip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + 210.0, rect.max.y));
-            let id = ui.id().with(("pool_sound", s.index));
+            let grip = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + 190.0, rect.max.y));
+            let id = ui.scope_id().with(("pool_sound", s.index));
             let r = ui.interact(grip, id, egui::Sense::click_and_drag());
             if r.drag_started() && !s.blank {
                 egui::DragAndDrop::set_payload(ui.ctx(), SoundDrag::Pool(s.index));
@@ -848,7 +875,7 @@ fn rename_modal(ctx: &egui::Context, st: &mut ElekState) {
     let Some((i, text, focus)) = st.lib.renaming.as_mut() else { return };
     let i = *i;
     let mut done: Option<bool> = None;
-    egui::Modal::new(egui::Id::new("pool_sound_rename")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::unique("pool_sound_rename")).show(ctx, |ui| {
         ui.heading(format!("Rename pool sound {:03}", i + 1));
         ui.add_space(4.0);
         let r = ui.add(egui::TextEdit::singleline(text).char_limit(patterns::NAME_MAX).desired_width(220.0));
@@ -880,16 +907,23 @@ fn rename_modal(ctx: &egui::Context, st: &mut ElekState) {
     }
 }
 
-/// The presets on the +Drive (`/soundbanks`), to drag onto an empty sound.
+/// The presets on the +Drive (`/soundbanks`), to put into the first empty
+/// pool sound.
 fn presets_panel(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>) {
     const ROOT: &str = "/soundbanks";
+    let locked = sounds_locked(st);
+    let editable = locked.is_none();
+    let mut place: Option<(String, String)> = None;
     let lib = &mut st.lib;
     let present = crate::device::presence().available();
     if present && !lib.data.contains_key(ROOT) && lib.data_pending.insert(ROOT.into()) {
         out.push(ElekIntent::ListData(ROOT.into()));
     }
-    ui.label(RichText::new("Presets").color(OLED));
-    ui.label(RichText::new("Drag one onto an empty sound. Its sample is found in the sample pool, or goes into the first empty slot.").weak().small());
+    let why = match locked {
+        Some(why) => format!("Not addable: {why}"),
+        None => "Its sample is found in the sample pool, or goes into the first empty slot.".into(),
+    };
+    ui.label(RichText::new(why).weak().small());
     let mut rows: Vec<DataRow> = Vec::new();
     walk(lib, ROOT, 0, &mut rows);
     let mut toggle = None;
@@ -919,18 +953,24 @@ fn presets_panel(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent
                                 None => "",
                             }
                         };
-                        let r = ui.add(egui::Label::new(RichText::new(format!("{:03} {}", it.slot, it.name)).color(OLED)).truncate().selectable(false).sense(egui::Sense::click_and_drag()));
+                        let r = ui.add(egui::Label::new(RichText::new(format!("{:03} {}", it.slot, it.name)).color(OLED)).truncate().selectable(false).sense(egui::Sense::click()));
                         ui.label(RichText::new(state).weak());
-                        if r.drag_started() {
-                            egui::DragAndDrop::set_payload(ui.ctx(), SoundDrag::Preset(at.clone(), it.name.clone()));
+                        if r.double_clicked() && editable {
+                            place = Some((at.clone(), it.name.clone()));
                         }
+                        r.context_menu(|ui| {
+                            if ui.add_enabled(editable, egui::Button::new("Add to sound pool (first empty sound)")).clicked() {
+                                place = Some((at.clone(), it.name.clone()));
+                                ui.close();
+                            }
+                        });
                         let tip = match lib.presets.get(&at) {
                             Some(Ok(p)) => match &p.sound {
-                                Some(s) => format!("“{}”: {}", s.name, src_detail(&s.src)),
+                                Some(s) => format!("“{}”: {}", s.name, src_detail(s)),
                                 None => format!("{} bytes, not a sound struct this app knows", p.bytes),
                             },
                             Some(Err(e)) => e.clone(),
-                            None => "Drag onto an empty pool sound. Click to read it first".into(),
+                            None => "Click to read it; right-click or double-click to add it to the sound pool".into(),
                         };
                         if r.on_hover_text(tip).clicked() && present && !lib.preset_pending.contains(&at) {
                             read = Some(at);
@@ -951,6 +991,14 @@ fn presets_panel(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent
             if !lib.data.contains_key(&path) && lib.data_pending.insert(path.clone()) {
                 out.push(ElekIntent::ListData(path));
             }
+        }
+    }
+    if let Some((path, name)) = place {
+        let Some(p) = st.project.as_deref() else { return };
+        let sounds = p.edited_sounds(&st.lib.sounds);
+        match sounds.iter().position(|s| s.blank) {
+            Some(to) => drop_sound(st, SoundDrag::Preset(path, name), to, &sounds, out),
+            None => st.status = format!("No empty pool sound for “{name}”: delete one first"),
         }
     }
 }
@@ -1087,15 +1135,15 @@ fn preset_cell(ui: &mut egui::Ui, lib: &LibraryView, item: &str, pool: Option<&V
                 ui.label(RichText::new(format!("{} bytes, not a sound struct we know", p.bytes)).color(WARN)).on_hover_text(tip);
                 return;
             };
-            let vals: Vec<String> = SRC_SHOWN.iter().filter_map(|&i| Some(format!("{} {}", SRC_NAMES[i], src_text(i, *s.src.get(i)?)))).collect();
+            let vals: Vec<String> = SRC_SHOWN.iter().filter_map(|&i| param_at(s, i)).map(|q| format!("{} {}", q.name, q.text)).collect();
             let same = same_in_pool(pool, s);
             let pool_txt = match (pool, same.is_empty()) {
                 (None, _) => "pool not read".to_owned(),
                 (Some(_), true) => "not in the sound pool".to_owned(),
                 (Some(_), false) => format!("= pool {}", same.iter().map(|i| format!("{:03}", i + 1)).collect::<Vec<_>>().join(", ")),
             };
-            let text = format!("“{}”  {}  ·  {pool_txt}", s.name, vals.join(" "));
-            ui.label(RichText::new(text).color(OLED)).on_hover_text(format!("{tip}\n\n{}", src_detail(&s.src)));
+            let text = format!("“{}”  {}  {}  ·  {pool_txt}", s.name, machine_text(s), vals.join(" "));
+            ui.label(RichText::new(text).color(OLED)).on_hover_text(format!("{tip}\n\n{}", src_detail(s)));
         }
     }
 }

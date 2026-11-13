@@ -15,6 +15,7 @@
 
 use super::*;
 use std::sync::Arc;
+use super::machines::{machine_id, machine_name, src_params, SrcParam};
 
 /// Where pool sound `i` comes from after the Sounds page's edits.
 #[derive(Clone, PartialEq, Debug)]
@@ -283,7 +284,8 @@ impl ElekProject {
             }
         }
         let d = blob.get(..size).ok_or("preset shorter than a sound")?.to_vec();
-        let file = sound_file(m, sv).and_then(|f| {
+        let f = sound_file(m, sv).ok_or_else(|| format!("where a version {sv} sound keeps its sample file isn't known, so its sample can't be found"))?;
+        let file = Some(f).and_then(|f| {
             let e = PoolEntry { inode: be32(&d, f)?, hash: be32(&d, f + 4)?, size: be32(&d, f + 8)?, seqnr: be32(&d, f + 12)? };
             (!e.is_empty() && e.hash != 0 && e.size > 16).then_some(e)
         });
@@ -315,9 +317,14 @@ pub struct PoolSound {
     pub blank: bool,
     /// The SRC page as `(value, fine)`, in the order the device shows it
     /// for a one-shot sound: TUNE, PLAY, BIT, SMP, STRT, LEN, LOOP, LEV.
-    /// Empty where the layout isn't known. On the Digitakt II other
-    /// machines put other parameters here (machine byte not found yet).
+    /// Empty where the layout isn't known. Other machines put other
+    /// parameters in these places: see `params` and `machines.rs`.
     pub src: Vec<(u8, u8)>,
+    /// The machine byte and its name, where the layout is known.
+    pub machine: Option<(u8, String)>,
+    /// `src` as this machine shows it (one-shot names when the machine
+    /// isn't known), the sample place included.
+    pub params: Vec<SrcParam>,
     /// The sample file the sound was made with (+Drive hash), if any.
     pub file_hash: Option<u32>,
 }
@@ -335,6 +342,9 @@ impl PoolSound {
 /// value then fine), from comparing default and edited sounds: the sample
 /// slot sits in the middle of the page on both models, the level of 100
 /// after it. Digitakt II has 4 more bytes after its 2-byte slot.
+///
+/// What each place means depends on the sound's machine: see `machines.rs`
+/// (machine byte DT1 sound+124, DT II sound+210, tables per machine).
 fn src_offsets(m: Model, sv: u32) -> Option<[usize; 8]> {
     let slot = sound_slot(m, sv)?;
     Some(if m == DT2 {
@@ -370,7 +380,10 @@ pub(super) fn parse_sound(m: Model, index: usize, d: &[u8]) -> PoolSound {
         let inode = be32(d, at)?;
         (inode != u32::MAX).then(|| be32(d, at + 4)).flatten().filter(|&h| h != 0)
     });
-    PoolSound { index, name, slot, blank, src, file_hash }
+    let id = machine_id(m, sv, d);
+    let params = src_params(m, id.unwrap_or(0), &src);
+    let machine = id.map(|i| (i, machine_name(m, i)));
+    PoolSound { index, name, slot, blank, src, machine, params, file_hash }
 }
 
 /// A sound preset read from the +Drive (`/soundbanks/…`): the bytes as
@@ -571,7 +584,7 @@ impl Worker {
         Ok(p)
     }
 
-    /// The project read's last part: every pool sound, one request each,
+    /// The project read's part before the patterns: every pool sound, one request each,
     /// into `st` (only real sound structs are kept, as the whole dump
     /// would). A sound that doesn't come even when asked twice means the
     /// device doesn't answer these, and the whole dump is read instead.
@@ -580,7 +593,11 @@ impl Worker {
         let em = self.em.clone();
         let m = match st.m {
             Some(m) => m,
-            None => self.with_conn(|c| c.model())?,
+            None => {
+                let m = self.with_conn(|c| c.model())?;
+                st.m = Some(m);
+                m
+            }
         };
         let started = Instant::now();
         let mut kept = 0;

@@ -78,6 +78,16 @@ pub struct PatternInfo {
     pub timing: Option<Timing>,
 }
 
+impl PatternInfo {
+    /// Playing it would play nothing: no note trig on any track (trigless
+    /// lock steps don't sound). Its kit may still point at samples. `false`
+    /// when the sequencer layout isn't known, unless it's a blank pattern.
+    pub fn silent(&self) -> bool {
+        self.state == PatState::Blank
+            || (!self.seq.is_empty() && self.seq.iter().all(|t| t.steps.iter().all(|s| *s != Step::Note)))
+    }
+}
+
 /// Pattern-level timing (DT1 v9/v10), in the bytes after the pattern name.
 /// Similar to the Analog Rytm's pattern struct: tempo ×120, master length
 /// (the device's RESET: all tracks restart; 1 = INF), master change (1 = OFF), then at +9 the scale mode (1 = per

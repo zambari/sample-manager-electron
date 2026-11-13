@@ -105,7 +105,15 @@ impl ElekProject {
         let bins = dir.join("decoded");
         std::fs::create_dir_all(&bins)?;
 
-        let syx: Vec<u8> = self.msgs[..self.base].iter().flat_map(|m| m.raw.iter().copied()).collect();
+        // Empty patterns (no note trigs; kits may be set up) are left out
+        // everywhere, .syx included: they're most of a project and say
+        // nothing. Unknown when the patterns didn't parse: keep them all.
+        let blank = self.blank_patterns();
+        let keep: Vec<&DumpMsg> = self.msgs[..self.base]
+            .iter()
+            .filter(|m| !(m.kind == PATTERN_KIT && blank.contains(&(m.index as usize))))
+            .collect();
+        let syx: Vec<u8> = keep.iter().flat_map(|m| m.raw.iter().copied()).collect();
         std::fs::write(dir.join("project.syx"), &syx)?;
 
         let tracks = self.model.kit_tracks();
@@ -116,9 +124,13 @@ impl ElekProject {
             "{} · {} · {} messages\n",
             self.model.name(),
             self.versions,
-            self.base
+            keep.len()
         );
-        for m in &self.msgs[..self.base] {
+        if !blank.is_empty() {
+            let labels: Vec<String> = blank.iter().map(|&i| pattern_label(i as u8)).collect();
+            let _ = writeln!(names, "{} empty patterns left out: {}\n", blank.len(), labels.join(" "));
+        }
+        for m in keep {
             let file = file_name(m);
             std::fs::write(bins.join(&file), &m.data)?;
             let lay = (m.kind == PATTERN_KIT).then(|| layout(self.model, &m.data)).flatten();
@@ -168,7 +180,7 @@ impl ElekProject {
         std::fs::write(dir.join("strings.tsv"), strings)?;
         std::fs::write(
             dir.join("README.txt"),
-            "project.syx   the dump exactly as received (the device's own SysEx Dump format)\n\
+            "project.syx   the dump as received (the device's own SysEx Dump format), empty patterns left out\n\
              decoded/      each message's payload after 7-bit decoding: offsets match elk-herd's CppStructs\n\
              names.txt     pattern, kit and per-track sound names at the offsets we know\n\
              strings.tsv   every printable run of 3+ chars: file, offset, region, text\n\n\

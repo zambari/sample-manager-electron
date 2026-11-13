@@ -10,6 +10,7 @@ use super::*;
 mod dump;
 pub mod file;
 pub mod library;
+pub mod machines;
 pub mod patterns;
 
 pub use patterns::{Cell, PatState, Patterns};
@@ -149,6 +150,9 @@ fn kit_sound_version(m: Model, v: u32) -> Option<u32> {
     })
 }
 
+/// The sample slot in a sound struct. DT1 v3: only a sample for the
+/// sample machines (machine byte sound+124 = 0..=3); synth machines use
+/// this byte for a parameter. Machine map: `machines.rs`.
 fn sound_slot(m: Model, v: u32) -> Option<usize> {
     Some(match (m, v) {
         (DT, 0) => 52,
@@ -454,6 +458,10 @@ impl Scan {
                         ));
                         continue;
                     }
+                    // Synth machines use the slot place for a parameter.
+                    if !machines::slot_is_sample(model, sv, &d[s..]) {
+                        continue;
+                    }
                     let enc = if model == DT2 { Enc::U16 } else { Enc::U8 };
                     self.refs.push(SlotRef {
                         msg: mi,
@@ -506,7 +514,7 @@ impl Scan {
                 };
                 self.snd_seen.insert(sv);
                 let enc = if model == DT2 { Enc::U16 } else { Enc::U8 };
-                if d.len() >= slot_at + 2 {
+                if d.len() >= slot_at + 2 && machines::slot_is_sample(model, sv, d) {
                     self.refs.push(SlotRef {
                         msg: mi,
                         at: slot_at,
@@ -856,6 +864,31 @@ impl ElekProject {
         Some(library::sounds_from(self.model, self.msgs[..self.base].iter().filter(|m| m.kind == SOUND)))
     }
 
+    /// Slots (of the 128) whose pattern arrived and is empty: no note trigs,
+    /// so playing it plays no sample, whatever its kit is set up with
+    /// (`PatternInfo::silent`). Empty if the patterns didn't parse.
+    pub fn blank_patterns(&self) -> Vec<usize> {
+        let Ok(pats) = &self.patterns else { return Vec::new() };
+        (0..patterns::PATTERNS)
+            .filter(|&i| pats.loaded[i] && pats.info[i].silent())
+            .collect()
+    }
+
+    /// The empty patterns a push with these edits leaves exactly as read,
+    /// as read: the read-back after it can take them from here instead of
+    /// asking the device again. Edited ones (trigs added, or kit samples
+    /// renumbered by a pool change) aren't here, so they're read back.
+    pub fn untouched_blanks(&self, order: &[u16], fills: &std::collections::HashMap<u16, PoolEntry>, cells: &[Cell], sounds: &[library::SoundCell]) -> Vec<DumpMsg> {
+        let Ok(pats) = &self.patterns else { return Vec::new() };
+        let data = self.new_data(order, fills, cells, sounds);
+        self.blank_patterns()
+            .into_iter()
+            .filter_map(|i| pats.msg_of(i))
+            .filter(|&mi| data[mi].as_ref().is_none_or(|d| *d == self.msgs[mi].data))
+            .map(|mi| self.msgs[mi].clone())
+            .collect()
+    }
+
     /// The pattern payloads as read, by slot (empty if not parsed; `None`
     /// for ones that never arrived).
     pub fn pattern_data(&self) -> Vec<Option<&[u8]>> {
@@ -940,6 +973,19 @@ pub struct SavedProject {
     pub size: u32,
 }
 
+/// The part of a project read to do first (after the quick sample pool
+/// list): the one the page in view needs. The rest follow, patterns as
+/// late as possible since they take longest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadFirst {
+    /// Sample names, then the sound pool, then the patterns.
+    Names,
+    /// Sound pool, then sample names, then the patterns.
+    Sounds,
+    /// Patterns, then sample names, then the sound pool.
+    Patterns,
+}
+
 pub enum ElekCmd {
     ListProjects,
     /// The project's sound pool, read-only (`library`).
@@ -953,6 +999,11 @@ pub enum ElekCmd {
     Read {
         known: std::collections::HashSet<(u32, u32)>,
         ctl: std::sync::Arc<ReadCtl>,
+        /// Empty patterns known not to have changed (a read-back after a
+        /// push): taken as they are, not asked for again.
+        cached: Vec<DumpMsg>,
+        /// Which part to read first: the one the open page shows.
+        first: ReadFirst,
     },
     /// Which of `lens` the +Drive knows file `hash` by (asked in order),
     /// for filling pool slot `slot` (old numbering).
@@ -1266,7 +1317,7 @@ impl Worker {
                 }));
                 self.em.send(Ev::Elek(ElekEv::Data { path, items }));
             }
-            ElekCmd::Read { known, ctl } => {
+            ElekCmd::Read { known, ctl, cached, first } => {
                 let mut asked = known;
                 prog("Reading sample pool", 0, 129);
                 // The pool comes last in the dump, so ask for it on its own
@@ -1275,24 +1326,68 @@ impl Worker {
                     let m = c.model()?;
                     Ok((m, c.read_settings_msg(m)?))
                 });
-                let mut st = match early.map(|(m, s)| (m, ElekProject::partial(m, s.clone()), s)) {
+                let st = match early.map(|(m, s)| (m, ElekProject::partial(m, s.clone()), s)) {
                     Ok((m, Ok(p), s)) => {
                         let keys = pool_keys(&p.pool, &asked);
                         let uses = vec![0u32; p.pool.len()];
                         em.send(Ev::Elek(ElekEv::Partial(Box::new(p))));
-                        // Names before the patterns: a quick request each,
-                        // where the patterns take half a minute.
-                        self.look_up_names(&keys, &mut asked, true);
-                        Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses, sounds: false }
+                        (keys, Stream { m: Some(m), msgs: vec![s], live: true, scan: Scan::default(), uses, sounds: false })
                     }
                     Ok((_, Err(e), _)) | Err(e) => {
                         crate::log::line(format!("elek: early pool read skipped: {e}"));
-                        Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new(), sounds: false }
+                        (Vec::new(), Stream { m: None, msgs: Vec::new(), live: false, scan: Scan::default(), uses: Vec::new(), sounds: false })
                     }
                 };
+                let (keys, mut st) = st;
                 let started = Instant::now();
-                let r = self.read_patterns(&mut st, &ctl);
-                let r = r.and_then(|()| if ctl.stopped() || st.sounds { Ok(()) } else { self.read_sounds(&mut st, &ctl) });
+                // The page in view's part first. Names and pool sounds are
+                // quick requests each, the patterns take half a minute, so
+                // otherwise patterns go last. A whole-dump fallback in
+                // sounds or patterns brings the other along, and that
+                // stage then finds nothing left to ask for.
+                #[derive(Clone, Copy)]
+                enum Stage { Names, Sounds, Patterns }
+                let order = match first {
+                    ReadFirst::Names => [Stage::Names, Stage::Sounds, Stage::Patterns],
+                    ReadFirst::Sounds => [Stage::Sounds, Stage::Names, Stage::Patterns],
+                    ReadFirst::Patterns => [Stage::Patterns, Stage::Names, Stage::Sounds],
+                };
+                crate::log::line(format!("elek: reading {first:?} first"));
+                let mut cached = Some(cached);
+                let mut r = Ok(());
+                for stage in order {
+                    if r.is_err() {
+                        break;
+                    }
+                    match stage {
+                        Stage::Names => {
+                            if !ctl.stopped() {
+                                self.look_up_names(&keys, &mut asked, true);
+                            }
+                        }
+                        Stage::Sounds => {
+                            if st.sounds {
+                                continue;
+                            }
+                            r = self.read_sounds(&mut st, &ctl);
+                            // Show the sound pool now, not once the patterns are in too.
+                            if let (Ok(()), true, Some(m)) = (&r, st.sounds, st.m) {
+                                let sounds = library::sounds_from(m, st.msgs.iter().filter(|m| m.kind == SOUND));
+                                em.send(Ev::Elek(ElekEv::Sounds(Ok(sounds))));
+                            }
+                        }
+                        Stage::Patterns => {
+                            let cached = cached.take().unwrap_or_default();
+                            if !cached.is_empty() {
+                                crate::log::line(format!("elek: {} empty patterns kept from the last read, not read again", cached.len()));
+                            }
+                            for msg in cached {
+                                st.add(&em, msg);
+                            }
+                            r = self.read_patterns(&mut st, &ctl);
+                        }
+                    }
+                }
                 let stopped = ctl.stopped();
                 let sounds = st.sounds;
                 // Without the early settings (or a whole dump), ask for them now.
@@ -1458,8 +1553,10 @@ impl Worker {
                 m
             }
         };
+        // Patterns already here (kept empty ones) count as done.
+        let had = (0..patterns::PATTERNS).filter(|&i| st.have(i)).count();
         let prog = |done: usize| {
-            em.send(Ev::Elek(ElekEv::Progress { label: "Reading patterns".into(), done, total: patterns::PATTERNS }));
+            em.send(Ev::Elek(ElekEv::Progress { label: "Reading patterns".into(), done: had + done, total: patterns::PATTERNS }));
         };
         let mut done = 0;
         prog(0);
