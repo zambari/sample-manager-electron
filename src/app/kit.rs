@@ -132,9 +132,9 @@ impl App {
     fn kit_busy(&self) -> Option<&'static str> {
         let k = self.kit();
         if k.loading.is_some() {
-            Some("The kit is still loading — try again in a moment")
+            Some("The SliceKit is still loading — try again in a moment")
         } else if k.exporting {
-            Some("The kit is still saving — try again in a moment")
+            Some("The SliceKit is still saving — try again in a moment")
         } else {
             None
         }
@@ -236,7 +236,7 @@ impl App {
             return;
         }
         if on && !self.has_kit() {
-            self.status = "No slice kit yet — K adds the selection to one".to_owned();
+            self.status = "No SliceKit yet — K adds the selection to one".to_owned();
             return;
         }
         self.swap_slots();
@@ -318,17 +318,17 @@ impl App {
     pub(super) fn add_slice(&mut self) {
         if self.showing_kit {
             self.status =
-                "Showing the kit — press B to go back to the sample, then K adds its selection"
+                "Showing the SliceKit — press B to go back to the sample, then K adds its selection"
                     .to_owned();
             return;
         }
         let Some(clip) = self.editor.slice() else {
             self.status =
-                "Load a sample first, then K adds its selection to the slice kit".to_owned();
+                "Load a sample first, then K adds its selection to the SliceKit".to_owned();
             return;
         };
         if self.other.loading.is_some() {
-            self.status = "The slice kit is still loading — try again in a moment".to_owned();
+            self.status = "The SliceKit is still loading — try again in a moment".to_owned();
             return;
         }
         if self.other.current.is_some() {
@@ -360,7 +360,7 @@ impl App {
                 None => "the end of".to_owned(),
             };
             self.status = format!(
-                "Added {secs:.3}s to {where_} {} ({:.2}s) — B shows the kit, ⌘S there saves it",
+                "Added {secs:.3}s to {where_} {} ({:.2}s) — B shows the SliceKit, ⌘S there saves it",
                 self.kit_name().unwrap_or_default(),
                 self.other.sample().map_or(0.0, |s| s.seconds(s.frames())),
             );
@@ -370,7 +370,7 @@ impl App {
                 if self.other.kit_fill() >= n {
                     self.show_kit(true);
                     self.status = format!(
-                        "Kit full ({n}/{n}) — showing {}. ⌘S saves it, B goes back to the sample",
+                        "SliceKit full ({n}/{n}) — showing {}. ⌘S saves it, B goes back to the sample",
                         self.kit_name().unwrap_or_default()
                     );
                 }
@@ -385,12 +385,12 @@ impl App {
     pub(super) fn new_kit(&mut self) {
         if self.showing_kit {
             self.status =
-                "Press B to go back to the sample, then start a new kit from its selection"
+                "Press B to go back to the sample, then start a new SliceKit from its selection"
                     .to_owned();
             return;
         }
         let Some(clip) = self.editor.slice() else {
-            self.status = "Load a sample first — a new kit starts from its selection".to_owned();
+            self.status = "Load a sample first — a new SliceKit starts from its selection".to_owned();
             return;
         };
         if let Some(e) = self.kit_busy() {
@@ -523,7 +523,7 @@ impl App {
         let on_disk = old.is_file() && !self.kit().path_is_source();
         if on_disk {
             if let Err(e) = std::fs::rename(&old, &new) {
-                self.status = format!("Couldn't rename the kit: {e}");
+                self.status = format!("Couldn't rename the SliceKit: {e}");
                 return;
             }
         }
@@ -536,9 +536,9 @@ impl App {
                 self.sizes.invalidate_subtree(dir);
                 self.reload_showing(dir, false);
             }
-            self.status = format!("Renamed the kit to {file}");
+            self.status = format!("Renamed the SliceKit to {file}");
         } else {
-            self.status = format!("The kit is now {file} (not saved yet)");
+            self.status = format!("The SliceKit is now {file} (not saved yet)");
         }
     }
 
@@ -552,12 +552,12 @@ impl App {
             .into_owned();
         if self.switch_to_open(p) {
             self.status = format!(
-                "{name} is the active kit — K adds the selection of whatever sample you're on"
+                "{name} is the active SliceKit — K adds the selection of whatever sample you're on"
             );
             return;
         }
         if !self.showing_kit && self.editor.path() == Some(p) && self.editor.is_dirty() {
-            self.status = "Save this file first, then make it a kit".to_owned();
+            self.status = "Save this file first, then make it a SliceKit".to_owned();
             return;
         }
         if let Some(e) = self.kit_busy() {
@@ -581,10 +581,10 @@ impl App {
         let others = if self.parked.is_empty() {
             String::new()
         } else {
-            " (the other kits stay in the ▾ list)".to_owned()
+            " (the other SliceKits stay in the ▾ list)".to_owned()
         };
         self.status = format!(
-            "{name} is the active kit — K adds the selection of whatever sample you're on{others}"
+            "{name} is the active SliceKit — K adds the selection of whatever sample you're on{others}"
         );
     }
 
@@ -632,7 +632,7 @@ impl App {
         });
         self.show_kit(true);
         self.status = format!(
-            "{name} has slice markers — opened as a kit (B goes back to the sample). Closes again when you browse on, unless you edit it"
+            "{name} has slice markers — opened as a SliceKit (B goes back to the sample). Closes again when you browse on, unless you edit it"
         );
         true
     }
@@ -692,11 +692,11 @@ impl App {
                 self.kit_grid = n;
                 self.status = match n {
                     Some(crate::editor::AUTO_GRID) => format!(
-                        "Auto grid — kit on {} slots now; grows to 8 and 16 as K adds slices, shrinks when you cut them",
+                        "Auto grid — SliceKit on {} slots now; grows to 8 and 16 as K adds slices, shrinks when you cut them",
                         self.kit().grid.unwrap_or(4)
                     ),
-                    Some(n) => format!("Kit laid out on {n} equal slots, padded to the longest slice — K fills the next free slot"),
-                    None => "Grid off — empty slots at the end trimmed; K adds slices to the end of the kit again".to_owned(),
+                    Some(n) => format!("SliceKit laid out on {n} equal slots, padded to the longest slice — K fills the next free slot"),
+                    None => "Grid off — empty slots at the end trimmed; K adds slices to the end of the SliceKit again".to_owned(),
                 };
             }
             Err(e) => self.status = e,
@@ -717,7 +717,7 @@ impl App {
             .filter(|p| keep.as_ref().is_none_or(|(k, _)| k != p))
             .collect();
         if todo.is_empty() {
-            self.status = "No other kits open".to_owned();
+            self.status = "No other SliceKits open".to_owned();
             return;
         }
         // Parked ones first (popped from the end), the active one last, so
@@ -783,9 +783,9 @@ impl App {
         let kept = left - usize::from(q.keep.is_some() && left > 0);
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         self.status = match kept {
-            0 => format!("Closed {closed} kit{}", plural(closed)),
+            0 => format!("Closed {closed} SliceKit{}", plural(closed)),
             _ => format!(
-                "Closed {closed} kit{}, kept {kept} with unsaved slices",
+                "Closed {closed} SliceKit{}, kept {kept} with unsaved slices",
                 plural(closed)
             ),
         };

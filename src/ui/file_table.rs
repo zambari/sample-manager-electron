@@ -763,7 +763,7 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
             && local
             && !entry.is_dir
             && crate::fs_model::is_audio_path(&entry.path)
-            && ui.button("Load as kit").on_hover_text(
+            && ui.button("Load as SliceKit").on_hover_text(
                 "Open as a slice kit — K then adds selections to it.\n\
                  Slices come back from the file's cue points, or, without any, from an [8]-style\n\
                  name prefix (8 equal slices)",

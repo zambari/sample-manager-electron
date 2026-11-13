@@ -339,6 +339,8 @@ pub enum Drag {
     Fade(usize, usize, bool, bool),
     /// Grid trim by length: drag the slot cut, grabbed in this slot.
     SlotCut(usize),
+    /// Unlocked markers: drag this one (index into the slice markers).
+    Marker(usize),
 }
 
 /// Visible window: first frame at the left edge and frames per pixel.
@@ -405,6 +407,11 @@ pub struct Editor {
     /// Auto grid: `grid` grows 4 → 8 → 16 as slices are added and shrinks
     /// back when they're cut.
     pub auto_grid: bool,
+    /// The padlock in the wave's corner. Locked: markers stay put and a
+    /// grid keeps its slots (cuts are padded back to the slot length).
+    /// Unlocked: no grid, cuts close up like in a plain file, and markers
+    /// can be dragged. Each newly loaded file starts locked.
+    pub markers_locked: bool,
     /// Turn `auto_grid` back on when this file (from a saved session) loads.
     auto_on_load: Option<PathBuf>,
     /// Something the app should show in the status bar.
@@ -472,6 +479,7 @@ impl Editor {
             decay: Default::default(),
             grid: None,
             auto_grid: false,
+            markers_locked: true,
             auto_on_load: None,
             notice: None,
             memos: HashMap::new(),
@@ -766,6 +774,7 @@ impl Editor {
             stamp: self.history.stamp,
             ..History::default()
         };
+        self.markers_locked = true;
         self.grid = self.infer_grid();
         let want = self.auto_on_load.take();
         let restore_auto = want.is_some() && want.as_deref() == self.path();

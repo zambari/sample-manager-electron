@@ -73,6 +73,8 @@ Drawn top to bottom; intents handled in `App::show_editor` (`src/app/editing.rs`
 | Kit slice right-click: **Reveal in source pane** / **Reveal in sample pool** (faint wash on the slice while open). Slices keep their source's full path (`Editor::names`, saved in the `slnm` chunk by `cues::append_names`; older kits have bare names; a slice with no usable name, e.g. in a kit fetched from the device, is looked up by its audio among fingerprinted files); the pool slot is found by a link's +Drive hash, else by audio fingerprint, else by file name (then marked not identical / not compared) | menu `slice_menu` in `waveform.rs` (`Editor::slice_menu`, `SliceHome`); resolved by `App::slice_homes`, `App::slice_in_pool` in `src/app/editing.rs`; `App::slice_local`, `App::pool_match` in `src/app/prints.rs`; slice prints `prints::range_keys`, `Editor::slice_bounds`; `ElekState::slot_holding` |
 | **Trim** section (kits) | `trim.rs` `trim_section`, `strip.rs` |
 | **Wave**: lanes, ruler, in/out and slice markers, fade handles, all mouse handling | `waveform.rs` |
+| Marker **padlock** (top right of the ruler, SliceKits with markers): locked = markers fixed, a grid keeps its slots (cuts padded back); unlocked = no grid (audio untouched), cuts close up, markers draggable by ruler tab or line (zero-snapped with Snap to 0); grid picker greyed while unlocked | `padlock`, `lock_rect` in `waveform.rs`; `Editor::markers_locked`, `set_markers_locked` (`grid.rs`), `move_marker`, `marker_index`, `markers_moved` (`clip.rs`), `Drag::Marker`; `Slots::kit_unlocked` |
+| Grid padding overlay: each slot's silence after its sound, solid dark | `waveform.rs` (after `draw_lanes`), data `Editor::slot_sounds`; colour `PAD_COLOR` |
 | **Nums** | `toolbar.rs` `positions` |
 | **Scalpel** | `scope.rs` |
 | **Map** | `overview.rs` |
@@ -202,8 +204,8 @@ There are two mechanisms, and only the device one is a real queue.
 | **docked pool** | The pool as a pane in the right column (SAMPLE POOL), beside the editor. | `App::dock_elek`, `App::show_dest_col` in `src/app/elek.rs`; `elek_view::show_docked` |
 | **pattern**, **bank** (Patterns page) | One of 128 patterns, 16 per bank A to H. | `src/device/elek/patterns.rs` |
 | **push**, **read / load project**, **read back** | Write edits into the device's memory / read the loaded project from it. Saved projects on the +Drive are never written (`proto::FORBIDDEN`). | `ElekCmd`, `ElekEv`, `Worker::elek`, `Conn::push_project` in `src/device/elek.rs`; answers in `App::elek_event` |
-| **kit**, **slice kit** | A second editor slot that collects slices (**K**). Not the Digitakt's own "kit" (a pattern's sound set), which lives in `patterns.rs`. | `src/app/kit.rs`, `src/editor/clip.rs`. a kit may also reference something else. uncertain.|
-| **grid kit** | A kit laid out on 4 / 8 / 16 equal slots. | `src/editor/grid.rs` |
+| **SliceKit** (code: kit, `is_kit`) | A second editor slot that collects slices (**K**). Called SliceKit in the UI so it isn't confused with the Digitakt's own "kit" (a pattern's sound set, `patterns.rs`), which keeps the word "kit" on the Patterns / Sounds pages. | `src/app/kit.rs`, `src/editor/clip.rs`. a kit may also reference something else. uncertain.|
+| **grid kit** | A SliceKit laid out on 4 / 8 / 16 equal slots (only while the marker padlock is locked). | `src/editor/grid.rs` |
 | **trim**, **tails**, **fades** (kits) | Cutting each slice's tail below a threshold. | `src/editor/trim.rs`, `src/editor/fade.rs`; UI in `src/ui/editor_view/trim.rs`, `strip.rs` |
 | **source**, **destination**, **pane** | The left and right file columns (`Role::Source`, `Role::Dest`), each a `Pane` of `DirTab`s. | `src/pane.rs`, `src/tab.rs` |
 | **commit** | Copy the source selection into the active destination tab; a single file open in the editor is written as heard. | `App::commit` in `src/app/transfers.rs` |

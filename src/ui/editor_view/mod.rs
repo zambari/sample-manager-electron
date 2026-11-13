@@ -123,6 +123,8 @@ pub struct Slots {
     pub kit_dirty: bool,
     /// As picked: free, [`crate::editor::AUTO_GRID`] or a slot count.
     pub kit_grid: Option<usize>,
+    /// The SliceKit's markers are unlocked (padlock open): no grid to pick.
+    pub kit_unlocked: bool,
     /// Slices so far (free) or slots used (grid), and the slot count.
     pub kit_fill: (usize, Option<usize>),
     /// The kit has a file of its own to save over: exported, or opened from
@@ -207,6 +209,8 @@ const CLIP_COLOR: Color32 = Color32::from_rgb(235, 60, 60);
 const LIMIT_COLOR: Color32 = Color32::from_rgb(236, 165, 55);
 const MONO_COLOR: Color32 = Color32::from_rgb(120, 170, 245);
 const MARK_COLOR: Color32 = Color32::from_rgb(200, 140, 245);
+/// Grid padding: the silence each slot is filled up with after its sound.
+const PAD_COLOR: Color32 = Color32::from_black_alpha(200);
 
 pub fn show(
     ui: &mut Ui,

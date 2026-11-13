@@ -57,7 +57,7 @@ pub(super) fn trim_section(ui: &mut Ui, ed: &mut Editor, ends: &[SliceEnd], out:
                 egui::Button::new(RichText::new("Apply").color(theme::ON_ACCENT)).fill(theme::ACCENT),
             )
             .on_hover_text(format!(
-                "Apply the cut and the {nf} fade{} shown on the wave to the kit in memory. ⌘Z undoes; nothing is written to disk.",
+                "Apply the cut and the {nf} fade{} shown on the wave to the SliceKit in memory. ⌘Z undoes; nothing is written to disk.",
                 if nf == 1 { "" } else { "s" }
             ))
             .clicked()

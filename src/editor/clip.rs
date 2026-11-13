@@ -91,7 +91,7 @@ impl Editor {
             return self.append_on_grid(clip, n);
         }
         let Some(full) = &self.full else {
-            return Err("No kit loaded".to_owned());
+            return Err("No SliceKit loaded".to_owned());
         };
         let (rate, nch) = (full.sample.rate, full.sample.channels.len());
         self.uncrop();
@@ -318,6 +318,37 @@ impl Editor {
             .filter(|&&m| m >= off && m - off <= n)
             .map(|&m| m - off)
             .collect()
+    }
+
+    /// Index of the slice marker at shown frame `f`, if one is exactly there.
+    pub fn marker_index(&self, f: usize) -> Option<usize> {
+        let f = f + self.crop_offset();
+        self.markers.binary_search(&f).ok()
+    }
+
+    /// Unlocked markers: move marker `i` to shown frame `to` (on the nearest
+    /// zero crossing when Snap to 0 is on), kept strictly between its
+    /// neighbours so slices keep their order and names.
+    pub fn move_marker(&mut self, i: usize, to: usize) {
+        if self.markers_locked || i >= self.markers.len() {
+            return;
+        }
+        let Some(total) = self.full.as_ref().map(|f| f.sample.frames()) else {
+            return;
+        };
+        let to = self.snap(to) + self.crop_offset();
+        let lo = if i == 0 { 0 } else { self.markers[i - 1] } + 1;
+        let hi = self.markers.get(i + 1).copied().unwrap_or(total).saturating_sub(1);
+        if lo <= hi {
+            self.markers[i] = to.clamp(lo, hi);
+        }
+    }
+
+    /// A marker drag ended: count it as an edit (the cues are saved with
+    /// the file), once, rather than on every frame of the drag.
+    pub fn markers_moved(&mut self) {
+        self.next_rev += 1;
+        self.rev = self.next_rev;
     }
 
     /// The slice around `frame`: from the marker at or before it to the next

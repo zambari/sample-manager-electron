@@ -212,12 +212,15 @@ impl Editor {
             return Ok(());
         };
         if !self.is_kit || self.full.is_none() {
-            return Err("Grid only applies to a loaded slice kit".to_owned());
+            return Err("Grid only applies to a loaded SliceKit".to_owned());
+        }
+        if !self.markers_locked {
+            return Err("Markers are unlocked — lock the padlock (top right of the wave) to pick a grid".to_owned());
         }
         let s = self.slices();
         let sounding = s.iter().filter(|s| !is_empty(s)).count();
         let auto = n == AUTO_GRID;
-        let too_many = |n: usize| format!("The kit has {sounding} slices — too many for {n} slots");
+        let too_many = |n: usize| format!("The SliceKit has {sounding} slices — too many for {n} slots");
         let n = if auto {
             auto_size(sounding).ok_or_else(|| too_many(16))?
         } else {
@@ -227,6 +230,22 @@ impl Editor {
             .ok_or_else(|| too_many(n))?;
         self.auto_grid = auto;
         Ok(())
+    }
+
+    /// The padlock. Unlocking drops the grid without touching the audio
+    /// (no tail trim, unlike picking Free), so cuts close up and markers can
+    /// be dragged. Locking takes the grid back if the markers still split
+    /// the file evenly.
+    pub fn set_markers_locked(&mut self, locked: bool) {
+        self.markers_locked = locked;
+        self.drag = None;
+        if locked {
+            self.grid = self.infer_grid();
+        } else {
+            self.grid = None;
+            self.auto_grid = false;
+            self.slot_cut = None;
+        }
     }
 
     /// How many slices hold any sound.
@@ -307,7 +326,7 @@ impl Editor {
     /// select that slot.
     pub(super) fn append_on_grid(&mut self, clip: &AudioClip, n: usize) -> Result<(), String> {
         let Some(full) = &self.full else {
-            return Err("No kit loaded".to_owned());
+            return Err("No SliceKit loaded".to_owned());
         };
         let ins = clip.adapt(full.sample.rate, full.sample.channels.len());
         let mut s = self.slices();
@@ -350,7 +369,7 @@ impl Editor {
             self.grid = None;
             self.auto_grid = false;
             self.notice = Some(format!(
-                "The kit has more than {n} slices now — grid turned off (pick a bigger one to put it back)"
+                "The SliceKit has more than {n} slices now — grid turned off (pick a bigger one to put it back)"
             ));
             return;
         }
@@ -366,7 +385,7 @@ impl Editor {
     pub(super) fn infer_grid(&self) -> Option<usize> {
         let total = self.full.as_ref()?.sample.frames();
         let n = self.markers.len() + 1;
-        if !self.is_kit || !GRID_SIZES.contains(&n) || total % n != 0 {
+        if !self.is_kit || !self.markers_locked || !GRID_SIZES.contains(&n) || total % n != 0 {
             return None;
         }
         let len = total / n;

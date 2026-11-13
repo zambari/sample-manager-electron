@@ -957,7 +957,7 @@ impl eframe::App for App {
                 if ok {
                     self.start_kit(n);
                 } else {
-                    self.status = "No kit started".to_owned();
+                    self.status = "No SliceKit started".to_owned();
                 }
             }
         }

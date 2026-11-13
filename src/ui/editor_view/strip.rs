@@ -151,7 +151,7 @@ pub(super) fn threshold_strip(
     if let Some(q) = pointer {
         let mut text = format!("{:.1} dB   (strip {lo:.0} … {hi:.0} dB)", db_of(q.x));
         if let Some(heat) = heat {
-            text += &format!("\ntrim here frees {:.0}% of the kit", heat(db_of(q.x)) * 100.0);
+            text += &format!("\ntrim here frees {:.0}% of the SliceKit", heat(db_of(q.x)) * 100.0);
         }
         near.sort_by(|a, b| b.end_db.total_cmp(&a.end_db));
         for t in &near {

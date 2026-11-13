@@ -933,6 +933,7 @@ impl App {
             kit_name: self.kit_name(),
             kit_dirty: self.kit().is_dirty(),
             kit_grid: self.kit().grid_mode(),
+            kit_unlocked: !self.kit().markers_locked,
             kit_fill: (self.kit().kit_fill(), self.kit().grid),
             kits: self.kit_list(),
             kit_on_disk: self.kit().path().is_some_and(Path::is_file) && !self.kit().path_is_source(),

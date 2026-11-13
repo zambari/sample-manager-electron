@@ -31,6 +31,34 @@ pub(super) fn waveform(
 
     let id = ui.scope_id().with("wave");
     let resp = ui.interact(rect, id, Sense::click_and_drag());
+    // The padlock, top right in the ruler: registered after the wave so it
+    // takes its own clicks.
+    let lock_rect = (ed.is_kit && ed.has_markers()).then(|| {
+        Rect::from_min_size(Pos2::new(rect.right() - 20.0, rect.top()), vec2(20.0, RULER_H))
+    });
+    let lock_resp = lock_rect.map(|r| {
+        let tip = if ed.markers_locked {
+            "Markers locked: cuts keep the grid's slots (padded with silence, shown dark). Click to unlock: \
+             no grid, cuts close up, markers can be dragged (onto zero crossings with Snap to 0)."
+        } else {
+            "Markers unlocked: drag a marker (its tab in the ruler, or its line) to move it. \
+             Click to lock: the grid comes back if the markers still split the file evenly."
+        };
+        ui.interact(r, id.with("lock"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(tip)
+    });
+    if lock_resp.as_ref().is_some_and(|r| r.clicked()) {
+        out.push(EdIntent::TookFocus);
+        let lock = !ed.markers_locked;
+        ed.set_markers_locked(lock);
+        ed.notice = Some(match (lock, ed.grid) {
+            (false, _) => "Markers unlocked — grid off, cuts close up, drag markers to move them".to_owned(),
+            (true, Some(n)) => format!("Markers locked — on {n} equal slots"),
+            (true, None) => "Markers locked — not an even split, so no grid (pick one to lay the slices out)".to_owned(),
+        });
+    }
+    let unlocked = ed.is_kit && !ed.markers_locked;
 
     // Wheel = zoom around the pointer, horizontal scroll = pan. Consumed so
     // nothing else on screen scrolls too.
@@ -151,11 +179,26 @@ pub(super) fn waveform(
             && p.x < x_out - GRAB_PX
     };
     let mut bar_hot = matches!(ed.drag, Some(Drag::Move(..)));
+    // Unlocked: a marker can be grabbed by its ruler tab (ahead of the
+    // in / out points, which often sit on it) or its line.
+    let in_ruler = |p: Pos2| p.y <= rect.top() + RULER_H;
+    let grab_mark = |p: Pos2, ruler_only: bool| {
+        if !unlocked || (ruler_only && !in_ruler(p)) {
+            return None;
+        }
+        mark_at(p).and_then(|f| ed.marker_index(f))
+    };
+    let mut hot_mark = matches!(ed.drag, Some(Drag::Marker(_)));
     if let Some(p) = resp.hover_pos() {
         if ed.drag.is_none() {
             if let Some(e) = handle_at(p) {
                 ui.ctx().set_cursor_icon(CursorIcon::Move);
                 hot_fade = Some(e.slice);
+            } else if grab_mark(p, true).is_some()
+                || (!near(x_in, p) && !near(x_out, p) && grab_mark(p, false).is_some())
+            {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
+                hot_mark = true;
             } else if near(x_in, p) || near(x_out, p) {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             } else if cut_at(p).is_some() {
@@ -194,12 +237,16 @@ pub(super) fn waveform(
                 Drag::Fade(e.slice, if e.tail { e.start } else { e.end }, e.tail, alt || e.own)
             } else if resp.dragged_by(egui::PointerButton::Middle) || alt {
                 Drag::Pan
+            } else if let Some(i) = grab_mark(o, true) {
+                Drag::Marker(i)
             } else if near(x_in, o)
                 && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs())
             {
                 Drag::In
             } else if near(x_out, o) {
                 Drag::Out
+            } else if let Some(i) = grab_mark(o, false) {
+                Drag::Marker(i)
             } else if let Some(i) = cut_at(o) {
                 Drag::SlotCut(i)
             } else if on_bar(o) {
@@ -220,6 +267,7 @@ pub(super) fn waveform(
                 Drag::Move(orig, grab) => ed.move_region(orig, m.frame(px) as i64 - grab as i64),
                 Drag::Pan => ed.view.start -= resp.drag_delta().x as f64 * ed.view.fpp,
                 Drag::Scrub(..) => {}
+                Drag::Marker(i) => ed.move_marker(i, m.frame(px)),
                 Drag::Fade(slice, fixed, tail, own) => {
                     // Sideways: the knob is the fade's middle, so the fade
                     // runs twice that far from its fixed end. Up / down:
@@ -265,6 +313,9 @@ pub(super) fn waveform(
         }
     }
     if resp.drag_stopped() {
+        if matches!(ed.drag, Some(Drag::Marker(_))) {
+            ed.markers_moved();
+        }
         ed.drag = None;
     }
     if resp.clicked() {
@@ -370,6 +421,25 @@ pub(super) fn waveform(
 
     draw_lanes(&painter, ed, &m, lanes, &vis);
 
+    // Grid: each slot's padding (the silence after its sound, up to the
+    // slot end) in solid dark, so a cut that the grid pads back shows up.
+    if let (Some(n), Some((len, sounds))) = (ed.grid, ed.slot_sounds()) {
+        for (i, &snd) in sounds.iter().enumerate().take(n) {
+            if snd >= len {
+                continue;
+            }
+            let a = m.x((i * len + snd) as f64 - off as f64).max(rect.left());
+            let b = m.x(((i + 1) * len) as f64 - off as f64).min(rect.right());
+            if b > a {
+                painter.rect_filled(
+                    Rect::from_x_y_ranges(a..=b, lanes.y_range()),
+                    0.0,
+                    PAD_COLOR,
+                );
+            }
+        }
+    }
+
     // Dim outside the region on top of the wave.
     let dim = vis
         .extreme_bg_color
@@ -418,6 +488,10 @@ pub(super) fn waveform(
     }
 
     slice_marks(&painter, &m, rect, RULER_H, &marks);
+    if let Some(r) = lock_rect {
+        let hov = lock_resp.as_ref().is_some_and(|r| r.hovered()) || hot_mark;
+        padlock(&painter, r, ed.markers_locked, hov, &vis);
+    }
     marker(&painter, rect, x_in, IN_COLOR, true);
     marker(&painter, rect, x_out, OUT_COLOR, false);
 
@@ -992,6 +1066,35 @@ fn trim_overlay(
     painter.galley(pos, galley, col);
 }
 
+/// The marker padlock: a body and a shackle, swung open when unlocked.
+fn padlock(painter: &egui::Painter, r: Rect, locked: bool, hot: bool, vis: &egui::Visuals) {
+    painter.rect_filled(r, 0.0, vis.extreme_bg_color);
+    let col = if locked {
+        vis.strong_text_color().gamma_multiply(if hot { 0.95 } else { 0.6 })
+    } else {
+        MARK_COLOR.gamma_multiply(if hot { 1.0 } else { 0.85 })
+    };
+    let c = r.center();
+    let body = Rect::from_center_size(Pos2::new(c.x, c.y + 3.0), vec2(10.0, 7.0));
+    painter.rect_filled(body, 1.5, col);
+    // Shackle: an upside-down U over the body; open, its left leg lifts out.
+    let (l, rr, top) = (body.left() + 2.0, body.right() - 2.0, body.top() - 5.5);
+    let lift = if locked { 0.0 } else { 3.0 };
+    let stroke = Stroke::new(1.6, col);
+    let pts: Vec<Pos2> = (0..=8)
+        .map(|k| {
+            let t = std::f32::consts::PI * k as f32 / 8.0;
+            Pos2::new(c.x - (rr - l) / 2.0 * t.cos(), top - lift - 2.5 * t.sin() + 2.5)
+        })
+        .collect();
+    painter.add(egui::Shape::line(pts, stroke));
+    painter.line_segment([Pos2::new(rr, top + 2.5 - lift), Pos2::new(rr, body.top())], stroke);
+    painter.line_segment(
+        [Pos2::new(l, top + 2.5 - lift), Pos2::new(l, body.top() - lift)],
+        stroke,
+    );
+}
+
 /// Kit slice starts: a line down the whole view, a tab in the ruler and the
 /// slice number beside it.
 pub(super) fn slice_marks(
@@ -1119,7 +1222,7 @@ fn slice_menu(ui: &mut Ui, ed: &Editor, homes: &[super::SliceHome], out: &mut Ve
     ui.label(RichText::new(title).weak());
     ui.separator();
     let tip = match (&home.local, &home.saved_as) {
-        (Some(p), _) if home.by_audio => format!("{}\nFound by its audio: the kit didn't say where this slice came from", p.display()),
+        (Some(p), _) if home.by_audio => format!("{}\nFound by its audio: the SliceKit didn't say where this slice came from", p.display()),
         (Some(p), _) => p.display().to_string(),
         (None, Some(s)) => format!("Saved as \"{s}\" only: the full path wasn't kept, so it can't be found"),
         (None, None) => "This slice doesn't say where it came from".to_owned(),

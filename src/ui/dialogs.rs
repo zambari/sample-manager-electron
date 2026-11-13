@@ -600,7 +600,7 @@ pub fn leave_editor(
         ui.add_space(6.0);
         ui.label(match why {
             LeaveWhy::Quit => "Audio was cut or pasted into this file. Quitting now throws those edits away.",
-            LeaveWhy::CloseKit => "This kit has slices that haven't been saved. Closing it now throws them away.",
+            LeaveWhy::CloseKit => "This SliceKit has slices that haven't been saved. Closing it now throws them away.",
             LeaveWhy::Open => {
                 "Audio was cut or pasted into this file. Opening another one throws those edits away \
                  (the clipboard is kept, so you can still paste into the next file)."
@@ -622,7 +622,7 @@ pub fn leave_editor(
                 .button(RichText::new("Discard edits").color(ui.visuals().error_fg_color))
                 .on_hover_text(match why {
                     LeaveWhy::Quit => "Quit without saving",
-                    LeaveWhy::CloseKit => "Close the kit without saving",
+                    LeaveWhy::CloseKit => "Close the SliceKit without saving",
                     LeaveWhy::Open => "Open the other file without saving",
                 })
                 .clicked()
@@ -801,7 +801,7 @@ pub fn name_kit(
     let mut answer = None;
     Modal::new(Id::unique("name_kit_modal")).show(ctx, |ui| {
         ui.set_width(420.0);
-        ui.heading("New slice kit");
+        ui.heading("New SliceKit");
         ui.add_space(6.0);
         ui.label(format!(
             "Each K adds the selection to the kit. It goes in {}. \
@@ -835,7 +835,7 @@ pub fn name_kit(
                 answer = Some(false);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Start New Grid Kit").on_hover_text("↩").clicked() {
+                if ui.button("Start New SliceKit").on_hover_text("↩").clicked() {
                     answer = Some(true);
                 }
             });

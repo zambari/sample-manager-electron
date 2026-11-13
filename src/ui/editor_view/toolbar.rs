@@ -51,12 +51,12 @@ fn kit_section(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
         if show_start {
             ui.horizontal(|ui| {
                 let btn = egui::Button::new(
-                    RichText::new("Start New Grid Kit").color(crate::ui::theme::ON_ACCENT),
+                    RichText::new("Start New SliceKit").color(crate::ui::theme::ON_ACCENT),
                 )
                 .fill(crate::ui::theme::ACCENT);
                 if ui
                     .add(btn)
-                    .on_hover_text("Make this file the slice kit, to add slices to its end")
+                    .on_hover_text("Make this file the SliceKit, to add slices to its end")
                     .clicked()
                 {
                     out.push(EdIntent::UseAsKit);
@@ -65,7 +65,7 @@ fn kit_section(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
         }
         return;
     }
-    section_header(ui, "Kit");
+    section_header(ui, "SliceKit");
     ui.horizontal(|ui| {
         if let Some(k) = &s.kit_name {
             let fill_total = match s.kit_fill {
@@ -80,14 +80,16 @@ fn kit_section(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
             if let (n, Some(total)) = (s.kit_fill.0, fill_total) {
                 fill_boxes(ui, n, total);
             }
-            grid_picker(ui, s.kit_grid, out);
+            ui.add_enabled_ui(!s.kit_unlocked, |ui| grid_picker(ui, s.kit_grid, out))
+                .response
+                .on_disabled_hover_text("Markers are unlocked — lock the padlock (top right of the wave) to pick a grid");
         }
         if show_start {
             // Pinned to the right edge; the rest of the row flows from the left.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("Start New Grid Kit")
-                    .on_hover_text("Make this file the slice kit, to add slices to its end")
+                    .small_button("Start New SliceKit")
+                    .on_hover_text("Make this file the SliceKit, to add slices to its end")
                     .clicked()
                 {
                     out.push(EdIntent::UseAsKit);
@@ -153,7 +155,7 @@ fn slot_tabs(ui: &mut Ui, ed: &Editor, s: &Slots, out: &mut Vec<EdIntent>) {
                         Some(i) => {
                             if ui
                                 .add(crate::ui::theme::pane_tab(&parked_label(e), false))
-                                .on_hover_text(format!("{} — click to make it the kit K adds to", e.name))
+                                .on_hover_text(format!("{} — click to make it the SliceKit K adds to", e.name))
                                 .clicked()
                             {
                                 out.push(EdIntent::SwitchKit(i));
@@ -290,9 +292,9 @@ fn close_x(ui: &mut Ui, tab: egui::Rect, dirty: bool) -> bool {
             egui::Sense::click(),
         )
         .on_hover_text(if dirty {
-            "Save the kit (⌘S in kit view) before closing it"
+            "Save the SliceKit (⌘S in SliceKit view) before closing it"
         } else {
-            "Close this kit (the file stays)"
+            "Close this SliceKit (the file stays)"
         });
     let v = ui.visuals();
     let color = if dirty {
@@ -328,7 +330,7 @@ fn kit_tab(ui: &mut Ui, k: &str, s: &Slots, out: &mut Vec<EdIntent>) -> Option<e
         buf = None;
     }
     if let Some(text) = &mut buf {
-        ui.label("Kit:");
+        ui.label("SliceKit:");
         let resp = ui.add(
             egui::TextEdit::singleline(text)
                 .id(field_id)
@@ -418,8 +420,8 @@ fn kit_switcher(ui: &mut Ui, ed: &Editor, s: &Slots, collapsed: bool, out: &mut 
         ui.separator();
         let can_new = !s.showing_kit && ed.current.is_some();
         if ui
-            .add_enabled(can_new, egui::Button::new("New kit from selection…"))
-            .on_hover_text("Start another kit with this selection; the open ones stay in this list")
+            .add_enabled(can_new, egui::Button::new("New SliceKit from selection…"))
+            .on_hover_text("Start another SliceKit with this selection; the open ones stay in this list")
             .on_disabled_hover_text("Go to the sample (B) and select something first")
             .clicked()
         {
@@ -441,8 +443,8 @@ fn close_all_menu(resp: &egui::Response, s: &Slots, out: &mut Vec<EdIntent>) {
 }
 
 fn close_all_items(ui: &mut Ui, s: &Slots, out: &mut Vec<EdIntent>) {
-    const HINT: &str = "Kits with unsaved slices ask first; Cancel keeps that one and goes on with the rest";
-    if ui.button("Close all kits").on_hover_text(HINT).clicked() {
+    const HINT: &str = "SliceKits with unsaved slices ask first; Cancel keeps that one and goes on with the rest";
+    if ui.button("Close all SliceKits").on_hover_text(HINT).clicked() {
         out.push(EdIntent::CloseAllKits(false));
         ui.close();
     }
@@ -491,8 +493,8 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
         let items: Vec<(&mut bool, &str, &str)> = vec![
             (
                 &mut p.kit,
-                "Kit",
-                "Slice kit row: → add (K), slot fill, grid, Start kit",
+                "SliceKit",
+                "SliceKit row: → add (K), slot fill, grid, Start SliceKit",
             ),
             (
                 &mut p.transport,
@@ -525,7 +527,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
             (
                 &mut p.trim_tails,
                 "Trim",
-                "Fade and cut every kit slice's tail below a threshold to free sample memory. Hidden, no fades show on the wave",
+                "Fade and cut every SliceKit slice's tail below a threshold to free sample memory. Hidden, no fades show on the wave",
             ),
             (&mut p.help, "Help", "Keyboard shortcut list"),
         ];
@@ -534,7 +536,7 @@ pub(super) fn panel_toggles(ui: &mut Ui, p: &mut crate::editor::Panels, kit: boo
             // sample, pointing the way to slice mode.
             if label == "Trim" && !kit {
                 ui.add_enabled(false, vis_toggle(v, label)).on_disabled_hover_text(
-                    "Trim works on a kit: enter slice mode (the Kit tab, or + Slice → Kit / K) to use it",
+                    "Trim works on a SliceKit: enter slice mode (the SliceKit tab, or + Add to SliceKit / K) to use it",
                 );
                 continue;
             }
@@ -667,7 +669,7 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
                     Some(k) => (
                         format!("💾 Save over {}{mono}", short(k)),
                         ed.can_save(),
-                        format!("⌘S — write the whole kit back over its own file, {k}. The samples its slices came from are never touched."),
+                        format!("⌘S — write the whole SliceKit back over its own file, {k}. The samples its slices came from are never touched."),
                     ),
                     None => (
                         "💾 Save (export first)".to_owned(),
@@ -706,8 +708,8 @@ pub(super) fn file_row(ui: &mut Ui, ed: &mut Editor, can_export: bool, slots: &S
         };
         let (label, tip) = if showing_kit {
             (
-                format!("Export kit{mono} → {to}"),
-                "↩ — write the whole kit (in / out ignored), with its slice markers, as a new file in the active destination tab, and keep it open. A taken name asks for another one.".to_owned(),
+                format!("Export SliceKit{mono} → {to}"),
+                "↩ — write the whole SliceKit (in / out ignored), with its slice markers, as a new file in the active destination tab, and keep it open. A taken name asks for another one.".to_owned(),
             )
         } else if let Some(slot) = pool_slot {
             (
@@ -782,10 +784,10 @@ fn save_to_menu(ui: &mut Ui, enabled: bool, kit: bool, slots: &Slots, mono: &str
                 None => "Destination".to_owned(),
             };
             if kit {
-                if item(ui, true, format!("New file in {to}, keep the kit open{mono}"), "Same as Export kit (↩)") {
+                if item(ui, true, format!("New file in {to}, keep the SliceKit open{mono}"), "Same as Export SliceKit (↩)") {
                     out.push(EdIntent::Export);
                 }
-                if item(ui, true, format!("New file in {to}, then close the kit{mono}"), "Same as Export and close") {
+                if item(ui, true, format!("New file in {to}, then close the SliceKit{mono}"), "Same as Export and close") {
                     out.push(EdIntent::ExportAndClose);
                 }
             } else if slots.pool_slot.is_none() {
@@ -918,7 +920,7 @@ pub(super) fn toolbar(
                             .clamping(egui::SliderClamping::Never),
                     )
                     .on_hover_text(if kit {
-                        "Gain on the selected audio only; the rest of the kit is untouched. Double-click the number to type a value"
+                        "Gain on the selected audio only; the rest of the SliceKit is untouched. Double-click the number to type a value"
                     } else {
                         "Double-click the number to type a value"
                     })
@@ -1052,8 +1054,8 @@ pub(super) fn toolbar(
             }
             if !showing_kit
                 && ui
-                    .add_enabled(ed.current.is_some(), egui::Button::new("+ Slice → Kit"))
-                    .on_hover_text("K — add the selection (as you hear it) to the end of the slice kit")
+                    .add_enabled(ed.current.is_some(), egui::Button::new("+ Add to SliceKit"))
+                    .on_hover_text("K — add the selection (as you hear it) to the end of the SliceKit")
                     .clicked()
             {
                 out.push(EdIntent::AddSlice);
