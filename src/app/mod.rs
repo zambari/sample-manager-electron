@@ -788,6 +788,17 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        if crate::device::presence().available() {
+            if let Some(Err(reason)) = self.device_status.clone() {
+                egui::Panel::top("device_connection_error").show(ui, |ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("Device not connected: {reason}"));
+                    if ui.button("Retry connection").clicked() {
+                        self.device_status = None;
+                        self.device.list(PathBuf::from("/"), 0);
+                    }
+                });
+            }
+        }
 
         // Three columns: Source | Sample Editor | Destination.
         // The side columns are drag-resizable; the editor takes whatever is

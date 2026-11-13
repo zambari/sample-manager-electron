@@ -97,6 +97,7 @@ impl App {
         // Leaving the editor: don't keep its loop running behind the device view.
         if !self.elek_mode {
             self.engine.stop();
+            self.editor.play_when_loaded = false;
         }
         self.elek_mode = true;
         self.editor_focused = false;
@@ -141,6 +142,7 @@ impl App {
         let st = &mut self.elek;
         // Paths and listings belong to whichever machine answered last.
         st.names.clear();
+        st.presets = Default::default();
         if st.project.as_ref().is_some_and(|p| p.from_file.is_some()) {
             st.status = "Device reconnected; the project opened from a file is kept (not read from the device)".into();
             return;
@@ -290,6 +292,7 @@ impl App {
         let intents = match self.elek.page {
             elek_view::ElekPage::Order => elek_view::show(ui, &mut self.elek),
             elek_view::ElekPage::Project => crate::ui::elek_project_view::show(ui, &mut self.elek),
+            elek_view::ElekPage::Presets => crate::ui::elek_presets_view::show(ui, &mut self.elek),
             elek_view::ElekPage::Library => crate::ui::elek_library_view::show(ui, &mut self.elek),
         };
         self.elek_intents(intents);
@@ -454,6 +457,8 @@ impl App {
     /// opened at the root the first time. Also brings the file panes back
     /// if the device view had hidden them.
     pub(super) fn show_drive(&mut self) {
+        self.engine.stop();
+        self.editor.play_when_loaded = false;
         self.dock_pool = false;
         self.pool_focused = false;
         self.focused = Role::Dest;
@@ -518,6 +523,9 @@ impl App {
                     self.elek.projects = None;
                     self.device.elek(ElekCmd::ListProjects);
                 }
+                ElekIntent::ListPresetBanks => self.device.elek(ElekCmd::ListPresetBanks),
+                ElekIntent::ListPresets(bank) => self.device.elek(ElekCmd::ListPresets(bank)),
+                ElekIntent::ReadPreset { bank, slot } => self.device.elek(ElekCmd::ReadPreset { bank, slot }),
                 ElekIntent::Read => self.elek_read(Vec::new()),
                 ElekIntent::ReadSounds => {
                     self.elek.lib.sound_progress = Some((0, crate::device::library::SOUND_POOL));
@@ -684,13 +692,14 @@ impl App {
                 self.note_pool_edit(k, &local);
                 self.load_into_editor(&local);
             } else {
-                // Device pages: a preview plays once, never looped.
-                self.once_for = self.elek_mode.then(|| local.clone());
-                self.preview_toggle(&local);
+                self.preview_device_sample(&local);
             }
             self.status = note;
             return;
         }
+        // Silence the editor immediately, including while the preview downloads.
+        self.engine.stop();
+        self.editor.play_when_loaded = false;
         let Some(name) = self.elek.names.get(&k).cloned() else {
             self.elek.status = if self.elek.busy.is_some() {
                 "Its +Drive path isn't known yet; try again once the names are in.".into()
@@ -1571,6 +1580,16 @@ impl App {
         }
         let st = &mut self.elek;
         match e {
+            ElekEv::PresetBanks(result) => st.presets.banks = Some(result),
+            ElekEv::Presets { bank, result } => { st.presets.listings.insert(bank, Some(result)); }
+            ElekEv::Preset { bank, slot, result } => {
+                if let Ok(preset) = &result {
+                    if let Some((key, Some(path))) = &preset.sample {
+                        st.names.insert(*key, path.clone());
+                    }
+                }
+                st.presets.sounds.insert((bank, slot), Some(result));
+            }
             ElekEv::Projects(r) => st.projects = Some(r),
             ElekEv::SoundProgress { done, total } => st.lib.sound_progress = Some((done, total)),
             ElekEv::Sounds(r) => {

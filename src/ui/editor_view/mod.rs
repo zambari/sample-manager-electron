@@ -248,9 +248,12 @@ pub fn show(
         } else {
             "Move the cursor onto a sample in Source or Destination to load it here.".to_owned()
         };
+        // Only the empty body takes focus. Covering max_rect here would
+        // put a later click target over the header and steal its controls.
+        let empty_body = ui.available_rect_before_wrap();
         ui.add_space(40.0);
         ui.vertical_centered(|ui| ui.label(RichText::new(msg).weak()));
-        let resp = ui.interact(ui.max_rect(), ui.scope_id().with("empty"), Sense::click());
+        let resp = ui.interact(empty_body, ui.scope_id().with("empty"), Sense::click());
         if resp.clicked() {
             out.push(EdIntent::TookFocus);
         }

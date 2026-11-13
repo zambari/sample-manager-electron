@@ -926,7 +926,7 @@ pub(crate) fn view_tools(ui: &mut egui::Ui, st: &mut ElekState) {
         return;
     }
     let ed = &mut st.proj;
-    ui.toggle_value(&mut ed.used_only, "Hide empty").on_hover_text("Hide empty slots (selected and changed ones stay)");
+    ui.toggle_value(&mut ed.used_only, "Hide empty").on_hover_text("Hide empty slots (selected and changed ones stay), tracks without trigs, and their sounds");
     ui.toggle_value(&mut ed.bytes, "Bytes").on_hover_text(
         "Folded-out patterns show raw bytes instead of steps: the last 32 bytes of each track, and the bytes after the pattern name. \
          Offsets are from the end of the track (-32..-1) and from the start of the pattern payload",
@@ -1128,6 +1128,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 if hdr.hovered() {
                     ui.painter().rect_filled(r, 2.0, OLED_HOVER);
                 }
+                let bank_color = theme::identity_color(b, BANKS);
+                theme::color_badge(ui.painter(), r, theme::BadgeEdge::Left, bank_color);
                 let col = if hdr.hovered() || bank_open { OLED } else { OLED_DIM };
                 triangle(ui.painter(), egui::pos2(r.left() + 14.0, r.center().y), bank_open, col);
                 ui.painter().text(egui::pos2(r.left() + 26.0, r.center().y), egui::Align2::LEFT_CENTER, format!("BANK {}", bank_letter(b)), oled_font(13.0), col);
@@ -1151,6 +1153,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 }
                 for &i in vis.iter().filter(|&&i| i / PER_BANK == b) {
 
+                let pattern_color = theme::child_identity_color(bank_color, i % PER_BANK, PER_BANK);
                 let cell = ed.cells[i].clone();
                 let cell = &cell;
                 let (state, name) = view(p, cell);
@@ -1158,13 +1161,15 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 // pattern itself, else from where its pasted tracks came from.
                 let info = cell.src.or_else(|| cell.tracks.values().chain(cell.sounds.values()).flatten().next().copied()).map(|s| &p.info[s as usize]);
                 let open = ed.open.contains(&i);
-                let tracks = info.map(|n| shown_tracks(n.seq.len(), audio, |t| seq_of(p, cell, t, &blank).is_empty())).unwrap_or_default();
+                let tracks: Vec<_> = info.map(|n| shown_tracks(n.seq.len(), audio, |t| seq_of(p, cell, t, &blank).is_empty())).unwrap_or_default()
+                    .into_iter().filter(|(_, t)| !ed.used_only || seq_of(p, cell, *t, &blank).notes() > 0).collect();
                 let mut step_hover: Option<String> = None;
                 let byte_rows = if ed.bytes && info.is_some() { 2.0 } else { 0.0 };
                 // Kit tracks with a decoded sound, for the SOUNDS foldout under the tracks.
                 let kit_n = info.map_or(0, |n| if tracks.is_empty() { 0 } else { n.tracks.len().min(audio) });
+                let kit_tracks: Vec<usize> = (0..kit_n).filter(|&t| !ed.used_only || tracks.iter().any(|(_, track)| *track == t)).collect();
                 let snd_open = ed.snd_open.contains(&i);
-                let snd_rows = if kit_n == 0 { 0.0 } else { 1.0 + if snd_open { kit_n as f32 } else { 0.0 } };
+                let snd_rows = if kit_tracks.is_empty() { 0.0 } else { 1.0 + if snd_open { kit_tracks.len() as f32 } else { 0.0 } };
                 let extra = if open { 4.0 + (tracks.len().max(1) as f32 + byte_rows + snd_rows) * TRACK_H + 4.0 } else { 0.0 };
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(w, ROW_H + extra), Sense::hover());
                 let rect = rect.shrink2(egui::vec2(0.0, 1.0));
@@ -1176,18 +1181,17 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                // The whole row drags the pattern; selecting it and its menu
-                // (Copy pattern, …) are on the header line only, so the
-                // folded-out tracks and sounds keep their own copy menus.
-                let resp = ui.interact(rect, ui.scope_id().with(("prow", i)), if editable { Sense::drag() } else { Sense::hover() });
+                // Pattern hover, selection, dragging and its menu stay on
+                // the header; folded-out tracks and sounds handle themselves.
+                let resp = ui.interact(rect, ui.scope_id().with(("prow", i)), Sense::hover());
+                let head = Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), ROW_H - 2.0));
+                let hresp = ui.interact(head, ui.scope_id().with(("phead", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
                 let selected = ed.sel.contains(&i);
-                let fill = if resp.contains_pointer() {
-                    OLED_HOVER
-                } else {
-                    ROW_FILL
-                };
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 2.0, fill);
+                painter.rect_filled(rect, 2.0, ROW_FILL);
+                if hresp.contains_pointer() {
+                    painter.rect_filled(head, 2.0, OLED_HOVER);
+                }
                 let changed = *cell != Cell::as_read(i);
                 if landing.contains(&i) {
                     painter.rect_stroke(rect, 2.0, Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT), egui::StrokeKind::Inside);
@@ -1200,8 +1204,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     painter.rect_filled(Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height())), 1.0, theme::DEVICE_ACCENT);
                 }
 
-                let head = Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), ROW_H - 2.0));
-                let hresp = ui.interact(head, ui.scope_id().with(("phead", i)), Sense::click());
+                theme::color_badge(&painter, head, theme::BadgeEdge::Left, pattern_color);
                 let y = head.center().y;
                 let x0 = rect.left();
                 // Fold-out arrow, its own click target.
@@ -1267,7 +1270,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     if open {
                         let mut ty = head.bottom() + 4.0;
                         if tracks.is_empty() {
-                            let why = if pending { "not loaded yet" } else { "step layout unknown for this version" };
+                            let why = if pending { "not loaded yet" } else if ed.used_only && !n.seq.is_empty() { "no tracks with trigs" } else { "step layout unknown for this version" };
                             painter.text(egui::pos2(x0 + 26.0, ty + TRACK_H / 2.0), egui::Align2::LEFT_CENTER, why, oled_font(10.0), OLED_DIM);
                         }
                         if ed.bytes && !tracks.is_empty() {
@@ -1295,6 +1298,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                             if t_selected {
                                 painter.rect_filled(line, 2.0, TRACK_SEL);
                             }
+                            theme::color_badge(&painter, Rect::from_min_max(line.min, egui::pos2(x0 + 21.0, line.bottom())), theme::BadgeEdge::Left, theme::child_identity_color(pattern_color, *t, n.seq.len()));
                             // The name and sample part of the line selects the track.
                             let hit = Rect::from_min_max(line.min, egui::pos2(x0 + DOTS_X - 8.0, line.max.y));
                             let tresp = ui.interact(hit, ui.scope_id().with(("ptrack", i, tt)), Sense::click());
@@ -1387,7 +1391,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                             }
                             ty += TRACK_H;
                         }
-                        if kit_n > 0 {
+                        if !kit_tracks.is_empty() {
                             ty = sound_foldout(SoundFold {
                                 ui,
                                 painter: &painter,
@@ -1398,6 +1402,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                                 right: rect.right(),
                                 ty,
                                 kit_n,
+                                kit_tracks: &kit_tracks,
+                                pattern_color,
                                 open: snd_open,
                                 show_defaults,
                                 pool: &pool_snd,
@@ -1441,8 +1447,8 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     _ => format!("{}: empty", patterns::label(i)),
                 } };
                 let hresp = hresp.on_hover_text_at_pointer(hover.clone());
-                let resp = resp.on_hover_text_at_pointer(hover);
-                if resp.drag_started() {
+                resp.on_hover_text_at_pointer(hover);
+                if hresp.drag_started() {
                     ed.clear_tracks();
                     if !ed.sel.contains(&i) {
                         ed.select_only(i);
@@ -1718,6 +1724,9 @@ struct SoundFold<'a, 'b> {
     ty: f32,
     /// Kit (audio) tracks.
     kit_n: usize,
+    /// Visible kit track indices, retaining their original numbering.
+    kit_tracks: &'a [usize],
+    pattern_color: Color32,
     open: bool,
     show_defaults: bool,
     /// The sound pool as read (empty when not read).
@@ -1738,7 +1747,7 @@ struct SoundFold<'a, 'b> {
 /// matches (same name and sample), machine and SRC page. Values that differ
 /// from that pool sound are amber. Returns the y below it.
 fn sound_foldout(f: SoundFold) -> f32 {
-    let SoundFold { ui, painter, p, cell, i, x0, right, mut ty, kit_n, open, show_defaults, pool, pointer, hover, toggle, copy, paste_label, paste } = f;
+    let SoundFold { ui, painter, p, cell, i, x0, right, mut ty, kit_n, kit_tracks, pattern_color, open, show_defaults, pool, pointer, hover, toggle, copy, paste_label, paste } = f;
     let head = Rect::from_min_max(egui::pos2(x0 + 18.0, ty), egui::pos2(x0 + SND_SRC_X, ty + TRACK_H));
     let r = ui.interact(head, ui.scope_id().with(("psnd", i)), Sense::click());
     let col = if r.hovered() || open { OLED } else { OLED_DIM };
@@ -1751,9 +1760,10 @@ fn sound_foldout(f: SoundFold) -> f32 {
     if !open {
         return ty;
     }
-    for t in 0..kit_n {
+    for &t in kit_tracks {
         let cy = ty + TRACK_H / 2.0;
         let line = Rect::from_min_max(egui::pos2(x0 + 18.0, ty), egui::pos2(right - 4.0, ty + TRACK_H));
+        theme::color_badge(painter, line, theme::BadgeEdge::Left, theme::child_identity_color(pattern_color, t, kit_n));
         let from_pool = cell.pool.get(&(t as u8)).and_then(|c| pool_cell_sound(p, pool, c));
         let Some(s) = from_pool.as_ref().or_else(|| cell.sound_src(t).and_then(|src| p.info[src as usize].tracks.get(t)).map(|ti| &ti.sound)) else {
             painter.text(egui::pos2(x0 + 24.0, cy), egui::Align2::LEFT_CENTER, format!("T{}", t + 1), oled_font(10.0), OLED_DIM);

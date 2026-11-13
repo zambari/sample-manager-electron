@@ -266,7 +266,10 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
     tab.scroll_to_cursor = false;
 
     let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    let motion_id = ui.scope_id().with("ping_scroll");
+    let mut ping_target = None;
     if let Some(c) = scroll_target {
+        ui.data_mut(|d| d.remove::<(f64, f32, f32)>(motion_id));
         // Keep the keyboard cursor on screen without snapping the view around
         // when it's already visible.
         let y = c as f32 * (ROW_HEIGHT + ui.spacing().item_spacing.y);
@@ -283,11 +286,14 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
             let y = i as f32 * row_h;
             let (top, h) = tab.view;
             if y < top || y + row_h > top + h {
-                area = area.vertical_scroll_offset((y - (h - row_h) / 2.0).max(0.0));
+                ping_target = Some((y - (h - row_h) / 2.0).clamp(0.0, (total as f32 * row_h - h).max(0.0)));
             }
         }
     }
     tab.scroll_to_ping = false;
+    if let Some(y) = ping_scroll(ui, motion_id, tab.view.0, ping_target) {
+        area = area.vertical_scroll_offset(y);
+    }
 
     // Empty space below (and behind) the rows: right-click to paste into the
     // folder being shown. Registered before the rows, so rows win the hit.
@@ -352,15 +358,35 @@ fn rows(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, intents: &mut Vec<Inte
 /// How long a ping (a row pointed out from the device view) lasts.
 pub const PING_SECS: f32 = 1.6;
 
-/// A ping: two quick pulses of the accent that fade out.
+/// Animate toward a pinged row with a quintic S-curve and no overshoot.
+pub fn ping_scroll(ui: &Ui, id: egui::Id, current: f32, target: Option<f32>) -> Option<f32> {
+    let now = ui.input(|i| i.time);
+    if let Some(target) = target {
+        ui.data_mut(|d| d.insert_temp(id, (now, current, target)));
+    } else if ui.input(|i| i.smooth_scroll_delta != egui::Vec2::ZERO || i.pointer.any_pressed()) {
+        ui.data_mut(|d| d.remove::<(f64, f32, f32)>(id));
+    }
+    let (start, from, to) = ui.data(|d| d.get_temp::<(f64, f32, f32)>(id))?;
+    let t = ((now - start) as f32 / 0.9).clamp(0.0, 1.0);
+    if t >= 1.0 {
+        ui.data_mut(|d| d.remove::<(f64, f32, f32)>(id));
+    } else {
+        ui.ctx().request_repaint();
+    }
+    Some(from + (to - from) * ping_curve(t))
+}
+
+fn ping_curve(t: f32) -> f32 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// A steady accent that fades gently with no repeated pulses.
 pub fn paint_ping(ui: &Ui, rect: egui::Rect, at: std::time::Instant, color: egui::Color32) {
     let t = at.elapsed().as_secs_f32();
     if t >= PING_SECS {
         return;
     }
-    let k = 1.0 - t / PING_SECS;
-    let beat = 0.55 + 0.45 * (t * std::f32::consts::TAU * 1.5).cos();
-    let a = k * beat;
+    let a = 1.0 - ping_curve((t / PING_SECS).clamp(0.0, 1.0));
     ui.painter().rect_filled(rect, 2.0, color.gamma_multiply(0.35 * a));
     ui.painter()
         .rect_stroke(rect, 2.0, Stroke::new(2.0, color.gamma_multiply(a)), StrokeKind::Inside);

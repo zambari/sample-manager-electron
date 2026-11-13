@@ -216,8 +216,12 @@ impl App {
                     } else if on_dev {
                         // A device file we have locally plays like a local one.
                         match self.linked_local(&p) {
-                            Some(local) => self.preview_toggle(&local),
-                            None => self.ask_device_load(p),
+                            Some(local) => self.preview_device_sample(&local),
+                            None => {
+                                self.engine.stop();
+                                self.editor.play_when_loaded = false;
+                                self.ask_device_load(p);
+                            }
                         }
                     } else {
                         self.preview_toggle(&p);

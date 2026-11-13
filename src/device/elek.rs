@@ -12,6 +12,7 @@ pub mod file;
 pub mod library;
 pub mod machines;
 pub mod patterns;
+pub mod presets;
 
 pub use patterns::{Cell, PatState, Patterns};
 
@@ -996,6 +997,9 @@ pub enum ReadFirst {
 
 pub enum ElekCmd {
     ListProjects,
+    ListPresetBanks,
+    ListPresets(String),
+    ReadPreset { bank: String, slot: u32 },
     /// The project's sound pool, read-only (`library`).
     ReadSounds,
     /// Read the project; `known` names needn't be looked up again. `ctl`
@@ -1044,6 +1048,9 @@ impl ReadCtl {
 
 pub enum ElekEv {
     Projects(Result<Vec<SavedProject>, String>),
+    PresetBanks(Result<Vec<String>, String>),
+    Presets { bank: String, result: Result<Vec<presets::PresetEntry>, String> },
+    Preset { bank: String, slot: u32, result: Result<presets::Preset, String> },
     SoundProgress { done: usize, total: usize },
     Sounds(Result<Vec<library::PoolSound>, String>),
     Progress {
@@ -1293,6 +1300,18 @@ impl Worker {
             }));
         };
         match cmd {
+            ElekCmd::ListPresetBanks => {
+                let r = self.with_conn(|c| c.preset_banks());
+                em.send(Ev::Elek(ElekEv::PresetBanks(r)));
+            }
+            ElekCmd::ListPresets(bank) => {
+                let result = self.with_conn(|c| c.preset_entries(&bank));
+                em.send(Ev::Elek(ElekEv::Presets { bank, result }));
+            }
+            ElekCmd::ReadPreset { bank, slot } => {
+                let result = self.with_conn(|c| c.read_preset(&bank, slot));
+                em.send(Ev::Elek(ElekEv::Preset { bank, slot, result }));
+            }
             ElekCmd::ListProjects => {
                 let r = self.with_conn(|c| c.list_projects());
                 self.em.send(Ev::Elek(ElekEv::Projects(r)));

@@ -18,6 +18,57 @@ pub const DEVICE_ACCENT_BRIGHT: Color32 = Color32::from_rgb(232, 194, 64);
 /// Main waveform colour inside the in/out region.
 pub const WAVE: Color32 = Color32::from_rgb(178, 200, 214);
 
+/// Quiet identity range, shared by banks and other ordered groups.
+pub const IDENTITY_START: Color32 = Color32::from_rgb(28, 132, 230);
+pub const IDENTITY_END: Color32 = Color32::from_rgb(47, 163, 107);
+
+/// Evenly spaced RGB interpolation: one item gets the midpoint, two get
+/// the endpoints. Empty ranges also return the midpoint; indices clamp.
+pub fn identity_color(index: usize, count: usize) -> Color32 {
+    let t = if count <= 1 { 0.5 } else { index.min(count - 1) as f32 / (count - 1) as f32 };
+    let channel = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color32::from_rgb(
+        channel(IDENTITY_START.r(), IDENTITY_END.r()),
+        channel(IDENTITY_START.g(), IDENTITY_END.g()),
+        channel(IDENTITY_START.b(), IDENTITY_END.b()),
+    )
+}
+
+/// A child's own position in its list, blended equally with its parent.
+/// Use structural indices/counts so filtering does not change identities.
+pub fn child_identity_color(parent: Color32, index: usize, count: usize) -> Color32 {
+    let own = identity_color(index, count);
+    let midpoint = |a: u8, b: u8| ((a as u16 + b as u16 + 1) / 2) as u8;
+    Color32::from_rgb(midpoint(parent.r(), own.r()), midpoint(parent.g(), own.g()), midpoint(parent.b(), own.b()))
+}
+
+pub enum BadgeEdge {
+    Left,
+    // Available for other contexts using the shared badge.
+    #[allow(dead_code)]
+    Top,
+    Bottom,
+}
+
+/// Paint an edge inside an existing element: two physical pixels wide on
+/// the left, one physical pixel high on top/bottom. Takes no
+/// layout space and leaves its pointer handling unchanged.
+pub fn color_badge(painter: &egui::Painter, rect: egui::Rect, edge: BadgeEdge, color: Color32) {
+    let ppp = painter.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let mut r = egui::Rect::from_min_max(
+        egui::pos2(snap(rect.left()), snap(rect.top())),
+        egui::pos2(snap(rect.right()), snap(rect.bottom())),
+    );
+    let pixel = 1.0 / ppp;
+    match edge {
+        BadgeEdge::Left => r.max.x = r.min.x + 2.0 * pixel,
+        BadgeEdge::Top => r.max.y = r.min.y + pixel,
+        BadgeEdge::Bottom => r.min.y = r.max.y - pixel,
+    }
+    painter.rect_filled(r, 0.0, color);
+}
+
 /// Faint frame around a pane showing the Digitakt's +Drive.
 pub fn device_frame() -> Stroke {
     Stroke::new(1.5, DEVICE_ACCENT_BRIGHT.gamma_multiply(0.45))
@@ -242,11 +293,19 @@ pub fn device_group<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) 
 pub fn device_switch(ui: &mut egui::Ui, active: bool, focused: bool) -> egui::Response {
     let presence = crate::device::presence();
     let label = device_label("Device");
-    let connected = matches!(presence, crate::device::Presence::One(_) | crate::device::Presence::Many(_));
+    let status = crate::device::connection_status();
+    let connected = matches!(status, Some(Ok(_))) && presence.available();
+    let failed = matches!(status, Some(Err(_))) && presence.available();
     let mut resp = device_dimmed(ui, |ui| ui.add(accent_title(&label, active, focused, connected, DEVICE_ACCENT, DEVICE_ACCENT_BRIGHT)));
-    if matches!(presence, crate::device::Presence::Many(_)) {
+    if failed || matches!(presence, crate::device::Presence::Many(_)) {
         let err = ui.visuals().error_fg_color;
         resp |= ui.label(egui::RichText::new("⚠").color(err).strong());
+    }
+    if failed {
+        resp |= ui.label(egui::RichText::new("NOT CONNECTED").small().color(ui.visuals().error_fg_color));
+        if let Some(Err(why)) = status {
+            resp = resp.on_hover_text(why);
+        }
     }
     if presence == crate::device::Presence::Off {
         resp |= ui.label(egui::RichText::new("OFF").font(oled_font(10.0)).weak());

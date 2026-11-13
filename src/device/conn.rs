@@ -152,10 +152,10 @@ impl Conn {
                 },
                 (),
             )
-            .map_err(|e| format!("MIDI input: {e}"))?;
+            .map_err(|e| format!("Detected {in_name}, but could not open its MIDI input. A DAW or another MIDI app may be using it. Disable this device in that app or close the app, then click Retry connection. MIDI input: {e}"))?;
         let out = output
             .connect(&out_port, "sample-manager-out")
-            .map_err(|e| format!("MIDI output: {e}"))?;
+            .map_err(|e| format!("Detected {in_name}, but could not open its MIDI output. A DAW or another MIDI app may be using it. Disable this device in that app or close the app, then click Retry connection. MIDI output: {e}"))?;
 
         let mut c = Self {
             out,
@@ -171,7 +171,9 @@ impl Conn {
         };
         let r = c
             .request_within(proto::DEVICE, Args::default(), HANDSHAKE_TIMEOUT)
-            .map_err(|_| "no answer (is USB config set to Overbridge or USB MIDI?)".to_owned())?;
+            .map_err(|e| format!(
+                "Detected {in_name}, but it did not complete the MIDI handshake. A DAW or another MIDI app may be using it. Disable this device in that app or close the app, check USB config is Overbridge or USB MIDI, then click Retry connection. Details: {e}"
+            ))?;
         let mut rd = Reader::new(&r);
         let id = rd.u8().map_err(|e| format!("bad device reply: {e}"))?;
         // Message ids the device supports, then its name.

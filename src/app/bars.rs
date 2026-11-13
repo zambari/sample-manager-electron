@@ -340,6 +340,13 @@ impl App {
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("SAMPLE MANAGER").size(13.0).strong().color(theme::ACCENT_BRIGHT));
+            ui.menu_button("Info", |ui| {
+                ui.label(egui::RichText::new("Sample Manager").strong());
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                ui.separator();
+                ui.hyperlink_to("GitHub repository", "https://github.com/zambari/sample-manager-electron");
+                ui.hyperlink_to("zambari.info", "https://zambari.info");
+            });
 
             if self.build_watch.ready() {
                 ui.separator();

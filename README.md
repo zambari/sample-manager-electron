@@ -159,8 +159,9 @@ its real start on the device.
 ### Elektron device view
 
 Click **Device** next to the editor title to work on the project loaded on
-a Digitakt or Digitakt II, in place of the editor. It has three pages,
-**Samples**, **Patterns** and **Sounds**. *Load* reads whatever project is open on the
+a Digitakt or Digitakt II, in place of the editor. Its pages are
+**Samples**, **Patterns**, **Presets** and **Sounds**, followed by **+Drive**.
+*Load* reads whatever project is open on the
 device now (load another one on the device with PROJECT › LOAD first).
 Patterns arrive one by one, folded-out banks first; a bank can be edited
 as soon as all of it is in, and **Stop** ends a read early, keeping the
@@ -215,6 +216,17 @@ notices when the device is plugged in or out and reconnects on its own.
   Select tracks and **copy and paste** them into other patterns: the whole
   track (trigs, p-locks and sound), just its events, or just its sound.
   The app asks before a paste would overwrite trigs.
+
+#### Presets: saved sounds on +Drive
+
+The **Presets** page has two independent bank browsers, with bank switches,
+a name filter and **Hide empty**. Click a preset to read its machine, source
+sample and SRC values. Exact matches in the loaded project's sound pool
+are identified by comparing the entire sound payload. **▶ Sample** previews
+the source sample; it does not render the preset's effects or synthesis.
+**Refresh presets** rereads saved changes from the device. Browsing is read-only
+and works without loading a project. Preset decoding has been verified on
+Digitakt II; other supported sound versions use the existing sound decoder.
 
 #### Sounds: the project's sound pool
 

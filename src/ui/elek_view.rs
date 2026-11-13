@@ -101,6 +101,8 @@ pub struct ElekState {
     pub proj: crate::ui::elek_project_view::ProjEd,
     /// The Sounds page: kits, samples, sound pool, +Drive data.
     pub lib: crate::ui::elek_library_view::LibraryView,
+    /// Saved +Drive preset banks, independent of the loaded project.
+    pub presets: crate::ui::elek_presets_view::PresetView,
     /// After a push with pattern edits: every pattern payload, by slot, the
     /// device should now hold.
     /// (`None`: a slot that wasn't loaded.)
@@ -149,11 +151,16 @@ pub enum ElekPage {
     #[default]
     Order,
     Project,
+    /// Saved +Drive preset banks.
+    Presets,
     /// Sounds: the project's sound pool.
     Library,
 }
 
 pub enum ElekIntent {
+    ListPresetBanks,
+    ListPresets(String),
+    ReadPreset { bank: String, slot: u32 },
     BackToEditor,
     /// The DEVICE switch: close the device panels and its MIDI ports.
     ToggleDevice,
@@ -1070,6 +1077,7 @@ pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>, drive: b
         &[
             (DevicePick::Page(ElekPage::Order), "Samples", "The sample pool in two side-by-side panes"),
             (DevicePick::Page(ElekPage::Project), "Patterns", "Experimental: move, copy, clear and rename patterns (Digitakt II support is newer and less tested)"),
+            (DevicePick::Page(ElekPage::Presets), "Presets", "Saved +Drive presets in two bank browsers"),
             (DevicePick::Page(ElekPage::Library), "Sounds", "The project's 128 pool sounds: rearrange, rename or delete them"),
             (DevicePick::Drive, "+Drive", "The device's file storage, in the right column"),
         ],
@@ -1101,6 +1109,7 @@ pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekInten
         match st.page {
             ElekPage::Order => preview_tools(ui, st, out),
             ElekPage::Project => crate::ui::elek_project_view::view_tools(ui, st),
+            ElekPage::Presets => {},
             ElekPage::Library => crate::ui::elek_library_view::view_tools(ui, st),
         }
     });
@@ -1726,6 +1735,7 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
                 font.clone(),
                 OLED,
             );
+            theme::color_badge(p, r.shrink2(egui::vec2(4.0, 0.0)), theme::BadgeEdge::Bottom, theme::identity_color(b, banks));
             // Dragging slots over a bank tab opens that bank.
             if resp.clicked() || resp.dnd_hover_payload::<SlotDrag>().is_some() {
                 pick = Some(b);
@@ -1752,14 +1762,25 @@ fn slot_pane(ui: &mut egui::Ui, st: &mut ElekState, side: usize) {
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt(("elek_slots", side, bank))
         .auto_shrink([false, false]);
+    let motion_id = ui.scope_id().with(("pool_ping_scroll", side, bank));
+    let mut ping_target = None;
     if let Some(r) = target.filter(|&r| r >= first) {
         let y = (r - first) as f32 * ROW_H;
         let (top, h) = (st.scroll[side], st.view_h[side]);
-        if y < top {
-            scroll = scroll.vertical_scroll_offset(y);
-        } else if y + ROW_H > top + h {
-            scroll = scroll.vertical_scroll_offset(y + ROW_H - h);
+        let destination = if y < top { Some(y) } else if y + ROW_H > top + h {
+            Some(y + ROW_H - h)
+        } else { None };
+        if st.reveal.is_some() {
+            ui.data_mut(|d| d.remove::<(f64, f32, f32)>(motion_id));
+            if let Some(y) = destination {
+                scroll = scroll.vertical_scroll_offset(y);
+            }
+        } else {
+            ping_target = destination.map(|y| y.clamp(0.0, (rows as f32 * ROW_H - h).max(0.0)));
         }
+    }
+    if let Some(y) = crate::ui::file_table::ping_scroll(ui, motion_id, st.scroll[side], ping_target) {
+        scroll = scroll.vertical_scroll_offset(y);
     }
     let out = egui::Frame::new()
         .fill(OLED_BG)

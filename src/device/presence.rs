@@ -61,6 +61,19 @@ impl Presence {
 }
 
 static STATE: Mutex<Presence> = Mutex::new(Presence::Unknown);
+// Port discovery alone does not establish that the device can communicate.
+static CONNECTION: Mutex<Option<Result<String, String>>> = Mutex::new(None);
+
+pub fn connection_status() -> Option<Result<String, String>> {
+    CONNECTION.lock().ok().and_then(|s| s.clone())
+}
+
+pub(super) fn set_connection_status(status: Result<String, String>) {
+    if let Ok(mut s) = CONNECTION.lock() {
+        *s = Some(status);
+    }
+}
+
 static OFF: AtomicBool = AtomicBool::new(false);
 
 /// The latest scan, or [`Presence::Off`] while switched off.
@@ -81,6 +94,9 @@ pub fn switched_off() -> bool {
 /// fresh this frame).
 pub fn set_off(off: bool) {
     OFF.store(off, Ordering::Relaxed);
+    if let Ok(mut s) = CONNECTION.lock() {
+        *s = None;
+    }
     crate::log::line(format!("device: switched {}", if off { "off" } else { "on" }));
     if !off {
         let now = scan();

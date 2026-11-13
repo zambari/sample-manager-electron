@@ -252,6 +252,7 @@ impl Worker {
             .conn
             .take()
             .is_some_and(|c| c.dead || !port_present(&c.port));
+        super::presence::set_connection_status(Err(e.clone()));
         self.em.send(Ev::DeviceStatus(Err(e.clone())));
         if gone {
             self.em.send(Ev::DeviceLost);
@@ -339,6 +340,7 @@ impl Worker {
             )),
             None => Err("not connected".to_owned()),
         };
+        super::presence::set_connection_status(s.clone());
         self.em.send(Ev::DeviceStatus(s));
     }
 
@@ -356,6 +358,7 @@ impl Worker {
                     self.status();
                 }
                 Err(e) => {
+                    super::presence::set_connection_status(Err(e.clone()));
                     self.em.send(Ev::DeviceStatus(Err(e.clone())));
                     return Err(e);
                 }

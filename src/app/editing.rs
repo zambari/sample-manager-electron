@@ -92,6 +92,21 @@ impl App {
         }
     }
 
+    /// Device previews take over from editor playback, even before a load
+    /// or an unsaved-edit prompt finishes. Clicking a running preview stops it.
+    pub(super) fn preview_device_sample(&mut self, path: &Path) {
+        let stopping = self.voice_once
+            && self.playing_current()
+            && self.editor.path() == Some(path);
+        self.engine.stop();
+        self.editor.play_when_loaded = false;
+        self.once_for = None;
+        if !stopping {
+            self.once_for = Some(path.to_path_buf());
+            self.audition(path, true);
+        }
+    }
+
     /// Auto-load whatever the file cursor is on, when it changes.
     pub(super) fn follow_cursor(&mut self) {
         let tab = self.pane(self.focused).active_tab();
