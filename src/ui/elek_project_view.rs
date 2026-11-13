@@ -1075,9 +1075,12 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 if !ui.is_rect_visible(rect) {
                     continue;
                 }
-                let resp = ui.interact(rect, ui.scope_id().with(("prow", i)), if editable { Sense::click_and_drag() } else { Sense::click() });
+                // The whole row drags the pattern; selecting it and its menu
+                // (Copy pattern, …) are on the header line only, so the
+                // folded-out tracks and sounds keep their own copy menus.
+                let resp = ui.interact(rect, ui.scope_id().with(("prow", i)), if editable { Sense::drag() } else { Sense::hover() });
                 let selected = ed.sel.contains(&i);
-                let fill = if resp.hovered() {
+                let fill = if resp.contains_pointer() {
                     OLED_HOVER
                 } else {
                     ROW_FILL
@@ -1097,6 +1100,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                 }
 
                 let head = Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), ROW_H - 2.0));
+                let hresp = ui.interact(head, ui.scope_id().with(("phead", i)), Sense::click());
                 let y = head.center().y;
                 let x0 = rect.left();
                 // Fold-out arrow, its own click target.
@@ -1329,6 +1333,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     (PatState::Phantom, Some(n)) => format!("{}: nearly empty ({} bytes differ from an empty pattern: kit tweaks, no trigs)", patterns::label(i), n.diff),
                     _ => format!("{}: empty", patterns::label(i)),
                 } };
+                let hresp = hresp.on_hover_text_at_pointer(hover.clone());
                 let resp = resp.on_hover_text_at_pointer(hover);
                 if resp.drag_started() {
                     ed.clear_tracks();
@@ -1337,9 +1342,9 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                     }
                     ed.drag = Some(i);
                 }
-                if resp.double_clicked() && editable {
+                if hresp.double_clicked() && editable {
                     ed.start_inline(p, i);
-                } else if resp.clicked() {
+                } else if hresp.clicked() {
                     ed.clear_tracks();
                     if mods.shift {
                         let a = ed.cursor.unwrap_or(i);
@@ -1356,7 +1361,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                         ed.select_only(i);
                     }
                 }
-                resp.context_menu(|ui| {
+                hresp.context_menu(|ui| {
                     if !ed.sel.contains(&i) {
                         ed.select_only(i);
                     }
@@ -1372,7 +1377,7 @@ fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                         toggles.push(i);
                         ui.close();
                     }
-                    if ui.button("Copy  ⌘C").clicked() {
+                    if ui.button("Copy pattern  ⌘C").clicked() {
                         status = Some(copy(ed));
                         ui.close();
                     }
