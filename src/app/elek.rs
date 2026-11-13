@@ -684,6 +684,8 @@ impl App {
                 self.note_pool_edit(k, &local);
                 self.load_into_editor(&local);
             } else {
+                // Device pages: a preview plays once, never looped.
+                self.once_for = self.elek_mode.then(|| local.clone());
                 self.preview_toggle(&local);
             }
             self.status = note;

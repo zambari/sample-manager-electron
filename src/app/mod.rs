@@ -277,6 +277,12 @@ pub struct App {
     /// The exact sample buffer the voice was given. A crop (or undoing one)
     /// swaps the editor's buffer, and the voice has to follow.
     voice_sample: Option<std::sync::Arc<crate::audio::decode::Sample>>,
+    /// The voice plays its region once, whatever the Loop toggle says: a
+    /// slot previewed from the device pages.
+    voice_once: bool,
+    /// The next play of this file is such a one-shot preview (set when the
+    /// click comes in, used once the file has loaded).
+    once_for: Option<PathBuf>,
     /// File-cursor target last seen, to auto-load on change.
     last_cursor: Option<PathBuf>,
     /// A saved editor session was restored: don't let the file cursor's
@@ -512,6 +518,8 @@ impl App {
             committed_dirty: false,
             voice_path: None,
             voice_sample: None,
+            voice_once: false,
+            once_for: None,
             last_cursor: None,
             hold_cursor_load: session.is_some(),
             last_stream_error: None,
@@ -756,9 +764,13 @@ impl eframe::App for App {
             }
             let ed = &self.editor;
             self.engine
-                .update(ed.sel.0, ed.sel.1, ed.prefs.looping, ed.gain(), ed.fold());
+                .update(ed.sel.0, ed.sel.1, ed.prefs.looping && !self.voice_once, ed.gain(), ed.fold());
             ctx.request_repaint();
         }
+        self.elek.playing = (self.elek_mode && self.engine.is_playing())
+            .then(|| self.voice_path.as_deref())
+            .flatten()
+            .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         self.preview.set(if self.engine.is_playing() {
             self.voice_path.clone()
         } else {

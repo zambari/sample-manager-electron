@@ -28,6 +28,27 @@ pub fn device_wash() -> Color32 {
     DEVICE_ACCENT.gamma_multiply(0.05)
 }
 
+/// A drop (or other action) that would be refused here.
+pub const DENY: Color32 = Color32::from_rgb(222, 52, 52);
+
+/// Frame around a drop target that won't take what's being dragged. Use it
+/// for every refused drop so they all look the same; accepted drops keep
+/// their own accent frame at the same width.
+pub fn deny_frame() -> Stroke {
+    Stroke::new(2.0, DENY)
+}
+
+/// A short note by the pointer, drawn above everything (tooltips don't show
+/// while dragging). Call it each frame it should stay up.
+pub fn pointer_note(ctx: &egui::Context, msg: &str, fill: Color32) {
+    let Some(pos) = ctx.pointer_latest_pos() else { return };
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("pointer_note")));
+    let galley = painter.layout(msg.to_owned(), egui::FontId::proportional(13.0), Color32::WHITE, 360.0);
+    let r = egui::Rect::from_min_size(pos + egui::vec2(14.0, 10.0), galley.size() + egui::vec2(12.0, 8.0));
+    painter.rect_filled(r, 3.0, fill.gamma_multiply(0.9));
+    painter.galley(r.min + egui::vec2(6.0, 4.0), galley, Color32::WHITE);
+}
+
 /// Something on the device is older than its local file (edited since).
 pub const CHANGED: Color32 = Color32::from_rgb(245, 190, 60);
 

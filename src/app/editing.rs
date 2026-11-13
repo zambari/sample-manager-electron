@@ -30,6 +30,7 @@ impl App {
         } else {
             a
         };
+        self.voice_once = self.once_for.take().is_some_and(|p| p == s.path);
         self.voice_path = Some(s.path.clone());
         self.voice_sample = Some(s.clone());
         self.engine.play(
@@ -38,7 +39,7 @@ impl App {
                 from,
                 loop_start: a,
                 end: b,
-                looping: self.editor.prefs.looping,
+                looping: self.editor.prefs.looping && !self.voice_once,
                 gain: self.editor.gain(),
                 mono: self.editor.fold(),
             },
@@ -84,6 +85,7 @@ impl App {
     /// Space / double-click on a file row.
     pub(super) fn preview_toggle(&mut self, path: &Path) {
         if self.editor.path() == Some(path) && self.playing_current() {
+            self.once_for = None;
             self.engine.stop();
         } else {
             self.audition(path, true);

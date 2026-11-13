@@ -82,6 +82,10 @@ pub struct ElekState {
     ping_scroll: Option<usize>,
     /// Clicking a slot (or moving the cursor onto it) plays it.
     pub preview: bool,
+    /// Name of the sample the editor is playing right now, set by the app
+    /// each frame: the mode header's Sample Editor title turns into a
+    /// PLAYING banner that leads back to it.
+    pub playing: Option<String>,
     /// Shown as one pane in the right column, beside the files and editor.
     pub docked: bool,
     /// Pass number (+1) when the dialogs were last drawn. The Patterns page
@@ -231,6 +235,17 @@ impl ElekState {
     pub fn entry(&self, old: usize) -> PoolEntry {
         let Some(p) = &self.project else { return PoolEntry::default() };
         self.fills.get(&(old as u16)).copied().unwrap_or(p.pool[old])
+    }
+
+    /// The slot whose sample came from (or was fetched to) local file `p`,
+    /// unedited since: dropping `p` again would be refused as a duplicate.
+    /// Other identical copies of the file are only caught after the drop.
+    pub(crate) fn slot_of_local(&self, p: &std::path::Path) -> Option<usize> {
+        (1..self.order.len()).find(|&s| {
+            self.key_at(s).is_some_and(|k| {
+                !self.changed_local.contains_key(&k) && self.linked.get(&k).is_some_and(|(_, l, _)| l == p)
+            })
+        })
     }
 
     /// Entry `old` holds nothing and nothing is on its way into it.
@@ -981,7 +996,18 @@ enum RowAct {
 /// The mode switch across the top of both full-window pages, with the
 /// layout switches on the right.
 pub(crate) fn mode_header(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>) {
-    if ui.add(theme::pane_title("Sample Editor", false)).clicked() {
+    let back = match &st.playing {
+        Some(name) => ui
+            .add(
+                egui::Button::new(
+                    RichText::new("▶ PLAYING").size(12.0).strong().color(theme::ON_ACCENT),
+                )
+                .fill(theme::ACCENT),
+            )
+            .on_hover_text(format!("Playing {name}\nClick to see it in the Sample Editor")),
+        None => ui.add(theme::pane_title("Sample Editor", false)),
+    };
+    if back.clicked() {
         out.push(ElekIntent::BackToEditor);
     }
     ui.add_space(14.0);
@@ -2027,11 +2053,24 @@ fn slot_row(ui: &mut egui::Ui, st: &ElekState, slot: usize, acts: &mut Vec<RowAc
     }
     // Local files from a file pane (or Finder) onto an empty slot.
     if let Some(d) = resp.dnd_hover_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
-        let ok = st.free(from as u16);
-        let n = if ok { d.paths.len().min(st.order.len() - slot) } else { 1 };
+        let free = st.free(from as u16);
+        let held: Vec<usize> = d.paths.iter().filter_map(|p| st.slot_of_local(p)).collect();
+        let fresh = d.paths.len() - held.len();
+        let ok = free && fresh > 0;
+        let n = if ok { fresh.min(st.order.len() - slot) } else { 1 };
         let r = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), ROW_H * n as f32));
-        let c = if ok { theme::DEVICE_ACCENT_BRIGHT } else { Color32::from_rgb(230, 120, 90) };
-        ui.painter().rect_stroke(r, 0.0, Stroke::new(2.0, c), egui::StrokeKind::Inside);
+        let stroke = if ok { Stroke::new(2.0, theme::DEVICE_ACCENT_BRIGHT) } else { theme::deny_frame() };
+        ui.painter().rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+        let note = match (free, held.as_slice()) {
+            (false, _) => Some("Drop onto an empty slot (\"-\")".to_owned()),
+            (true, [one]) if fresh == 0 => Some(format!("Already in the pool (slot {})", st.label(*one))),
+            (true, _) if fresh == 0 => Some(format!("All {} already in the pool", held.len())),
+            (true, []) => None,
+            (true, _) => Some(format!("{} already in the pool, left out", held.len())),
+        };
+        if let Some(msg) = note {
+            theme::pointer_note(ui.ctx(), &msg, if ok { theme::DEVICE_ACCENT } else { theme::DENY });
+        }
     }
     if let Some(d) = resp.release_payload::<crate::ui::file_table::DragPayload>().filter(|d| !d.device) {
         acts.push(RowAct::DropFiles(slot, d.paths.clone()));

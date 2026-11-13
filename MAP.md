@@ -87,7 +87,7 @@ Intents handled in `App::elek_intents` (`src/app/elek.rs`).
 
 | Control | Where |
 |---|---|
-| Mode header: Sample Editor / Device (Samples / Patterns / +Drive), **⇥ Dock beside files** (accent-filled, Samples page only), **Hide file panes** | `mode_header`, `device_pages` in `src/ui/elek_view.rs` |
+| Mode header: Sample Editor / Device (Samples / Patterns / +Drive; the Sample Editor title becomes an accent **▶ PLAYING** button while a sample plays, `ElekState::playing` set in `App::logic`), **⇥ Dock beside files** (accent-filled, Samples page only), **Hide file panes** | `mode_header`, `device_pages` in `src/ui/elek_view.rs` |
 | Device bar: **⬇ Load current project**, **⬆ Push to device**, **💾 File** menu (Save / Load project…), **+Drive projects** menu, status line | `device_bar`, `file_menu`, `projects_menu`, `status_line` in `src/ui/elek_view.rs` |
 | Samples page tools: **🔊 Preview on click**, **⬇ Fetch all for preview**, Cache menu, Undo / Reset, **⚡ Live** | `preview_tools`, `order_tools` |
 | Live mode (push each pool edit after a pause; needs the whole project read, every pattern renumbered) | `App::live_push_tick`, `App::elek_push` in `src/app/elek.rs`; gate `ElekState::pool_pushable` |
@@ -122,6 +122,7 @@ is opened by a pending field on `App` and answered at the end of `App::ui`.
 | Global look: greys, accent, corner radius, spacing | `theme::apply` in `src/ui/theme.rs` |
 | Accent colours | `ACCENT`, `ACCENT_BRIGHT`, `ON_ACCENT`; device yellow `DEVICE_ACCENT*` |
 | Anything device-related: wash, frame, dimming when unplugged, icon | `device_wash`, `device_frame`, `device_dimmed`, `device_group`, `DEVICE_ICON` in `theme.rs` |
+| Refused drop / invalid action: red frame `deny_frame()` (colour `DENY`), note by the pointer while dragging `pointer_note` (tooltips don't show mid-drag) | `theme.rs`; used by pool file drops in `src/ui/elek_view.rs` (duplicates via `ElekState::slot_of_local`) and `blocked_tip` in `elek_library_view.rs` |
 | Device-screen look (pixel font, OLED colours) | `oled_font`, `OLED*`, `install_fonts` in `theme.rs`; font is `assets/frucade.ttf` |
 | Shared widgets: pane titles, tabs, section headers, × buttons, show toggles | `pane_title`, `mode_title`, `pane_tab`, `device_tab`, `section_header`, `close_button`, `vis_toggle`, `soft_toggle` (quiet on/off setting), `progress_bar` (square corners, use for every bar) in `theme.rs` |
 | Editor colours (in/out, playhead, clip, limit, mono, marker) and sizes | consts at the top of `src/ui/editor_view/mod.rs` |
@@ -171,7 +172,7 @@ There are two mechanisms, and only the device one is a real queue.
 | Keyboard shortcuts: editor | `keymap::editor_actions`, `EdAction`; dispatch `App::perform_editor` in `src/app/editing.rs` |
 | Keyboard shortcuts: device view | `ElekState::keys` in `elek_view.rs`, `keys` in `elek_project_view.rs` |
 | Playback engine, output device, live loop updates | `src/audio/engine.rs`; `App::start_play_from`, end of `App::logic` |
-| Loading a file into the editor, auditioning, auto-play | `App::audition`, `App::follow_cursor`, `Editor::request` |
+| Loading a file into the editor, auditioning, auto-play (device-page previews play once, ignoring Loop: `App::once_for` / `voice_once`) | `App::audition`, `App::follow_cursor`, `Editor::request` |
 | Editor state, prefs, session restore | `Editor`, `Prefs`, `Session` in `src/editor/mod.rs` |
 | Editor undo | `src/editor/history.rs` |
 | File-operation undo (⌘Z in a pane) | `src/app/undo.rs` |

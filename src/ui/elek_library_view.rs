@@ -902,10 +902,5 @@ fn blocked_tip(ctx: &egui::Context, st: &ElekState) {
         return;
     }
     ctx.request_repaint_after(std::time::Duration::from_secs_f64(BLOCKED_SECS - age));
-    let Some(pos) = ctx.pointer_latest_pos() else { return };
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("sound_blocked")));
-    let galley = painter.layout(msg.clone(), egui::FontId::proportional(13.0), Color32::WHITE, 360.0);
-    let r = egui::Rect::from_min_size(pos + egui::vec2(14.0, 10.0), galley.size() + egui::vec2(12.0, 8.0));
-    painter.rect_filled(r, 3.0, WARN.gamma_multiply(0.9));
-    painter.galley(r.min + egui::vec2(6.0, 4.0), galley, Color32::WHITE);
+    theme::pointer_note(ctx, msg, WARN);
 }
