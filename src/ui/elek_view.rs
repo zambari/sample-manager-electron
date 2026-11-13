@@ -332,7 +332,7 @@ impl ElekState {
         self.expect_patterns = None;
         self.expect_sounds = None;
         self.keep_blank.clear();
-        self.lib.sounds.clear();
+        self.lib.forget();
         if let Some(ctl) = &self.reading {
             ctl.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }

@@ -350,7 +350,11 @@ impl App {
             Presence::Off => {
                 self.device_status = Some(Err("Switched off".into()));
             }
-            Presence::One(_) if matches!(before, Presence::Absent | Presence::Many(_) | Presence::Off) => {
+            Presence::One(name) if matches!(before, Presence::Absent | Presence::Many(_) | Presence::Off)
+                // Swapped so fast no scan saw the cable empty.
+                || matches!(&before, Presence::One(b) if *b != name) =>
+            {
+                let other = self.last_unit.replace(name.clone()).is_some_and(|u| u != name);
                 self.device_status = None;
                 for role in [Role::Source, Role::Dest] {
                     for i in 0..self.pane(role).tabs.len() {
@@ -363,7 +367,7 @@ impl App {
                     self.elek.projects = None;
                     self.device.elek(crate::device::ElekCmd::ListProjects);
                 }
-                self.device_reconnected();
+                self.device_reconnected(other);
                 // Back where the user was in the device group.
                 match self.device_last {
                     Some(DevicePick::Page(page)) => {
@@ -374,6 +378,7 @@ impl App {
                     None => {}
                 }
             }
+            Presence::One(name) => self.last_unit = Some(name),
             _ => {}
         }
     }

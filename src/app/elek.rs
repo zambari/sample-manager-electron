@@ -134,12 +134,31 @@ impl App {
     /// from its +Drive and read its project again. Unpushed edits here are
     /// not dropped without asking; a project opened from a file is kept
     /// (it is meant to be pushed, and the push checks for staleness).
-    pub(super) fn device_reconnected(&mut self) {
+    /// `other`: a different unit by port name (Digitakt → Digitakt II):
+    /// what was read from the old one, sound pool included, goes at once,
+    /// edits too (they were made against the other machine's project).
+    pub(super) fn device_reconnected(&mut self, other: bool) {
         let st = &mut self.elek;
         // Paths and listings belong to whichever machine answered last.
         st.names.clear();
         if st.project.as_ref().is_some_and(|p| p.from_file.is_some()) {
             st.status = "Device reconnected; the project opened from a file is kept (not read from the device)".into();
+            return;
+        }
+        if other && st.project.is_some() {
+            let edits = st.changed() + st.filling.len();
+            crate::log::line(format!("elek: another unit connected; dropping the old project ({edits} unpushed edit(s))"));
+            st.close_project();
+            st.reading = None;
+            st.busy = None;
+            st.expect = None;
+            self.reconnect_ask = None;
+            self.elek.status = if edits > 0 {
+                format!("Another device connected: {edits} unpushed edit(s) made for the previous one were dropped; reading this one's project")
+            } else {
+                "Another device connected: reading its project".into()
+            };
+            self.elek_read(Vec::new());
             return;
         }
         if st.project.is_none() && !self.elek_greeted {

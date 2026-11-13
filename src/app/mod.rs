@@ -161,6 +161,9 @@ pub struct App {
     device_status: Option<Result<String, String>>,
     /// The device presence seen last frame, to act when the cable goes in or out.
     last_presence: crate::device::Presence,
+    /// Port name of the unit last seen alone on USB: tells a different
+    /// machine (a Digitakt II after a Digitakt) from the same one coming back.
+    last_unit: Option<String>,
     /// The device subpage last shown (a centre page, or the +Drive on
     /// the right), reopened when the device comes back.
     device_last: Option<crate::ui::elek_view::DevicePick>,
@@ -471,6 +474,7 @@ impl App {
             device,
             device_status: None,
             last_presence: Default::default(),
+            last_unit: None,
             device_last: None,
             staged_upload: None,
             pool_edit: None,

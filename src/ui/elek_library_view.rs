@@ -76,6 +76,19 @@ impl LibraryView {
         self.patterns_changed();
     }
 
+    /// No project any more: nothing of the old sound pool stays on screen.
+    pub fn forget(&mut self) {
+        self.pool_sounds = None;
+        self.sound_progress = None;
+        self.auto_read = false;
+        self.sounds.clear();
+        self.sound_undo.clear();
+        self.renaming = None;
+        self.selected = None;
+        self.blocked = None;
+        self.patterns_changed();
+    }
+
     /// The patterns (or pool sounds) as read changed: recount.
     pub fn patterns_changed(&mut self) {
         self.lock_uses = None;
@@ -322,14 +335,15 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
             st.lib.blank_ok = Some(p.blank_sound().is_some());
         }
     }
-    // ⌘V: paste copied track sounds into the highlighted (empty) sound.
+    // ⌘V: paste copied track sounds into the highlighted sound (replacing
+    // a filled one; ↶ Undo brings it back).
     if editable && st.keys_on && st.lib.renaming.is_none() && !ui.ctx().egui_wants_keyboard_input() {
         let paste = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) || (i.modifiers.command_only() && i.key_pressed(egui::Key::V)));
         if paste {
             st.status = match (st.lib.selected, st.project.as_deref()) {
                 (Some(at), Some(p)) => {
                     let sounds = p.edited_sounds(&st.lib.sounds);
-                    paste_track_sounds(st, at, &sounds, false)
+                    paste_track_sounds(st, at, &sounds, true)
                 }
                 _ => "Click a pool sound first, then ⌘V pastes the copied track sound there".into(),
             };
@@ -348,6 +362,15 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
             }
             if changed > 0 {
                 ui.label(RichText::new(format!("{changed} pool sound(s) changed: ⬆ Push to device sends them")).color(DIFFERS));
+            }
+            let copied = st.proj.copied_sounds();
+            if !copied.is_empty() {
+                let what = match copied.as_slice() {
+                    [(t, Some(pat))] => format!("T{} sound of {}", *t as usize + 1, patterns::label(*pat as usize)),
+                    [(t, None)] => format!("T{} sound (empty pattern)", *t as usize + 1),
+                    many => format!("{} track sounds", many.len()),
+                };
+                ui.label(RichText::new(format!("Copied: {what}. Highlight a sound, then ⌘V or right-click → Paste")).weak());
             }
         } else {
             let label = if st.lib.pool_sounds.is_some() { "⟳ Read sound pool again" } else { "⬇ Read sound pool" };

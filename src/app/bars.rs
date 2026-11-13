@@ -556,9 +556,18 @@ impl App {
                             egui::RichText::new(format!("⚠ {}", truncate(last, 60)))
                                 .color(ui.visuals().error_fg_color),
                         )
-                        .on_hover_text(format!("{}\n\nclick to clear", self.errors.join("\n")))
+                        .on_hover_text(format!(
+                            "{}\n\nclick to copy all to the clipboard and clear",
+                            self.errors.join("\n")
+                        ))
                         .clicked()
                     {
+                        let n = self.errors.len();
+                        ui.ctx().copy_text(self.errors.join("\n"));
+                        self.status = format!(
+                            "Copied {n} warning{} to the clipboard",
+                            if n == 1 { "" } else { "s" }
+                        );
                         self.errors.clear();
                         self.errors_logged = 0;
                     }
