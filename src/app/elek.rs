@@ -535,6 +535,9 @@ impl App {
                     self.elek.presets.begin_load();
                     self.device.elek(ElekCmd::ReadPreset { bank, slot });
                 }
+                ElekIntent::ReadPresetTags { bank, slot } => {
+                    self.device.elek(ElekCmd::ReadPresetTags { bank, slot });
+                }
                 ElekIntent::PushPresets(plan) => self.device.elek(ElekCmd::PushPresets(plan)),
                 ElekIntent::Read => self.elek_read(Vec::new()),
                 ElekIntent::ReadSounds => {
@@ -556,6 +559,29 @@ impl App {
                             self.errors.push(format!("save dump: {e}"));
                         }
                     }
+                }
+                ElekIntent::SavePresetDump => {
+                    if self.elek.presets.dumping.is_some() { continue; }
+                    let Some(home) = std::env::var_os("HOME") else {
+                        self.elek.presets.status = "Couldn't save preset dump: HOME is not set".into();
+                        continue;
+                    };
+                    let root = PathBuf::from(home).join("Documents/sample_manager/preset_dumps");
+                    self.elek.presets.dumping = Some(("Waiting to read presets".into(), 0, 0));
+                    self.device.elek(ElekCmd::SavePresetDump(root));
+                }
+                ElekIntent::SavePresetFile => {
+                    if self.elek.presets.dumping.is_some() { continue; }
+                    let Some(path) = Self::ask_save_path("presets", "Presets", "Presets", false) else { continue; };
+                    self.elek.presets.dumping = Some(("Waiting to save presets".into(), 0, 0));
+                    self.device.elek(ElekCmd::SavePresetFile(path));
+                }
+                ElekIntent::LoadPresetFile => {
+                    if !self.elek.presets.can_load_file() { continue; }
+                    let Some(path) = Self::json_dialog("presets", "Presets backup").pick_file() else { continue; };
+                    self.elek.presets.importing = true;
+                    self.elek.presets.dumping = Some(("Waiting to load presets".into(), 0, 0));
+                    self.device.elek(ElekCmd::LoadPresetFile(path));
                 }
                 ElekIntent::SaveProject(bundle) => self.save_project_file(bundle),
                 ElekIntent::LoadProject => self.load_project_file(),
@@ -1622,6 +1648,53 @@ impl App {
                 st.presets.sounds.insert((bank, slot), Some(result));
             }
             ElekEv::PresetReadProgress(p) => st.presets.read_progress = p,
+            ElekEv::PresetTags { bank, slot, result } => {
+                // A reload can discard a background read while it is in flight.
+                if let Some(tags) = st.presets.tag_masks.get_mut(&(bank, slot)) {
+                    *tags = Some(result);
+                }
+            }
+            ElekEv::PresetDumpProgress { label, done, total } => {
+                st.presets.dumping = Some((label, done, total));
+            }
+            ElekEv::PresetsDumped(result) => {
+                st.presets.dumping = None;
+                match result {
+                    Ok(dir) => {
+                        crate::log::line(format!("presets: debug dump saved to {}", dir.display()));
+                        st.presets.status = format!("Preset debug dump saved to {}", dir.display());
+                        reveal(&dir);
+                    }
+                    Err(e) => {
+                        st.presets.status = format!("Couldn't save preset debug dump: {e}");
+                        self.errors.push(format!("save preset dump: {e}"));
+                    }
+                }
+            }
+            ElekEv::PresetFileSaved(result) => {
+                st.presets.dumping = None;
+                st.presets.status = match result {
+                    Ok(path) => {
+                        crate::log::line(format!("presets: backup saved to {}", path.display()));
+                        format!("Importable preset backup saved to {}", path.display())
+                    }
+                    Err(e) => {
+                        self.errors.push(format!("save presets: {e}"));
+                        format!("Couldn't save preset backup: {e}")
+                    }
+                };
+            }
+            ElekEv::PresetFileLoaded(result) => {
+                st.presets.dumping = None;
+                st.presets.importing = false;
+                match result {
+                    Ok(loaded) => st.presets.load_file(loaded),
+                    Err(e) => {
+                        st.presets.status = format!("Couldn't load preset backup: {e}");
+                        self.errors.push(format!("load presets: {e}"));
+                    }
+                }
+            }
             ElekEv::PresetPushProgress { label, done, total } => {
                 st.presets.pushing = Some((label, done, total));
             }

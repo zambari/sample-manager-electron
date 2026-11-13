@@ -225,7 +225,10 @@ notices when the device is plugged in or out and reconnects on its own.
 #### Presets: saved sounds on +Drive
 
 The **Presets** page has two independent bank browsers, with bank switches,
-a name filter and **Hide empty**. Both lists use the full pane height.
+a name/tag filter and **Hide empty**. Each row shows the preset's device tags
+beside its name; hover for the complete list when it does not fit. Tags load
+in the background for the displayed banks, with visible rows first. They follow
+the sound through staged moves, swaps and pastes. Both lists use the full pane height.
 Use **click / ⇧click / ⌘click** to select slots, then drag the group within a
 bank or between panes. Normal drops place the group in consecutive slots,
 swapping occupied targets back into the freed slots. Hold **⌥** or **⌃** to
@@ -259,6 +262,36 @@ to the preset banks on +Drive, then verifies the result. If a push fails,
 reload before trying again: some edits may already have landed. Presets work
 without loading a project. Preset decoding has been verified on Digitakt II;
 other supported sound versions use the existing sound decoder.
+
+The Presets **💾 Save** foldout offers **Save presets… (importable JSON)**
+and **Save preset debug dump**. The importable file preserves every saved
+preset's original container bytes, bank and slot locations, and empty slots
+in each included bank. It reads saved device data; push staged edits first
+to include them. Choose a location in the save dialog (initially
+`~/Documents/sample_manager/presets`). Sample references are preserved;
+sample audio is not embedded.
+
+**Load presets…** opens that JSON, or `presets.json` from a new debug dump.
+Loading checks the file format, device model, bank/slot locations and container
+checksums before staging a restore. Slots saved as empty are cleared in the
+staged view; banks outside the backup are untouched. Push or reset existing
+edits before loading. Review the amber changes and use **Push to device**
+to apply them, or **Undo** / **Reset** to revert the load. Push checks current
+device contents again and reads back the result. Loading an unchanged backup
+stages no changes. Unsupported container layouts are refused without staging
+a partial restore.
+
+**Save → Save preset debug dump** reads every saved preset from all +Drive
+banks into a timestamped folder under `~/Documents/sample_manager/preset_dumps`
+and reveals it when finished. It saves uncompressed Data API containers,
+supported decoded sound structures, bank and slot names, sound offsets and
+versions, printable strings with byte offsets, and a `presets.json` backup.
+Importing that JSON requires supported container layouts. Unknown sound layouts keep
+their raw containers and a decode error in `presets.tsv`. Progress is shown;
+an interrupted export keeps its partial files and an `INCOMPLETE.txt` marker.
+This reads saved device data, excluding staged edits and sample audio, and
+does not require a loaded project. The project **Save debug dump** includes
+project pool and track sounds, but excludes saved +Drive presets.
 
 #### Sounds: the project's sound pool
 

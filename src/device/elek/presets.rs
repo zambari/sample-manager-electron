@@ -22,6 +22,41 @@ pub struct Preset {
     pub sample: Option<((u32, u32), Option<String>)>,
 }
 
+impl Preset {
+    /// Shared sound header: big-endian tag bits at sound+8 on both Digitakts.
+    pub fn tag_mask(&self) -> u32 {
+        be32(&self.data, 8).unwrap_or(0)
+    }
+
+    /// Validate an importable container before any edit can be staged.
+    pub(super) fn from_container(model: Model, loc: &PresetSlot, container: Vec<u8>) -> Result<Self, String> {
+        let data = decode_sound(model, &container)?.to_vec();
+        preset_container(model, loc, &data, &container)?;
+        Ok(Self {
+            model,
+            sound: library::parse_sound(model, loc.slot as usize, &data),
+            sample: sample_key(model, &data).map(|key| (key, None)),
+            container,
+            data,
+        })
+    }
+}
+
+/// Device tag order, least-significant bit first. Confirmed in the preset
+/// dump: B001 = 0x400 (Bass), B002 = 0x40 (Hat), B003 = 0x10400
+/// (Bass + Electronic). The mask occupies all 32 bits, including Favourite.
+pub fn tag_names(mask: u32) -> impl Iterator<Item = &'static str> {
+    const NAMES: [&str; 32] = [
+        "Kick", "Snare", "Rim", "Clap", "Top", "Perc", "Hat", "Cymbal",
+        "Cowbell", "Synth", "Bass", "Lead", "Pad", "Texture", "Chords", "Sound Fx",
+        "Electronic", "Metallic", "Acoustic", "Atmosphere", "Noisy", "Glitch",
+        "Hard", "Soft", "Dark", "Bright", "Vintage", "Epic", "Fail", "Loop",
+        "Mine", "Favourite",
+    ];
+    NAMES.into_iter().enumerate()
+        .filter_map(move |(bit, name)| (mask & (1u32 << bit) != 0).then_some(name))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PresetSlot {
     pub bank: String,
@@ -176,7 +211,7 @@ impl Conn {
 
     /// Compression zero gives the original sound structure in a small
     /// container, so no saved-file compression codec is needed.
-    fn preset_data(&mut self, path: &str, progress: &impl Fn(f32)) -> R<Vec<u8>> {
+    pub(super) fn preset_data(&mut self, path: &str, progress: &impl Fn(f32)) -> R<Vec<u8>> {
         let r = self.request(
             0x54,
             Args::default()
@@ -231,6 +266,17 @@ impl Conn {
             return refused("The device wouldn't close the preset reader");
         }
         Ok(data)
+    }
+
+    /// Background row metadata needs no sample-path lookup or editable snapshot.
+    pub(super) fn preset_tags(&mut self, bank: &str, slot: u32) -> R<u32> {
+        if !valid_bank(bank) || !(1..=256).contains(&slot) {
+            return refused("Invalid preset location");
+        }
+        let model = self.model()?;
+        let container = self.preset_data(&PresetSlot::new(bank, slot).path(), &|_| {})?;
+        let data = decode_sound(model, &container).map_err(Fail::Refused)?;
+        be32(data, 8).ok_or_else(|| Fail::Refused("Missing preset tags".into()))
     }
 
     pub(super) fn read_preset(
@@ -502,7 +548,7 @@ fn valid_bank(bank: &str) -> bool {
     bank.len() == 1 && bank.as_bytes()[0].is_ascii_uppercase()
 }
 
-fn decode_sound(model: Model, container: &[u8]) -> Result<&[u8], String> {
+pub(super) fn decode_sound(model: Model, container: &[u8]) -> Result<&[u8], String> {
     // Never interpret an unknown layout as the current project's slots.
     for at in 0..container.len().min(256) {
         if be32(container, at) != Some(MAGIC) {

@@ -319,7 +319,7 @@ impl ElekProject {
 }
 
 /// Standard base64 with padding.
-mod b64 {
+pub(super) mod b64 {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode(d: &[u8]) -> String {

@@ -1,11 +1,125 @@
-//! Save the project dump as read, for format research: the raw `.syx`, each
+//! Save project and +Drive preset dumps for format research: the raw `.syx`, each
 //! message's decoded payload, the names we already know how to find, and
 //! every printable run with its offset. Rename something on the device, save
 //! again and diff the two folders to find where a new field lives.
 
 use super::*;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+/// Printable runs in raw preset containers and decoded sound structures.
+fn preset_strings(out: &mut String, file: &str, data: &[u8]) {
+    let mut start = 0;
+    while start < data.len() {
+        if !(0x20..0x7f).contains(&data[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < data.len() && (0x20..0x7f).contains(&data[end]) {
+            end += 1;
+        }
+        if end - start >= 3 {
+            let _ = writeln!(out, "{file}\t0x{start:06x}\t{:?}", String::from_utf8_lossy(&data[start..end]));
+        }
+        start = end;
+    }
+}
+
+impl Worker {
+    /// Fresh reads, independent of cached/staged UI data and project loading.
+    /// Keep unsupported containers too: they are useful for format research.
+    pub(super) fn save_preset_dump(&mut self, root: &Path) -> Result<PathBuf, String> {
+        let em = self.em.clone();
+        let progress = |label: String, done, total| {
+            em.send(Ev::Elek(ElekEv::PresetDumpProgress { label, done, total }));
+        };
+        progress("Listing preset banks".into(), 0, 0);
+        let (model, banks) = self.with_conn(|c| Ok((c.model()?, c.preset_banks()?)))?;
+        let dir = root.join(format!("{}_{}_presets", stamp(), model.name().replace(' ', "")));
+        let io_error = |e: std::io::Error| format!("{}: {e}", dir.display());
+        std::fs::create_dir_all(root).map_err(io_error)?;
+        // Never silently combine two dumps taken within the same second.
+        std::fs::create_dir(&dir).map_err(io_error)?;
+        let result = (|| -> Result<(), String> {
+            std::fs::write(dir.join("INCOMPLETE.txt"), "This dump has not finished. Files already saved are retained if the read fails.\n").map_err(io_error)?;
+            for sub in ["containers", "decoded"] {
+                std::fs::create_dir(dir.join(sub)).map_err(io_error)?;
+            }
+            std::fs::write(dir.join("banks.txt"), banks.join("\n")).map_err(io_error)?;
+            let mut backup = preset_file::PresetFile::new(model, banks.clone());
+            let mut entries = Vec::new();
+            for bank in &banks {
+                progress(format!("Listing preset bank {bank}"), 0, 0);
+                for entry in self.with_conn(|c| c.preset_entries(bank))? {
+                    entries.push((bank.clone(), entry));
+                }
+                self.serve_pending();
+            }
+            let mut names = format!("{} · {} banks · {} saved presets\n\n", model.name(), banks.len(), entries.len());
+            for (bank, entry) in &entries {
+                let _ = writeln!(names, "{bank}:{:03}\t{:?}", entry.slot, entry.name);
+            }
+            std::fs::write(dir.join("names.txt"), names).map_err(io_error)?;
+            let mut strings_file = std::fs::File::create(dir.join("strings.tsv")).map_err(io_error)?;
+            let mut info_file = std::fs::File::create(dir.join("presets.tsv")).map_err(io_error)?;
+            strings_file.write_all(b"file\toffset\ttext\n").map_err(io_error)?;
+            info_file.write_all(b"bank\tslot\tcontainer_bytes\tsound_offset\tsound_bytes\tversion\tname_or_error\n").map_err(io_error)?;
+            let mut unsupported = 0;
+            for (i, (bank, entry)) in entries.iter().enumerate() {
+                let mut strings = String::new();
+                let mut info = String::new();
+                progress(format!("Reading preset {bank}:{:03}", entry.slot), i, entries.len());
+                let path = format!("/soundbanks/{bank}/{}", entry.slot);
+                let container = self.with_conn(|c| c.preset_data(&path, &|_| {}))
+                    .map_err(|e| format!("{path}: {e}"))?;
+                let file = format!("containers/{bank}_{:03}.bin", entry.slot);
+                std::fs::write(dir.join(&file), &container).map_err(io_error)?;
+                backup.add(bank, entry, &container);
+                preset_strings(&mut strings, &file, &container);
+                match presets::decode_sound(model, &container) {
+                    Ok(data) => {
+                        let file = format!("decoded/{bank}_{:03}.bin", entry.slot);
+                        std::fs::write(dir.join(&file), data).map_err(io_error)?;
+                        preset_strings(&mut strings, &file, data);
+                        let offset = data.as_ptr() as usize - container.as_ptr() as usize;
+                        let _ = writeln!(info, "{bank}\t{}\t{}\t0x{offset:x}\t{}\t{}\t{:?}",
+                            entry.slot, container.len(), data.len(), be32(data, 4).unwrap_or(0), name_at(data, 12));
+                    }
+                    Err(e) => {
+                        unsupported += 1;
+                        let _ = writeln!(info, "{bank}\t{}\t{}\t\t\t\t{e:?}", entry.slot, container.len());
+                    }
+                }
+                // Persist the indexes as we go, so partial dumps remain useful.
+                info_file.write_all(info.as_bytes()).map_err(io_error)?;
+                strings_file.write_all(strings.as_bytes()).map_err(io_error)?;
+                progress(format!("Saved preset {bank}:{:03}", entry.slot), i + 1, entries.len());
+                self.serve_pending();
+            }
+            backup.write(&dir.join("presets.json"))?;
+            std::fs::write(dir.join("README.txt"), format!(
+                "{} +Drive preset debug dump\n{} saved presets; {unsupported} unsupported sound layouts (raw containers retained).\n\n\
+                 containers/  uncompressed Data API containers as received; these are not project SysEx dumps\n\
+                 decoded/     supported sound structures extracted from containers\n\
+                 banks.txt    all banks, including empty ones\n\
+                 names.txt    saved slot locations and listing names\n\
+                 presets.tsv  container sizes, sound offsets, versions, names or decode errors\n\
+                 strings.tsv  printable runs of 3+ characters with file-relative byte offsets\n\n\
+                 presets.json importable backup for Presets > Load presets (supported container layouts only)\n\n\
+                 Fresh reads from /soundbanks; staged app edits and sample audio are not included.\n\
+                 Avoid editing presets on the device while this read runs.\n\
+                 Change one setting, dump again, then compare matching .bin files.\n",
+                model.name(), entries.len()
+            )).map_err(io_error)?;
+            std::fs::remove_file(dir.join("INCOMPLETE.txt")).map_err(io_error)?;
+            Ok(())
+        })();
+        result.map_err(|e| format!("{e} (partial dump: {})", dir.display()))?;
+        Ok(dir)
+    }
+}
 
 /// Where the parts of one pattern+kit message sit, for the names we know.
 struct Layout {

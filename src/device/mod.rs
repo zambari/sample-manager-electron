@@ -15,7 +15,7 @@
 
 mod conn;
 mod elek;
-pub use elek::{file, library, machines, patterns, presets, Cell, DumpMsg, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, ReadCtl, ReadFirst, SavedProject};
+pub use elek::{file, library, machines, patterns, presets, preset_file, Cell, DumpMsg, ElekCmd, ElekEv, ElekProject, PatState, PoolEntry, ReadCtl, ReadFirst, SavedProject};
 mod presence;
 pub use presence::{Presence, connection_status, presence, start as watch_presence, switched_off};
 mod proto;

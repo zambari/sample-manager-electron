@@ -3,7 +3,7 @@
 //! Selection and ordering use slot_list, shared with the Samples page;
 //! permutations become grouped native preset moves/swaps only after bank reads.
 
-use crate::device::presets::{Preset, PresetEntry, PresetOp, PresetPush, PresetSlot};
+use crate::device::presets::{Preset, PresetEntry, PresetOp, PresetPush, PresetSlot, tag_names};
 use crate::ui::drag_drop::ResponseDnd;
 use crate::ui::elek_view::{self, ElekIntent, ElekState};
 use crate::ui::slot_list::{self, DropTarget};
@@ -18,6 +18,8 @@ pub struct PresetView {
     asked: bool,
     pub listings: HashMap<String, Read<Vec<PresetEntry>>>,
     pub sounds: HashMap<(String, u32), Read<Preset>>,
+    /// Row-only metadata, separate from the snapshots needed to edit/push.
+    pub tag_masks: HashMap<(String, u32), Read<u32>>,
     bank: [String; 2],
     selected: [Option<u32>; 2],
     sel: BTreeSet<usize>,
@@ -30,6 +32,8 @@ pub struct PresetView {
     hide_empty: bool,
     ops: Vec<PresetOp>,
     pub pushing: Option<(String, usize, usize)>,
+    pub dumping: Option<(String, usize, usize)>,
+    pub importing: bool,
     pub status: String,
     pub push_failed: bool,
     loading: (usize, usize),
@@ -71,6 +75,29 @@ fn location(banks: &[String], index: usize) -> PresetSlot {
 }
 
 impl PresetView {
+    pub fn can_load_file(&self) -> bool {
+        self.changed() == 0 && self.pending.is_none() && self.pushing.is_none()
+            && self.dumping.is_none() && !self.loading() && !self.push_failed
+    }
+
+    pub fn load_file(&mut self, loaded: crate::device::preset_file::LoadedPresets) {
+        if self.changed() > 0 || self.pending.is_some() || self.pushing.is_some() {
+            self.status = "Preset edits changed while loading; reset or push them before loading again".into();
+            return;
+        }
+        self.banks = Some(Ok(loaded.banks));
+        self.asked = true;
+        for (bank, entries) in loaded.listings {
+            self.sounds.retain(|(b, _), _| *b != bank);
+            self.listings.insert(bank, Some(Ok(entries)));
+        }
+        for (loc, preset) in loaded.sounds {
+            self.sounds.insert((loc.bank, loc.slot), Some(Ok(preset)));
+        }
+        self.stage(loaded.ops, &mut Vec::new());
+        self.status = format!("Preset backup loaded: {} changed slot(s), including restored empty slots. Review, then Push to device; Undo reverts the load", self.changed());
+    }
+
     pub fn begin_load(&mut self) {
         if self.loading.0 == self.loading.1 {
             self.loading = (0, 0);
@@ -92,6 +119,7 @@ impl PresetView {
         self.asked = false;
         self.listings.clear();
         self.sounds.clear();
+        self.tag_masks.clear();
         self.ops.clear();
         self.undo.clear();
         self.pending = None;
@@ -199,6 +227,44 @@ impl PresetView {
             PresetSource::Saved(loc) => self.name(loc),
             PresetSource::Imported(_) => self.preset(src).and_then(Result::ok)
                 .map_or_else(|| "—".into(), |p| p.sound.name.clone()),
+        }
+    }
+
+    fn source_tags(&self, src: &PresetSource) -> Read<u32> {
+        if let Some(Ok(preset)) = self.preset(src) {
+            return Some(Ok(preset.tag_mask()));
+        }
+        match src {
+            PresetSource::Saved(loc) => self.tag_masks.get(&(loc.bank.clone(), loc.slot))
+                .cloned().flatten(),
+            PresetSource::Imported(_) => None,
+        }
+    }
+
+    /// Keep at most one background read queued. Visible rows in both panes
+    /// come first, then the rest of their banks so tag filtering can fill in.
+    /// Tag reads never hold up Reload or Push and never resolve sample paths.
+    fn request_tags(&mut self, candidates: [Vec<PresetSource>; 2], out: &mut Vec<ElekIntent>) {
+        if !out.is_empty() || self.loading() || self.pushing.is_some()
+            || self.dumping.is_some() || self.importing || self.push_failed
+            || self.pending.is_some() || self.confirm_reload || self.confirm_push
+            || self.tag_masks.values().any(Option::is_none)
+        {
+            return;
+        }
+        for src in candidates.into_iter().flatten() {
+            if self.source_tags(&src).is_some() {
+                continue;
+            }
+            let PresetSource::Saved(loc) = src else { continue; };
+            let key = (loc.bank.clone(), loc.slot);
+            if self.sounds.get(&key).is_none_or(|r| matches!(r, Some(Err(_))))
+                && !self.tag_masks.contains_key(&key)
+            {
+                self.tag_masks.insert(key, None);
+                out.push(ElekIntent::ReadPresetTags { bank: loc.bank, slot: loc.slot });
+                break;
+            }
         }
     }
 
@@ -536,6 +602,7 @@ impl Default for PresetView {
             asked: false,
             listings: HashMap::new(),
             sounds: HashMap::new(),
+            tag_masks: HashMap::new(),
             bank: ["A".into(), "B".into()],
             selected: [None; 2],
             sel: BTreeSet::new(),
@@ -548,6 +615,8 @@ impl Default for PresetView {
             hide_empty: false,
             ops: Vec::new(),
             pushing: None,
+            dumping: None,
+            importing: false,
             status: String::new(),
             push_failed: false,
             loading: (0, 0),
@@ -567,11 +636,12 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         st.presets.asked = true;
         out.push(ElekIntent::ListPresetBanks);
     }
-    if present && st.presets.pushing.is_none() && !st.presets.push_failed {
+    if present && st.presets.pushing.is_none() && !st.presets.importing && !st.presets.push_failed {
         st.presets.apply_pending(&mut out);
     }
     let can_edit = present
         && st.presets.pushing.is_none()
+        && !st.presets.importing
         && !st.presets.push_failed
         && st.presets.pending.is_none();
     st.presets
@@ -589,7 +659,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         }
     }
     let changed = st.presets.changed();
-    let busy = st.presets.pushing.is_some() || st.presets.pending.is_some();
+    let busy = st.presets.pushing.is_some() || st.presets.pending.is_some() || st.presets.importing;
     ui.horizontal_wrapped(|ui| {
         if ui.add_enabled(present && !busy && !st.presets.loading(), egui::Button::new("⬇ Reload presets")).clicked() {
             if changed > 0 {
@@ -597,6 +667,28 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
             } else {
                 st.presets.reload();
             }
+        }
+        ui.add_enabled_ui(present && !busy && st.presets.dumping.is_none(), |ui| {
+            ui.menu_button("💾 Save", |ui| {
+                if ui.button("Save presets… (importable JSON)")
+                    .on_hover_text("Back up every saved +Drive preset, preserving bank and slot locations, empty slots and original sound bytes. Staged edits and sample audio are excluded.")
+                    .clicked() {
+                    out.push(ElekIntent::SavePresetFile);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Save preset debug dump")
+                    .on_hover_text("Read all saved +Drive banks into ~/Documents/sample_manager/preset_dumps: raw containers, decoded sounds, names, strings and a presets.json backup. Can take several minutes.")
+                    .clicked() {
+                    out.push(ElekIntent::SavePresetDump);
+                    ui.close();
+                }
+            });
+        });
+        if ui.add_enabled(present && st.presets.can_load_file(), egui::Button::new("Load presets…"))
+            .on_hover_text("Open an importable JSON backup (or presets.json from a debug dump). Stages a restore of its banks, including clearing slots saved as empty. Other banks are untouched. Push or reset existing edits before loading.")
+            .clicked() {
+            out.push(ElekIntent::LoadPresetFile);
         }
         let ready = present && !busy && !st.presets.push_failed && !st.presets.loading()
             && changed > 0 && st.presets.ready();
@@ -615,7 +707,14 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
             ui.colored_label(theme::CHANGED, format!("{changed} changed slot(s) · not pushed"));
         }
     });
-    if let Some((label, done, total)) = &st.presets.pushing {
+    if let Some((label, done, total)) = &st.presets.dumping {
+        ui.add(
+            theme::progress_bar(*done as f32 / (*total).max(1) as f32)
+                .text(format!("{label} · {done}/{total}"))
+                .desired_width(ui.available_width()),
+        );
+        ui.ctx().request_repaint();
+    } else if let Some((label, done, total)) = &st.presets.pushing {
         ui.add(
             theme::progress_bar(*done as f32 / (*total).max(1) as f32)
                 .text(format!("{label} · {done}/{total}"))
@@ -649,13 +748,14 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
     ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut st.presets.filter)
-                .hint_text("filter presets")
+                .hint_text("filter names / tags")
                 .desired_width(140.0),
         );
         ui.add(theme::soft_toggle(&mut st.presets.hide_empty, "Hide empty"));
        
     });
     ui.separator();
+    let mut tag_reads = [Vec::new(), Vec::new()];
     match &st.presets.banks {
         None => {
             ui.label(if present {
@@ -681,7 +781,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
             ui.columns(2, |cols| {
                 for (side, col) in cols.iter_mut().enumerate() {
                     col.push_id(("preset_pane", side), |ui| {
-                        pane(ui, st, side, &banks, present, &mut out)
+                        pane(ui, st, side, &banks, present, &mut tag_reads, &mut out)
                     });
                 }
             });
@@ -721,6 +821,9 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         });
     }
     elek_view::finish(ui, st, &mut out);
+    if present {
+        st.presets.request_tags(tag_reads, &mut out);
+    }
     out
 }
 
@@ -875,6 +978,7 @@ fn pane(
     side: usize,
     banks: &[String],
     present: bool,
+    tag_reads: &mut [Vec<PresetSource>; 2],
     out: &mut Vec<ElekIntent>,
 ) {
     if bank_strip(ui, &mut st.presets.bank[side], banks) {
@@ -905,16 +1009,20 @@ fn pane(
             .cloned()
             .unwrap_or_else(|| st.presets.base(loc))
     };
-    let count = (1..=256)
-        .filter(|slot| origin_at(&PresetSlot::new(&bank, *slot)).is_some())
-        .count();
+    let sources: Vec<_> = (1..=256)
+        .filter_map(|slot| origin_at(&PresetSlot::new(&bank, slot)))
+        .collect();
+    let count = sources.len();
+    let tags_read = sources.iter().filter(|src| st.presets.source_tags(src).is_some()).count();
+    tag_reads[1].extend(sources);
     ui.label(
-        RichText::new(format!("BANK {bank} · {count} PRESETS"))
+        RichText::new(format!("BANK {bank} · {count} PRESETS{}",
+            if tags_read < count { format!(" · tags {tags_read}/{count}") } else { String::new() }))
             .font(oled_font(12.0))
             .color(OLED_DIM),
     );
     let filter = st.presets.filter.to_uppercase();
-    let rows: Vec<(u32, String, bool, bool)> = (1..=256)
+    let rows: Vec<(u32, String, bool, bool, Read<u32>)> = (1..=256)
         .filter_map(|slot| {
             let loc = PresetSlot::new(&bank, slot);
             let origin = origin_at(&loc);
@@ -925,15 +1033,21 @@ fn pane(
             let name = origin
                 .as_ref()
                 .map_or_else(|| "—".into(), |src| st.presets.source_name(src));
+            let tags = origin.as_ref().and_then(|src| st.presets.source_tags(src));
+            let tag_text = tags.as_ref().and_then(|r| r.as_ref().ok())
+                .map_or_else(String::new, |mask| tag_names(*mask).collect::<Vec<_>>().join(", "));
             if !filter.is_empty()
-                && !format!("{bank}:{slot:03} {name}")
+                && !format!("{bank}:{slot:03} {name} {tag_text}")
                     .to_uppercase()
                     .contains(&filter)
             {
                 return None;
             }
-            Some((slot, name, origin.is_some(), changed))
+            Some((slot, name, origin.is_some(), changed, tags))
         })
+        .collect();
+    let row_sources: Vec<_> = rows.iter()
+        .map(|(slot, _, _, _, _)| origin_at(&PresetSlot::new(&bank, *slot)))
         .collect();
     let height = ui.available_height();
     let mut select = None;
@@ -942,6 +1056,7 @@ fn pane(
     let mut paste = None;
     let can_edit = present
         && st.presets.pushing.is_none()
+        && !st.presets.importing
         && !st.presets.push_failed
         && st.presets.pending.is_none();
     let reveal_row = st
@@ -950,7 +1065,7 @@ fn pane(
         .filter(|_| st.presets.active == side)
         .and_then(|index| {
             rows.iter()
-                .position(|(slot, _, _, _)| start + *slot as usize - 1 == index)
+                .position(|(slot, _, _, _, _)| start + *slot as usize - 1 == index)
         });
     egui::Frame::new().fill(OLED_BG).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
@@ -967,7 +1082,10 @@ fn pane(
         }
         scroll.show_rows(ui, 20.0, rows.len(), |ui, range| {
             for row in range {
-                let (slot, name, filled, changed) = &rows[row];
+                let (slot, name, filled, changed, tags) = &rows[row];
+                if let Some(src) = &row_sources[row] {
+                    tag_reads[0].push(src.clone());
+                }
                 let index = start + *slot as usize - 1;
                 let (r, resp) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 20.0),
@@ -985,22 +1103,33 @@ fn pane(
                         },
                     );
                 }
-                ui.painter().text(
-                    r.left_center() + egui::vec2(6.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    format!(
-                        "{bank}:{slot:03}  {name}{}",
-                        if *changed { " *" } else { "" }
-                    ),
-                    oled_font(16.0),
-                    if *changed {
-                        theme::CHANGED
-                    } else if *filled {
-                        OLED
-                    } else {
-                        OLED_DIM
-                    },
+                let color = if *changed { theme::CHANGED } else if *filled { OLED } else { OLED_DIM };
+                let tag_text = match tags {
+                    Some(Ok(mask)) => tag_names(*mask).collect::<Vec<_>>().join(", "),
+                    Some(Err(_)) => "tags ?".into(),
+                    None if *filled => "…".into(),
+                    None => String::new(),
+                };
+                let mut text = egui::text::LayoutJob::simple_singleline(
+                    format!("{bank}:{slot:03}  {name}{}", if *changed { " *" } else { "" }),
+                    oled_font(16.0), color,
                 );
+                if !tag_text.is_empty() {
+                    text.append(&format!("  {tag_text}"), 0.0, egui::TextFormat {
+                        font_id: oled_font(12.0), color: OLED_DIM, ..Default::default()
+                    });
+                }
+                text.wrap = egui::text::TextWrapping::truncate_at_width((r.width() - 12.0).max(0.0));
+                let galley = ui.painter().layout_job(text);
+                let pos = egui::pos2(r.left() + 6.0, r.center().y - galley.size().y * 0.5);
+                ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).galley(pos, galley, color);
+                let resp = resp.on_hover_text(format!("{bank}:{slot:03} · {name}\n{}", match tags {
+                    Some(Ok(0)) => "No tags".into(),
+                    Some(Ok(_)) => tag_text,
+                    Some(Err(e)) => format!("Could not read tags: {e}. Reload presets to retry."),
+                    None if *filled => "Reading tags…".into(),
+                    None => "Empty slot".into(),
+                }));
                 if resp.clicked() && st.presets.pending.is_none() {
                     select = Some((index, ui.input(|i| i.modifiers)));
                 }

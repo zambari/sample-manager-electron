@@ -13,6 +13,7 @@ pub mod library;
 pub mod machines;
 pub mod patterns;
 pub mod presets;
+pub mod preset_file;
 
 pub use patterns::{Cell, PatState, Patterns};
 
@@ -1000,7 +1001,7 @@ impl ElekCmd {
     /// steps. Writes and other dump requests must keep their place.
     pub(super) fn browsing(&self) -> bool {
         matches!(self, Self::ListProjects | Self::ListPresetBanks | Self::ListPresets(_)
-            | Self::ReadPreset { .. } | Self::Resolve { .. })
+            | Self::ReadPreset { .. } | Self::ReadPresetTags { .. } | Self::Resolve { .. })
     }
 
     pub(super) fn read_browser(&self, c: &mut Conn, em: &Emitter) -> R<ElekEv> {
@@ -1008,6 +1009,9 @@ impl ElekCmd {
             Self::ListProjects => ElekEv::Projects(Ok(c.list_projects()?)),
             Self::ListPresetBanks => ElekEv::PresetBanks(Ok(c.preset_banks()?)),
             Self::ListPresets(bank) => ElekEv::Presets { bank: bank.clone(), result: Ok(c.preset_entries(bank)?) },
+            Self::ReadPresetTags { bank, slot } => ElekEv::PresetTags {
+                bank: bank.clone(), slot: *slot, result: Ok(c.preset_tags(bank, *slot)?),
+            },
             Self::ReadPreset { bank, slot } => ElekEv::Preset {
                 bank: bank.clone(), slot: *slot,
                 result: Ok(c.read_preset(bank, *slot, &|p| {
@@ -1034,6 +1038,7 @@ impl ElekCmd {
             Self::ListProjects => ElekEv::Projects(Err(error)),
             Self::ListPresetBanks => ElekEv::PresetBanks(Err(error)),
             Self::ListPresets(bank) => ElekEv::Presets { bank: bank.clone(), result: Err(error) },
+            Self::ReadPresetTags { bank, slot } => ElekEv::PresetTags { bank: bank.clone(), slot: *slot, result: Err(error) },
             Self::ReadPreset { bank, slot } => ElekEv::Preset { bank: bank.clone(), slot: *slot, result: Err(error) },
             Self::Resolve { slot, hash, .. } => ElekEv::Resolved { slot: *slot, hash: *hash, found: Err(error) },
             _ => unreachable!("only browser reads may interrupt a project read"),
@@ -1046,6 +1051,10 @@ pub enum ElekCmd {
     ListPresetBanks,
     ListPresets(String),
     ReadPreset { bank: String, slot: u32 },
+    ReadPresetTags { bank: String, slot: u32 },
+    SavePresetDump(PathBuf),
+    SavePresetFile(PathBuf),
+    LoadPresetFile(PathBuf),
     PushPresets(presets::PresetPush),
     /// The project's sound pool, read-only (`library`).
     ReadSounds,
@@ -1110,7 +1119,12 @@ pub enum ElekEv {
     PresetBanks(Result<Vec<String>, String>),
     Presets { bank: String, result: Result<Vec<presets::PresetEntry>, String> },
     Preset { bank: String, slot: u32, result: Result<presets::Preset, String> },
+    PresetTags { bank: String, slot: u32, result: Result<u32, String> },
     PresetReadProgress(f32),
+    PresetDumpProgress { label: String, done: usize, total: usize },
+    PresetsDumped(Result<PathBuf, String>),
+    PresetFileSaved(Result<PathBuf, String>),
+    PresetFileLoaded(Result<preset_file::LoadedPresets, String>),
     PresetPushProgress { label: String, done: usize, total: usize },
     PresetsPushed(Result<(), String>),
     SoundProgress { done: usize, total: usize },
@@ -1367,9 +1381,22 @@ impl Worker {
         };
         match cmd {
             cmd @ (ElekCmd::ListPresetBanks | ElekCmd::ListPresets(_) |
-                ElekCmd::ReadPreset { .. } | ElekCmd::ListProjects | ElekCmd::Resolve { .. }) => {
+                ElekCmd::ReadPreset { .. } | ElekCmd::ReadPresetTags { .. } |
+                ElekCmd::ListProjects | ElekCmd::Resolve { .. }) => {
                 let result = self.with_conn(|c| cmd.read_browser(c, &em));
                 em.send(Ev::Elek(result.unwrap_or_else(|e| cmd.browser_failed(e))));
+            }
+            ElekCmd::SavePresetDump(root) => {
+                let result = self.save_preset_dump(&root);
+                em.send(Ev::Elek(ElekEv::PresetsDumped(result)));
+            }
+            ElekCmd::SavePresetFile(path) => {
+                let result = self.save_preset_file(&path).map(|()| path);
+                em.send(Ev::Elek(ElekEv::PresetFileSaved(result)));
+            }
+            ElekCmd::LoadPresetFile(path) => {
+                let result = self.load_preset_file(&path);
+                em.send(Ev::Elek(ElekEv::PresetFileLoaded(result)));
             }
             ElekCmd::PushPresets(plan) => {
                 let result = self.with_conn(|c| c.push_presets(&plan, &|label, done, total| {
