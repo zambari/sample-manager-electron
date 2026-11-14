@@ -683,6 +683,353 @@ impl App {
 
 // ---- rendering ------------------------------------------------------------
 
+impl App {
+    /// Draws the bars and resizable source/editor/destination layout.
+    fn show_layout(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        if crate::device::presence().available() {
+            if let Some(Err(reason)) = self.device_status.clone() {
+                egui::Panel::top("device_connection_error").show(ui, |ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("Device not connected: {reason}"));
+                    if ui.button("Retry connection").clicked() {
+                        self.device_status = None;
+                        self.device.list(PathBuf::from("/"), 0);
+                    }
+                });
+            }
+        }
+
+        // Three columns: Source | Sample Editor | Destination.
+        // The side columns are drag-resizable; the editor takes whatever is
+        // left, but never less than MIN_EDITOR_W.
+        const MIN_SIDE_W: f32 = 220.0;
+        const MIN_EDITOR_W: f32 = 360.0;
+        let w = ui.available_width();
+        let default_w = w * 0.27;
+        let prev_r = if self.side_widths[1] > 0.0 {
+            self.side_widths[1]
+        } else {
+            default_w
+        };
+        let max_for = |other: f32| (w - other - MIN_EDITOR_W).max(MIN_SIDE_W);
+
+        // Elek Sample Order mode takes the whole window: the file panes have
+        // nothing to do with it.
+        if self.elek_mode && self.elek.hide_files {
+            egui::CentralPanel::default().show(ui, |ui| self.show_elek(ui));
+        } else {
+            let left = egui::Panel::left("source_col")
+                .resizable(true)
+                .default_size(default_w)
+                .size_range(MIN_SIDE_W..=max_for(prev_r))
+                .show(ui, |ui| self.show_pane(ui, Role::Source));
+            self.side_widths[0] = left.response.rect.width();
+            // The pool in the right column snaps it to DOCK_W the first
+            // time this run, and caps it at DOCK_MAX_W while it shows.
+            const DOCK_W: f32 = 420.0;
+            const DOCK_MAX_W: f32 = 680.0;
+            let mut max_r = max_for(self.side_widths[0]);
+            if self.pool_in_col() {
+                max_r = max_r.min(DOCK_MAX_W).max(MIN_SIDE_W);
+            }
+            let mut right = egui::Panel::right("dest_col")
+                .resizable(true)
+                .default_size(default_w)
+                .size_range(MIN_SIDE_W..=max_r);
+            if self.pool_in_col() && !self.pool_snapped {
+                self.pool_snapped = true;
+                right = right.exact_size(DOCK_W.clamp(MIN_SIDE_W, max_r));
+            }
+            let right = right.show(ui, |ui| self.show_dest_col(ui));
+            self.side_widths[1] = right.response.rect.width();
+            draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
+            draw_divider(
+                ui,
+                right.response.rect.left(),
+                right.response.rect.y_range(),
+            );
+
+            if self.elek_mode {
+                egui::CentralPanel::default().show(ui, |ui| self.show_elek(ui));
+            } else {
+                egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
+            }
+
+            // A click anywhere decides whether the docked pool keeps the keyboard.
+            let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
+            if let Some(pos) = press {
+                let inside = self.pool_in_col() && self.pool_rect.is_some_and(|r| r.contains(pos));
+                self.pool_focused = inside;
+                if inside {
+                    self.editor_focused = false;
+                }
+            }
+        }
+    }
+
+    /// Run dialogs in their original order: one answer may open a later
+    /// dialog during this same frame.
+    fn show_pending_dialogs(&mut self, ctx: &egui::Context) {
+        self.show_transfer_dialogs(ctx);
+        self.show_device_dialogs(ctx);
+        self.show_file_removal_dialogs(ctx);
+        self.show_kit_name_dialog(ctx);
+        self.show_leave_dialog(ctx);
+        self.show_save_dialogs(ctx);
+        self.finish_pending_close(ctx);
+    }
+
+    fn show_transfer_dialogs(&mut self, ctx: &egui::Context) {
+        // Modal last, so it paints over both panes.
+        if let Some(p) = &self.pending {
+            // A device move is a rename, which can't merge folders.
+            let can_merge = matches!(
+                p.what,
+                PlanKind::Transfer
+                    | PlanKind::Commit { .. }
+                    | PlanKind::Device {
+                        dir: device::Dir::Upload | device::Dir::Download | device::Dir::Copy,
+                        ..
+                    }
+            ) && p.plan.ops.iter().any(|o| o.conflict && o.is_dir);
+            if let Some(decision) = dialogs::conflicts(ctx, &p.plan, can_merge) {
+                let pending = self.pending.take().expect("checked above");
+                match decision {
+                    Decision::Proceed(policy) => self.launch(&pending.plan, pending.what, policy),
+                    Decision::Merge if matches!(pending.what, PlanKind::Device { .. }) => {
+                        self.launch(&pending.plan, pending.what, Policy::Merge)
+                    }
+                    Decision::Merge => self.launch_merge(&pending.plan, pending.what),
+                    Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
+                }
+            }
+        }
+
+        if let Some(r) = &self.local_rename_pending {
+            if let Some(yes) = dialogs::rename_local(ctx, &r.link.local, &r.to) {
+                let r = self.local_rename_pending.take().expect("checked above");
+                if yes {
+                    self.rename_local_copy(r);
+                }
+            }
+        }
+
+        if let Some(d) = &self.slot_download_pending {
+            let have: Vec<&Path> = d.have.iter().map(|(_, l)| l.as_path()).collect();
+            if let Some(choice) = dialogs::slot_download(ctx, &have, d.paths.len(), d.role.label()) {
+                let d = self.slot_download_pending.take().expect("checked above");
+                self.answer_slot_download(d, choice);
+            }
+        }
+
+        if let Some(p) = &self.slot_prefix_pending {
+            let mut srcs: Vec<&PathBuf> = p.paths.iter().collect();
+            srcs.sort_by_key(|s| p.labels.get(*s));
+            let examples: Vec<String> = srcs
+                .iter()
+                .filter_map(|s| {
+                    let name = device::wav_name(&s.file_name()?.to_string_lossy());
+                    Some(pane_view::slot_prefixed(p.labels.get(*s)?, &name))
+                })
+                .collect();
+            if let Some(choice) = dialogs::slot_prefix(ctx, &examples, p.paths.len()) {
+                let p = self.slot_prefix_pending.take().expect("checked above");
+                self.answer_slot_prefix(p, choice);
+            }
+        }
+    }
+
+    fn show_device_dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(n) = self.reconnect_ask {
+            if let Some(read) = dialogs::device_reconnected(ctx, n) {
+                self.reconnect_ask = None;
+                self.answer_reconnect(read);
+            }
+        }
+
+        if self.factory_popup && dialogs::factory_locked(ctx) {
+            self.factory_popup = false;
+        }
+
+        if let Some((path, bytes)) = &self.device_load_pending {
+            if let Some(yes) = dialogs::confirm_device_load(ctx, path, *bytes) {
+                let (path, bytes) = self.device_load_pending.take().expect("checked above");
+                if yes {
+                    self.start_device_load(path, bytes);
+                } else {
+                    self.status = "Load cancelled".to_owned();
+                }
+            }
+        }
+    }
+
+    fn show_file_removal_dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(groups) = &self.dupes_pending {
+            if let Some(yes) = dialogs::confirm_duplicates(ctx, groups) {
+                let groups = self.dupes_pending.take().expect("checked above");
+                if yes {
+                    let paths: Vec<PathBuf> = groups.into_iter().flat_map(|g| g.remove).collect();
+                    self.status = format!("Moving {} duplicate(s) to Trash…", paths.len());
+                    self.trash_local(paths);
+                } else {
+                    self.status = "Duplicate removal cancelled".to_owned();
+                }
+            }
+        }
+
+        if let Some(paths) = &self.delete_pending {
+            if let Some(yes) = dialogs::confirm_trash(ctx, paths, true, true) {
+                let paths = self.delete_pending.take().expect("checked above");
+                if yes {
+                    let n = paths.len();
+                    self.run_device(device::Task::Delete { paths }, "Deleting", n, 0);
+                } else {
+                    self.status = "Delete cancelled".to_owned();
+                }
+            }
+        }
+    }
+
+    fn show_kit_name_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(n) = &mut self.kit_naming {
+            if let Some(ok) = dialogs::name_kit(ctx, &mut n.name, &n.dir, &mut n.grid) {
+                let n = self.kit_naming.take().expect("checked above");
+                if ok {
+                    self.start_kit(n);
+                } else {
+                    self.status = "No SliceKit started".to_owned();
+                }
+            }
+        }
+    }
+
+    fn show_leave_dialog(&mut self, ctx: &egui::Context) {
+        // Closing the window with unsaved audio edits: ask first.
+        let close = ctx.input(|i| i.viewport().close_requested());
+        if close && self.any_dirty() && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.leave_pending.is_none() && self.leave_after_save.is_none() {
+                // Ask about whichever slot has the unsaved edits.
+                self.front_dirty();
+                self.leave_pending = Some(Leave::Quit);
+            }
+        }
+
+        if let Some(leave) = self.leave_pending.clone() {
+            let name = self
+                .editor
+                .path()
+                .and_then(|p| p.file_name())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let tab = self.pane(Role::Dest).active_tab();
+            let dest = (!tab.loading).then(|| {
+                let d = tab.cwd.file_name().map_or_else(
+                    || tab.cwd.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                if tab.device {
+                    format!("{d} on the device")
+                } else {
+                    d
+                }
+            });
+            let why = match leave {
+                Leave::Quit => dialogs::LeaveWhy::Quit,
+                Leave::CloseKit => dialogs::LeaveWhy::CloseKit,
+                _ => dialogs::LeaveWhy::Open,
+            };
+            if let Some(c) = dialogs::leave_editor(ctx, &name, why, dest.as_deref()) {
+                self.leave_pending = None;
+                self.answer_leave(leave, c);
+            }
+        }
+    }
+
+    fn show_save_dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(c) = &self.save_confirm {
+            let (title, lines, ok) = c.text();
+            if let Some(yes) = dialogs::confirm_overwrite(ctx, &title, &lines, &ok) {
+                let c = self.save_confirm.take().expect("checked above");
+                if yes {
+                    self.confirmed_save(c);
+                }
+            }
+        }
+
+        if self.send_back.is_some() {
+            let (taken, exists) = {
+                let f = self.send_back.as_ref().expect("checked above");
+                let name = f.name.trim();
+                (
+                    !name.is_empty() && self.device_has(&f.dir.join(name)),
+                    f.local_dir.as_ref().is_some_and(|d| d.join(format!("{name}.wav")).exists()),
+                )
+            };
+            let f = self.send_back.as_mut().expect("checked above");
+            if let Some(ok) = dialogs::send_back(ctx, f, taken, exists) {
+                let f = self.send_back.take().expect("checked above");
+                if ok {
+                    self.start_send_back(f);
+                }
+            }
+        }
+        if let Some(n) = &mut self.export_naming {
+            if let Some(ok) = dialogs::name_export(ctx, &mut n.name, &n.dir, &n.taken) {
+                let n = self.export_naming.take().expect("checked above");
+                if ok {
+                    let dst = n.dir.join(format!("{}.wav", n.name.trim()));
+                    self.start_export(dst, n.mono);
+                } else {
+                    self.status = "Export cancelled".to_owned();
+                }
+            }
+        }
+
+        if self.save_scope_pending {
+            let name = self
+                .editor
+                .path()
+                .and_then(|p| p.file_name())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let secs = |n: usize| self.editor.sample().map_or(0.0, |s| s.seconds(n));
+            let sel = secs(self.editor.sel.1 - self.editor.sel.0);
+            let whole = self.editor.file_seconds();
+            if let Some(c) = dialogs::save_scope(ctx, &name, sel, whole) {
+                self.save_scope_pending = false;
+                match c {
+                    SaveScope::Cancel => self.status = "Not saved".to_owned(),
+                    SaveScope::Trim => self.save_in_place_as(false),
+                    SaveScope::Whole => self.save_in_place_as(true),
+                }
+            }
+        }
+    }
+
+    fn finish_pending_close(&mut self, ctx: &egui::Context) {
+        // A save chosen in that dialog that never got going (its conflict or
+        // mono question was cancelled, or everything was skipped): drop it.
+        if self.leave_after_save.is_some()
+            && !self.save_scope_pending
+            && self.export_naming.is_none()
+            && !self.editor.exporting
+            && self.pending.is_none()
+            && self.staged_upload.is_none()
+        {
+            self.leave_after_save = None;
+        }
+
+        if self.close_when_idle && self.active_jobs.is_empty() {
+            self.close_when_idle = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, state::KEY, &self.snapshot(true));
@@ -788,324 +1135,9 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        if crate::device::presence().available() {
-            if let Some(Err(reason)) = self.device_status.clone() {
-                egui::Panel::top("device_connection_error").show(ui, |ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("Device not connected: {reason}"));
-                    if ui.button("Retry connection").clicked() {
-                        self.device_status = None;
-                        self.device.list(PathBuf::from("/"), 0);
-                    }
-                });
-            }
-        }
-
-        // Three columns: Source | Sample Editor | Destination.
-        // The side columns are drag-resizable; the editor takes whatever is
-        // left, but never less than MIN_EDITOR_W.
-        const MIN_SIDE_W: f32 = 220.0;
-        const MIN_EDITOR_W: f32 = 360.0;
-        let w = ui.available_width();
-        let default_w = w * 0.27;
-        let prev_r = if self.side_widths[1] > 0.0 {
-            self.side_widths[1]
-        } else {
-            default_w
-        };
-        let max_for = |other: f32| (w - other - MIN_EDITOR_W).max(MIN_SIDE_W);
-
-        // Elek Sample Order mode takes the whole window: the file panes have
-        // nothing to do with it.
-        if self.elek_mode && self.elek.hide_files {
-            egui::CentralPanel::default().show(ui, |ui| self.show_elek(ui));
-        } else {
-            let left = egui::Panel::left("source_col")
-                .resizable(true)
-                .default_size(default_w)
-                .size_range(MIN_SIDE_W..=max_for(prev_r))
-                .show(ui, |ui| self.show_pane(ui, Role::Source));
-            self.side_widths[0] = left.response.rect.width();
-            // The pool in the right column snaps it to DOCK_W the first
-            // time this run, and caps it at DOCK_MAX_W while it shows.
-            const DOCK_W: f32 = 420.0;
-            const DOCK_MAX_W: f32 = 680.0;
-            let mut max_r = max_for(self.side_widths[0]);
-            if self.pool_in_col() {
-                max_r = max_r.min(DOCK_MAX_W).max(MIN_SIDE_W);
-            }
-            let mut right = egui::Panel::right("dest_col")
-                .resizable(true)
-                .default_size(default_w)
-                .size_range(MIN_SIDE_W..=max_r);
-            if self.pool_in_col() && !self.pool_snapped {
-                self.pool_snapped = true;
-                right = right.exact_size(DOCK_W.clamp(MIN_SIDE_W, max_r));
-            }
-            let right = right.show(ui, |ui| self.show_dest_col(ui));
-            self.side_widths[1] = right.response.rect.width();
-            draw_divider(ui, left.response.rect.right(), left.response.rect.y_range());
-            draw_divider(
-                ui,
-                right.response.rect.left(),
-                right.response.rect.y_range(),
-            );
-
-            if self.elek_mode {
-                egui::CentralPanel::default().show(ui, |ui| self.show_elek(ui));
-            } else {
-                egui::CentralPanel::default().show(ui, |ui| self.show_editor(ui));
-            }
-
-            // A click anywhere decides whether the docked pool keeps the keyboard.
-            let press = ui.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
-            if let Some(pos) = press {
-                let inside = self.pool_in_col() && self.pool_rect.is_some_and(|r| r.contains(pos));
-                self.pool_focused = inside;
-                if inside {
-                    self.editor_focused = false;
-                }
-            }
-        }
-
+        self.show_layout(ui);
         self.cross_ping();
-
-        // Modal last, so it paints over both panes.
-        if let Some(p) = &self.pending {
-            // A device move is a rename, which can't merge folders.
-            let can_merge = matches!(
-                p.what,
-                PlanKind::Transfer
-                    | PlanKind::Commit { .. }
-                    | PlanKind::Device {
-                        dir: device::Dir::Upload | device::Dir::Download | device::Dir::Copy,
-                        ..
-                    }
-            ) && p.plan.ops.iter().any(|o| o.conflict && o.is_dir);
-            if let Some(decision) = dialogs::conflicts(ui.ctx(), &p.plan, can_merge) {
-                let pending = self.pending.take().expect("checked above");
-                match decision {
-                    Decision::Proceed(policy) => self.launch(&pending.plan, pending.what, policy),
-                    Decision::Merge if matches!(pending.what, PlanKind::Device { .. }) => {
-                        self.launch(&pending.plan, pending.what, Policy::Merge)
-                    }
-                    Decision::Merge => self.launch_merge(&pending.plan, pending.what),
-                    Decision::Cancel => self.status = "Transfer cancelled".to_owned(),
-                }
-            }
-        }
-
-        if let Some(r) = &self.local_rename_pending {
-            if let Some(yes) = dialogs::rename_local(ui.ctx(), &r.link.local, &r.to) {
-                let r = self.local_rename_pending.take().expect("checked above");
-                if yes {
-                    self.rename_local_copy(r);
-                }
-            }
-        }
-
-        if let Some(d) = &self.slot_download_pending {
-            let have: Vec<&Path> = d.have.iter().map(|(_, l)| l.as_path()).collect();
-            if let Some(choice) = dialogs::slot_download(ui.ctx(), &have, d.paths.len(), d.role.label()) {
-                let d = self.slot_download_pending.take().expect("checked above");
-                self.answer_slot_download(d, choice);
-            }
-        }
-
-        if let Some(p) = &self.slot_prefix_pending {
-            let mut srcs: Vec<&PathBuf> = p.paths.iter().collect();
-            srcs.sort_by_key(|s| p.labels.get(*s));
-            let examples: Vec<String> = srcs
-                .iter()
-                .filter_map(|s| {
-                    let name = device::wav_name(&s.file_name()?.to_string_lossy());
-                    Some(pane_view::slot_prefixed(p.labels.get(*s)?, &name))
-                })
-                .collect();
-            if let Some(choice) = dialogs::slot_prefix(ui.ctx(), &examples, p.paths.len()) {
-                let p = self.slot_prefix_pending.take().expect("checked above");
-                self.answer_slot_prefix(p, choice);
-            }
-        }
-
-        if let Some(n) = self.reconnect_ask {
-            if let Some(read) = dialogs::device_reconnected(ui.ctx(), n) {
-                self.reconnect_ask = None;
-                self.answer_reconnect(read);
-            }
-        }
-
-        if self.factory_popup && dialogs::factory_locked(ui.ctx()) {
-            self.factory_popup = false;
-        }
-
-        if let Some((path, bytes)) = &self.device_load_pending {
-            if let Some(yes) = dialogs::confirm_device_load(ui.ctx(), path, *bytes) {
-                let (path, bytes) = self.device_load_pending.take().expect("checked above");
-                if yes {
-                    self.start_device_load(path, bytes);
-                } else {
-                    self.status = "Load cancelled".to_owned();
-                }
-            }
-        }
-
-        if let Some(groups) = &self.dupes_pending {
-            if let Some(yes) = dialogs::confirm_duplicates(ui.ctx(), groups) {
-                let groups = self.dupes_pending.take().expect("checked above");
-                if yes {
-                    let paths: Vec<PathBuf> = groups.into_iter().flat_map(|g| g.remove).collect();
-                    self.status = format!("Moving {} duplicate(s) to Trash…", paths.len());
-                    self.trash_local(paths);
-                } else {
-                    self.status = "Duplicate removal cancelled".to_owned();
-                }
-            }
-        }
-
-        if let Some(paths) = &self.delete_pending {
-            if let Some(yes) = dialogs::confirm_trash(ui.ctx(), paths, true, true) {
-                let paths = self.delete_pending.take().expect("checked above");
-                if yes {
-                    let n = paths.len();
-                    self.run_device(device::Task::Delete { paths }, "Deleting", n, 0);
-                } else {
-                    self.status = "Delete cancelled".to_owned();
-                }
-            }
-        }
-
-        if let Some(n) = &mut self.kit_naming {
-            if let Some(ok) = dialogs::name_kit(ui.ctx(), &mut n.name, &n.dir, &mut n.grid) {
-                let n = self.kit_naming.take().expect("checked above");
-                if ok {
-                    self.start_kit(n);
-                } else {
-                    self.status = "No SliceKit started".to_owned();
-                }
-            }
-        }
-
-        // Closing the window with unsaved audio edits: ask first.
-        let close = ui.ctx().input(|i| i.viewport().close_requested());
-        if close && self.any_dirty() && !self.allow_close {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if self.leave_pending.is_none() && self.leave_after_save.is_none() {
-                // Ask about whichever slot has the unsaved edits.
-                self.front_dirty();
-                self.leave_pending = Some(Leave::Quit);
-            }
-        }
-
-        if let Some(leave) = self.leave_pending.clone() {
-            let name = self
-                .editor
-                .path()
-                .and_then(|p| p.file_name())
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            let tab = self.pane(Role::Dest).active_tab();
-            let dest = (!tab.loading).then(|| {
-                let d = tab.cwd.file_name().map_or_else(
-                    || tab.cwd.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
-                if tab.device {
-                    format!("{d} on the device")
-                } else {
-                    d
-                }
-            });
-            let why = match leave {
-                Leave::Quit => dialogs::LeaveWhy::Quit,
-                Leave::CloseKit => dialogs::LeaveWhy::CloseKit,
-                _ => dialogs::LeaveWhy::Open,
-            };
-            if let Some(c) = dialogs::leave_editor(ui.ctx(), &name, why, dest.as_deref()) {
-                self.leave_pending = None;
-                self.answer_leave(leave, c);
-            }
-        }
-
-        if let Some(c) = &self.save_confirm {
-            let (title, lines, ok) = c.text();
-            if let Some(yes) = dialogs::confirm_overwrite(ui.ctx(), &title, &lines, &ok) {
-                let c = self.save_confirm.take().expect("checked above");
-                if yes {
-                    self.confirmed_save(c);
-                }
-            }
-        }
-
-        if self.send_back.is_some() {
-            let (taken, exists) = {
-                let f = self.send_back.as_ref().expect("checked above");
-                let name = f.name.trim();
-                (
-                    !name.is_empty() && self.device_has(&f.dir.join(name)),
-                    f.local_dir.as_ref().is_some_and(|d| d.join(format!("{name}.wav")).exists()),
-                )
-            };
-            let f = self.send_back.as_mut().expect("checked above");
-            if let Some(ok) = dialogs::send_back(ui.ctx(), f, taken, exists) {
-                let f = self.send_back.take().expect("checked above");
-                if ok {
-                    self.start_send_back(f);
-                }
-            }
-        }
-        if let Some(n) = &mut self.export_naming {
-            if let Some(ok) = dialogs::name_export(ui.ctx(), &mut n.name, &n.dir, &n.taken) {
-                let n = self.export_naming.take().expect("checked above");
-                if ok {
-                    let dst = n.dir.join(format!("{}.wav", n.name.trim()));
-                    self.start_export(dst, n.mono);
-                } else {
-                    self.status = "Export cancelled".to_owned();
-                }
-            }
-        }
-
-        if self.save_scope_pending {
-            let name = self
-                .editor
-                .path()
-                .and_then(|p| p.file_name())
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            let secs = |n: usize| self.editor.sample().map_or(0.0, |s| s.seconds(n));
-            let sel = secs(self.editor.sel.1 - self.editor.sel.0);
-            let whole = self.editor.file_seconds();
-            if let Some(c) = dialogs::save_scope(ui.ctx(), &name, sel, whole) {
-                self.save_scope_pending = false;
-                match c {
-                    SaveScope::Cancel => self.status = "Not saved".to_owned(),
-                    SaveScope::Trim => self.save_in_place_as(false),
-                    SaveScope::Whole => self.save_in_place_as(true),
-                }
-            }
-        }
-
-        // A save chosen in that dialog that never got going (its conflict or
-        // mono question was cancelled, or everything was skipped): drop it.
-        if self.leave_after_save.is_some()
-            && !self.save_scope_pending
-            && self.export_naming.is_none()
-            && !self.editor.exporting
-            && self.pending.is_none()
-            && self.staged_upload.is_none()
-        {
-            self.leave_after_save = None;
-        }
-
-        if self.close_when_idle && self.active_jobs.is_empty() {
-            self.close_when_idle = false;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        self.show_pending_dialogs(ui.ctx());
 
         self.handle_keys(ui);
         self.follow_cursor();

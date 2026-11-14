@@ -615,48 +615,8 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
         }
     }
 
-    // Folder rows take drops themselves; the list behind them only gets what
-    // lands elsewhere (the row claims the payload first). The right third of
-    // a folder row means "drop here" -- into the folder the row sits in, not
-    // into the folder itself -- since a list full of folders otherwise leaves
-    // nowhere to aim at.
-    if entry.is_dir {
-        let here_zone = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - rect.width() / 3.0, rect.top()),
-            rect.max,
-        );
-        let in_here_zone = ui
-            .ctx()
-            .pointer_interact_pos()
-            .is_some_and(|p| here_zone.contains(p));
-        let target = if in_here_zone {
-            entry.path.parent().map(PathBuf::from)
-        } else {
-            Some(entry.path.clone())
-        };
-        let onto_self = |p: &DragPayload| {
-            !in_here_zone && p.device == tab.device && p.paths.contains(&entry.path)
-        };
-        // Only outline the folder itself; the "here" zone gets no box, since a
-        // box on one row reads as "into this row" rather than "into the parent".
-        if !in_here_zone
-            && resp
-                .dnd_hover_payload::<DragPayload>()
-                .is_some_and(|p| !onto_self(&p))
-        {
-            let color = crate::ui::theme::ACCENT_BRIGHT;
-            ui.painter()
-                .rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
-        }
-        if let Some(p) = resp.release_payload::<DragPayload>() {
-            if let Some(dir) = target.filter(|_| !onto_self(&p)) {
-                intents.push(Intent::DroppedOn {
-                    dir,
-                    payload: (*p).clone(),
-                });
-            }
-            return;
-        }
+    if folder_drop(ui, tab, &entry, &resp, intents) {
+        return;
     }
 
     // The arrow sits on top of the row, so it's checked after (egui gives the
@@ -674,6 +634,78 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
         }
     }
 
+    row_interactions(ui, tab, cx, vis_i, &entry, &resp, intents);
+    resp.context_menu(|ui| row_menu(ui, tab, cx, &entry, intents));
+}
+
+/// Claims a folder-row drop before the list behind it can consume it.
+/// Returns whether a payload was consumed, including a refused self-drop.
+fn folder_drop(
+    ui: &Ui,
+    tab: &DirTab,
+    entry: &fs_model::Entry,
+    resp: &egui::Response,
+    intents: &mut Vec<Intent>,
+) -> bool {
+    // Folder rows take drops themselves; the list behind them only gets what
+    // lands elsewhere (the row claims the payload first). The right third of
+    // a folder row means "drop here" -- into the folder the row sits in, not
+    // into the folder itself -- since a list full of folders otherwise leaves
+    // nowhere to aim at.
+    if !entry.is_dir {
+        return false;
+    }
+    let rect = resp.rect;
+    let here_zone = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - rect.width() / 3.0, rect.top()),
+        rect.max,
+    );
+    let in_here_zone = ui
+        .ctx()
+        .pointer_interact_pos()
+        .is_some_and(|p| here_zone.contains(p));
+    let target = if in_here_zone {
+        entry.path.parent().map(PathBuf::from)
+    } else {
+        Some(entry.path.clone())
+    };
+    let onto_self = |p: &DragPayload| {
+        !in_here_zone && p.device == tab.device && p.paths.contains(&entry.path)
+    };
+    // Only outline the folder itself; the "here" zone gets no box, since a
+    // box on one row reads as "into this row" rather than "into the parent".
+    if !in_here_zone
+        && resp
+            .dnd_hover_payload::<DragPayload>()
+            .is_some_and(|p| !onto_self(&p))
+    {
+        let color = crate::ui::theme::ACCENT_BRIGHT;
+        ui.painter()
+            .rect_stroke(rect, 2.0, Stroke::new(2.0, color), StrokeKind::Inside);
+    }
+    if let Some(p) = resp.release_payload::<DragPayload>() {
+        if let Some(dir) = target.filter(|_| !onto_self(&p)) {
+            intents.push(Intent::DroppedOn {
+                dir,
+                payload: (*p).clone(),
+            });
+        }
+        return true;
+    }
+    false
+}
+
+/// Selection, dragging and Finder-style delayed rename share one row response.
+fn row_interactions(
+    ui: &Ui,
+    tab: &mut DirTab,
+    cx: &TableCtx<'_>,
+    vis_i: usize,
+    entry: &fs_model::Entry,
+    resp: &egui::Response,
+    intents: &mut Vec<Intent>,
+) {
+    let is_selected = tab.selected.contains(&entry.path);
     if resp.drag_started() {
         tab.slow_click_rename = None;
         // If the row isn't part of the selection, dragging it selects it first
@@ -734,171 +766,178 @@ fn row(ui: &mut Ui, tab: &mut DirTab, cx: &TableCtx<'_>, vis_i: usize, intents: 
             tab.anchor = Some(vis_i);
         }
     }
+}
 
-    resp.context_menu(|ui| {
-        // Rename and Open only make sense for one item.
-        let single = tab.selected.len() <= 1;
-        let rename = ui.add_enabled(single, egui::Button::new("Rename"));
-        let rename = if single {
-            rename.on_hover_text("Rename in place (F2)")
-        } else {
-            rename.on_disabled_hover_text("Several items selected -- use the Multi-Rename Tool")
-        };
-        if rename.clicked() {
-            intents.push(Intent::BeginRename(entry.path.clone()));
-            ui.close();
-        }
-        if ui.button("Multi-Rename Tool…").on_hover_text("Find and replace across the selected names (⇧F2)").clicked() {
-            intents.push(Intent::BeginMultiRename);
-            ui.close();
-        }
-        let local = !tab.device;
-        if local && entry.is_dir && ui.button("Calculate size").clicked() {
-            intents.push(Intent::WantSize(vec![entry.path.clone()]));
-            ui.close();
-        }
-        if local && entry.is_dir {
-            let dirs: Vec<PathBuf> = tab.effective_selection().into_iter().filter(|p| p.is_dir()).collect();
-            ui.menu_button("Make mono copy", |ui| {
-                use crate::audio::stats::Fold;
-                let opts: [(&str, &str, &[Fold]); 4] = [
-                    ("Left + Right", "Each stereo file becomes two: \"name L\" and \"name R\"", &[Fold::Left, Fold::Right]),
-                    ("Left only", "Keep the left channel of stereo files", &[Fold::Left]),
-                    ("Right only", "Keep the right channel of stereo files", &[Fold::Right]),
-                    ("Mix", "Average both channels of stereo files", &[Fold::Mix]),
-                ];
-                for (label, hint, folds) in opts {
-                    if ui.button(label).on_hover_text(hint).clicked() {
-                        intents.push(Intent::MonoCopy { dirs: dirs.clone(), folds: folds.to_vec() });
-                        ui.close();
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Copy the folder's samples to \"<name> Mono\": mono files as they are, stereo ones folded down");
-        }
-        if local && entry.is_dir && ui.button("Add to favourites").clicked() {
-            intents.push(Intent::AddFavourite(entry.path.clone()));
-            ui.close();
-        }
-        if single && entry.is_dir && ui.button("Open").clicked() {
-            intents.push(Intent::Open(entry.path.clone()));
-            ui.close();
-        }
-        if single
-            && local
-            && !entry.is_dir
-            && crate::fs_model::is_audio_path(&entry.path)
-            && ui.button("Load as SliceKit").on_hover_text(
-                "Open as a slice kit — K then adds selections to it.\n\
-                 Slices come back from the file's cue points, or, without any, from an [8]-style\n\
-                 name prefix (8 equal slices)",
-            ).clicked()
-        {
-            intents.push(Intent::UseAsKit(entry.path.clone()));
-            ui.close();
-        }
-        let linked = single && !local && !entry.is_dir && cx.links.known(entry.hash, entry.len as u32).is_some();
-        let load_label = if linked { "Load to editor (local copy)" } else { "Load to editor…" };
-        if single && !local && !entry.is_dir && ui.button(load_label).clicked() {
-            intents.push(Intent::LoadFromDevice(entry.path.clone()));
-            ui.close();
-        }
-        if linked {
-            let reveal = if cfg!(target_os = "macos") { "Reveal local copy in Finder" } else { "Show local copy in Explorer" };
-            if ui.button(reveal).clicked() {
-                intents.push(Intent::RevealLocal(entry.path.clone()));
-                ui.close();
-            }
-            if ui.button("Show local copy in other pane").clicked() {
-                intents.push(Intent::ShowLocal(entry.path.clone()));
-                ui.close();
-            }
-        }
-        if single && local && !entry.is_dir {
-            if let Some(l) = cx.links.for_local(&entry.path) {
-                let tip = format!(
-                    "{} {} (where it was then; it may have moved)",
-                    if l.uploaded { "Uploaded as" } else { "Fetched from" },
-                    l.device
-                );
-                if ui.button("Show on device").on_hover_text(tip).clicked() {
-                    intents.push(Intent::ShowOnDevice(entry.path.clone()));
+/// Commands available for the clicked row and its effective selection.
+fn row_menu(
+    ui: &mut Ui,
+    tab: &DirTab,
+    cx: &TableCtx<'_>,
+    entry: &fs_model::Entry,
+    intents: &mut Vec<Intent>,
+) {
+    // Rename and Open only make sense for one item.
+    let single = tab.selected.len() <= 1;
+    let rename = ui.add_enabled(single, egui::Button::new("Rename"));
+    let rename = if single {
+        rename.on_hover_text("Rename in place (F2)")
+    } else {
+        rename.on_disabled_hover_text("Several items selected -- use the Multi-Rename Tool")
+    };
+    if rename.clicked() {
+        intents.push(Intent::BeginRename(entry.path.clone()));
+        ui.close();
+    }
+    if ui.button("Multi-Rename Tool…").on_hover_text("Find and replace across the selected names (⇧F2)").clicked() {
+        intents.push(Intent::BeginMultiRename);
+        ui.close();
+    }
+    let local = !tab.device;
+    if local && entry.is_dir && ui.button("Calculate size").clicked() {
+        intents.push(Intent::WantSize(vec![entry.path.clone()]));
+        ui.close();
+    }
+    if local && entry.is_dir {
+        let dirs: Vec<PathBuf> = tab.effective_selection().into_iter().filter(|p| p.is_dir()).collect();
+        ui.menu_button("Make mono copy", |ui| {
+            use crate::audio::stats::Fold;
+            let opts: [(&str, &str, &[Fold]); 4] = [
+                ("Left + Right", "Each stereo file becomes two: \"name L\" and \"name R\"", &[Fold::Left, Fold::Right]),
+                ("Left only", "Keep the left channel of stereo files", &[Fold::Left]),
+                ("Right only", "Keep the right channel of stereo files", &[Fold::Right]),
+                ("Mix", "Average both channels of stereo files", &[Fold::Mix]),
+            ];
+            for (label, hint, folds) in opts {
+                if ui.button(label).on_hover_text(hint).clicked() {
+                    intents.push(Intent::MonoCopy { dirs: dirs.clone(), folds: folds.to_vec() });
                     ui.close();
                 }
             }
-        }
-        // Next to the row, i.e. in the folder the row sits in.
-        if let Some(parent) = entry.path.parent() {
-            let base = entry.is_dir.then(|| entry.name.clone());
-            let sel = if local { tab.effective_selection() } else { Vec::new() };
-            if sel.len() == 1 {
-                new_folder_button(ui, cx, parent.to_path_buf(), base, Vec::new(), intents);
-                if ui.button("New folder with this item").on_hover_text("Move it into a new subfolder and rename it").clicked() {
-                    intents.push(Intent::NewFolderWith { dir: parent.to_path_buf(), paths: sel, name: None });
-                    ui.close();
-                }
-            } else {
-                new_folder_button(ui, cx, parent.to_path_buf(), base, sel, intents);
-            }
-        }
-        ui.separator();
-        let sel = tab.effective_selection();
-        if ui.button("Cut").clicked() {
-            intents.push(Intent::Cut(sel.clone()));
+        })
+        .response
+        .on_hover_text("Copy the folder's samples to \"<name> Mono\": mono files as they are, stereo ones folded down");
+    }
+    if local && entry.is_dir && ui.button("Add to favourites").clicked() {
+        intents.push(Intent::AddFavourite(entry.path.clone()));
+        ui.close();
+    }
+    if single && entry.is_dir && ui.button("Open").clicked() {
+        intents.push(Intent::Open(entry.path.clone()));
+        ui.close();
+    }
+    if single
+        && local
+        && !entry.is_dir
+        && crate::fs_model::is_audio_path(&entry.path)
+        && ui.button("Load as SliceKit").on_hover_text(
+            "Open as a slice kit — K then adds selections to it.\n\
+             Slices come back from the file's cue points, or, without any, from an [8]-style\n\
+             name prefix (8 equal slices)",
+        ).clicked()
+    {
+        intents.push(Intent::UseAsKit(entry.path.clone()));
+        ui.close();
+    }
+    let linked = single && !local && !entry.is_dir && cx.links.known(entry.hash, entry.len as u32).is_some();
+    let load_label = if linked { "Load to editor (local copy)" } else { "Load to editor…" };
+    if single && !local && !entry.is_dir && ui.button(load_label).clicked() {
+        intents.push(Intent::LoadFromDevice(entry.path.clone()));
+        ui.close();
+    }
+    if linked {
+        let reveal = if cfg!(target_os = "macos") { "Reveal local copy in Finder" } else { "Show local copy in Explorer" };
+        if ui.button(reveal).clicked() {
+            intents.push(Intent::RevealLocal(entry.path.clone()));
             ui.close();
         }
-        if ui.button("Copy").clicked() {
-            intents.push(Intent::Copy(sel.clone()));
+        if ui.button("Show local copy in other pane").clicked() {
+            intents.push(Intent::ShowLocal(entry.path.clone()));
             ui.close();
         }
-        // On a folder row, paste goes into that folder; on a file, alongside it.
-        let target = entry.is_dir.then(|| entry.path.clone());
-        paste_button(ui, cx, target, intents);
-        ui.separator();
-        // Only meaningful with several files selected.
-        let files: Vec<PathBuf> =
-            if local { sel.iter().filter(|p| !p.is_dir()).cloned().collect() } else { Vec::new() };
-        if files.len() > 1 {
-            if ui
-                .button("Remove duplicates…")
-                .on_hover_text("Find identical files in the selection, keep the shortest name of each, trash the rest")
-                .clicked()
-            {
-                intents.push(Intent::RemoveDuplicates(files));
+    }
+    if single && local && !entry.is_dir {
+        if let Some(l) = cx.links.for_local(&entry.path) {
+            let tip = format!(
+                "{} {} (where it was then; it may have moved)",
+                if l.uploaded { "Uploaded as" } else { "Fetched from" },
+                l.device
+            );
+            if ui.button("Show on device").on_hover_text(tip).clicked() {
+                intents.push(Intent::ShowOnDevice(entry.path.clone()));
                 ui.close();
             }
-            ui.separator();
         }
-        if local {
-            reveal_button(ui, entry.path.clone(), intents);
-            ui.separator();
-        }
-        let bin = if local { "Trash" } else { "/trash" };
-        let label = if sel.len() > 1 {
-            format!("Move {} items to {bin}", sel.len())
+    }
+    // Next to the row, i.e. in the folder the row sits in.
+    if let Some(parent) = entry.path.parent() {
+        let base = entry.is_dir.then(|| entry.name.clone());
+        let sel = if local { tab.effective_selection() } else { Vec::new() };
+        if sel.len() == 1 {
+            new_folder_button(ui, cx, parent.to_path_buf(), base, Vec::new(), intents);
+            if ui.button("New folder with this item").on_hover_text("Move it into a new subfolder and rename it").clicked() {
+                intents.push(Intent::NewFolderWith { dir: parent.to_path_buf(), paths: sel, name: None });
+                ui.close();
+            }
         } else {
-            format!("Move to {bin}")
-        };
+            new_folder_button(ui, cx, parent.to_path_buf(), base, sel, intents);
+        }
+    }
+    ui.separator();
+    let sel = tab.effective_selection();
+    if ui.button("Cut").clicked() {
+        intents.push(Intent::Cut(sel.clone()));
+        ui.close();
+    }
+    if ui.button("Copy").clicked() {
+        intents.push(Intent::Copy(sel.clone()));
+        ui.close();
+    }
+    // On a folder row, paste goes into that folder; on a file, alongside it.
+    let target = entry.is_dir.then(|| entry.path.clone());
+    paste_button(ui, cx, target, intents);
+    ui.separator();
+    // Only meaningful with several files selected.
+    let files: Vec<PathBuf> =
+        if local { sel.iter().filter(|p| !p.is_dir()).cloned().collect() } else { Vec::new() };
+    if files.len() > 1 {
         if ui
-            .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
+            .button("Remove duplicates…")
+            .on_hover_text("Find identical files in the selection, keep the shortest name of each, trash the rest")
             .clicked()
         {
-            intents.push(Intent::Trash(sel.clone()));
+            intents.push(Intent::RemoveDuplicates(files));
             ui.close();
         }
-        if !local {
-            let label = if sel.len() > 1 { format!("Delete {} items now", sel.len()) } else { "Delete now".to_owned() };
-            if ui
-                .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
-                .on_hover_text("Delete from the device right away, without going through /trash (⌥⌘⌫)")
-                .clicked()
-            {
-                intents.push(Intent::DeleteNow(sel));
-                ui.close();
-            }
+        ui.separator();
+    }
+    if local {
+        reveal_button(ui, entry.path.clone(), intents);
+        ui.separator();
+    }
+    let bin = if local { "Trash" } else { "/trash" };
+    let label = if sel.len() > 1 {
+        format!("Move {} items to {bin}", sel.len())
+    } else {
+        format!("Move to {bin}")
+    };
+    if ui
+        .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
+        .clicked()
+    {
+        intents.push(Intent::Trash(sel.clone()));
+        ui.close();
+    }
+    if !local {
+        let label = if sel.len() > 1 { format!("Delete {} items now", sel.len()) } else { "Delete now".to_owned() };
+        if ui
+            .button(egui::RichText::new(label).color(ui.visuals().error_fg_color))
+            .on_hover_text("Delete from the device right away, without going through /trash (⌥⌘⌫)")
+            .clicked()
+        {
+            intents.push(Intent::DeleteNow(sel));
+            ui.close();
         }
-    });
+    }
 }
 
 /// Draws a row's icon, name and size straight onto the painter. These are

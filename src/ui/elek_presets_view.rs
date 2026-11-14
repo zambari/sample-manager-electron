@@ -7,6 +7,7 @@ use crate::device::presets::{Preset, PresetEntry, PresetOp, PresetPush, PresetSl
 use crate::ui::drag_drop::ResponseDnd;
 use crate::ui::elek_view::{self, ElekIntent, ElekState};
 use crate::ui::slot_list::{self, DropTarget};
+use crate::ui::sound_tags;
 use crate::ui::theme::{self, OLED, OLED_BG, OLED_DIM, OLED_HOVER, oled_font};
 use egui::{RichText, Sense, Stroke};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -297,6 +298,21 @@ impl PresetView {
             self.undo.clear();
         }
         self.status.clear();
+    }
+
+    fn edit_tags(&mut self, loc: PresetSlot, tags: u32, out: &mut Vec<ElekIntent>) {
+        let Some(src) = self.origin(&loc) else { return; };
+        let Some(Ok(mut preset)) = self.preset(&src).map(|r| r.cloned()) else {
+            self.status = "Read the preset before editing its tags".into();
+            return;
+        };
+        if preset.tag_mask() == tags { return; }
+        if let Err(e) = preset.set_tags(tags) {
+            self.status = e;
+            return;
+        }
+        self.stage(vec![PresetOp::Write(loc.clone(), preset)], out);
+        self.status = format!("Preset {}:{:03} tags changed. Push on Presets to save them to +Drive", loc.bank, loc.slot);
     }
 
     fn undo(&mut self) {
@@ -806,7 +822,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
         egui::Modal::new(egui::Id::unique("preset_push")).show(ui.ctx(), |ui| {
             ui.set_width(420.0);
             ui.heading(format!("Push {changed} changed preset slot(s)?"));
-            ui.label("This saves the staged pastes, moves, swaps and clears directly to the preset banks on +Drive. Cleared presets are removed from their saved slots.");
+            ui.label("This saves the staged tag edits, pastes, moves, swaps and clears directly to the preset banks on +Drive. Cleared presets are removed from their saved slots.");
             ui.horizontal(|ui| {
                 if ui.button("Push presets").clicked() {
                     st.presets.confirm_push = false;
@@ -881,13 +897,14 @@ fn paste_sound(st: &mut ElekState, loc: PresetSlot, out: &mut Vec<ElekIntent>) {
     };
     let mut preset = match &clip.cell.src {
         crate::device::library::SoundSrc::Preset { model, data } => {
-            let data = if let Some(name) = &clip.cell.name {
+            let mut data = if let Some(name) = &clip.cell.name {
                 let mut d = data.clone();
                 let name = crate::device::patterns::clean_name(name);
                 d[12..28].fill(0);
                 d[12..12 + name.len()].copy_from_slice(name.as_bytes());
                 d
             } else { data.clone() };
+            if let Some(tags) = clip.cell.tags { data[8..12].copy_from_slice(&tags.to_be_bytes()); }
             crate::device::presets::Preset {
                 model: *model, container: Vec::new(),
                 sound: crate::device::library::parse_sound(*model, 0, &data),
@@ -1055,6 +1072,8 @@ fn pane(
     let mut edit = None;
     let mut copy = None;
     let mut paste = None;
+    let mut tag_open = None;
+    let mut tag_edit = None;
     let can_edit = present
         && st.presets.pushing.is_none()
         && !st.presets.importing
@@ -1090,10 +1109,18 @@ fn pane(
                 let index = start + *slot as usize - 1;
                 let (r, resp) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 20.0),
-                    Sense::click_and_drag(),
+                    Sense::hover(),
                 );
+                let tags_width = if *filled { sound_tags::WIDTH.min(r.width() * 0.5) } else { 0.0 };
+                let tags_rect = egui::Rect::from_min_max(
+                    egui::pos2(r.right() - tags_width - 6.0, r.top()),
+                    egui::pos2(r.right() - 6.0, r.bottom()),
+                );
+                let grip = egui::Rect::from_min_max(r.min, egui::pos2(tags_rect.left() - 4.0, r.bottom()));
+                let over = resp;
+                let resp = ui.interact(grip, ui.scope_id().with(("preset_name", &bank, slot)), Sense::click_and_drag());
                 let selected = st.presets.sel.contains(&index);
-                if selected || resp.hovered() {
+                if selected || over.hovered() {
                     ui.painter().rect_filled(
                         r,
                         0.0,
@@ -1105,32 +1132,36 @@ fn pane(
                     );
                 }
                 let color = if *changed { theme::CHANGED } else if *filled { OLED } else { OLED_DIM };
-                let tag_text = match tags {
-                    Some(Ok(mask)) => tag_names(*mask).collect::<Vec<_>>().join(", "),
-                    Some(Err(_)) => "tags ?".into(),
-                    None if *filled => "…".into(),
-                    None => String::new(),
-                };
                 let mut text = egui::text::LayoutJob::simple_singleline(
                     format!("{bank}:{slot:03}  {name}{}", if *changed { " *" } else { "" }),
                     oled_font(16.0), color,
                 );
-                if !tag_text.is_empty() {
-                    text.append(&format!("  {tag_text}"), 0.0, egui::TextFormat {
-                        font_id: oled_font(12.0), color: OLED_DIM, ..Default::default()
-                    });
-                }
-                text.wrap = egui::text::TextWrapping::truncate_at_width((r.width() - 12.0).max(0.0));
+                text.wrap = egui::text::TextWrapping::truncate_at_width((grip.width() - 6.0).max(0.0));
                 let galley = ui.painter().layout_job(text);
                 let pos = egui::pos2(r.left() + 6.0, r.center().y - galley.size().y * 0.5);
-                ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).galley(pos, galley, color);
-                let resp = resp.on_hover_text(format!("{bank}:{slot:03} · {name}\n{}", match tags {
-                    Some(Ok(0)) => "No tags".into(),
-                    Some(Ok(_)) => tag_text,
-                    Some(Err(e)) => format!("Could not read tags: {e}. Reload presets to retry."),
-                    None if *filled => "Reading tags…".into(),
-                    None => "Empty slot".into(),
-                }));
+                ui.painter().with_clip_rect(grip.intersect(ui.clip_rect())).galley(pos, galley, color);
+                let resp = resp.on_hover_text(format!("{bank}:{slot:03} · {name}"));
+                if *filled {
+                    let source = row_sources[row].as_ref();
+                    let loaded = source.and_then(|src| st.presets.preset(src)).is_some_and(|r| r.is_ok());
+                    if let Some(Ok(mask)) = tags {
+                        let (value, opened) = sound_tags::show_with_open(
+                            ui, tags_rect, ui.scope_id().with(("preset_tags", &bank, slot)),
+                            *mask, can_edit && loaded, *changed,
+                        );
+                        if opened && can_edit { tag_open = source.cloned(); }
+                        if let Some(value) = value { tag_edit = Some((PresetSlot::new(&bank, *slot), value)); }
+                    } else {
+                        let tip = match tags {
+                            Some(Err(e)) => format!("Could not read tags: {e}. Reload presets to retry."),
+                            _ => "Reading tags… Click to load the sound for editing.".into(),
+                        };
+                        ui.painter().text(tags_rect.right_center() - egui::vec2(0.0, 1.0), egui::Align2::RIGHT_CENTER,
+                            if tags.is_some() { "TAGS ?" } else { "…" }, oled_font(10.0), OLED_DIM);
+                        let r = ui.interact(tags_rect, ui.scope_id().with(("preset_tags_loading", &bank, slot)), Sense::click()).on_hover_text(tip);
+                        if r.clicked() && can_edit { tag_open = source.cloned(); }
+                    }
+                }
                 if resp.clicked() && st.presets.pending.is_none() {
                     select = Some((index, ui.input(|i| i.modifiers)));
                 }
@@ -1146,7 +1177,7 @@ fn pane(
                 }
                 if can_edit {
                     let target = slot_list::drop_target(ui, r, index);
-                    if resp.dnd_hover_payload::<PresetDrag>().is_some() {
+                    if over.dnd_hover_payload::<PresetDrag>().is_some() {
                         slot_list::paint_drop(
                             ui,
                             r,
@@ -1163,7 +1194,7 @@ fn pane(
                             theme::DEVICE_ACCENT_BRIGHT,
                         );
                     }
-                    if resp.release_payload::<PresetDrag>().is_some() {
+                    if over.release_payload::<PresetDrag>().is_some() {
                         st.presets.active = side;
                         edit = Some(Edit::Drop(target));
                     }
@@ -1243,6 +1274,12 @@ fn pane(
             }
         });
     });
+    if let Some(src) = tag_open {
+        st.presets.request_sound(&src, out);
+    }
+    if let Some((loc, tags)) = tag_edit {
+        st.presets.edit_tags(loc, tags, out);
+    }
     if let Some(loc) = copy { copy_preset(st, loc, out, ui.ctx()); }
     if let Some((side, index)) = paste {
         st.presets.select(banks, side, index, egui::Modifiers::NONE);

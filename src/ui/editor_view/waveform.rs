@@ -34,7 +34,10 @@ pub(super) fn waveform(
     // The padlock, top right in the ruler: registered after the wave so it
     // takes its own clicks.
     let lock_rect = (ed.is_kit && ed.has_markers()).then(|| {
-        Rect::from_min_size(Pos2::new(rect.right() - 20.0, rect.top()), vec2(20.0, RULER_H))
+        Rect::from_min_size(
+            Pos2::new(rect.right() - 20.0, rect.top()),
+            vec2(20.0, RULER_H),
+        )
     });
     let lock_resp = lock_rect.map(|r| {
         let tip = if ed.markers_locked {
@@ -53,13 +56,40 @@ pub(super) fn waveform(
         let lock = !ed.markers_locked;
         ed.set_markers_locked(lock);
         ed.notice = Some(match (lock, ed.grid) {
-            (false, _) => "Markers unlocked — grid off, cuts close up, drag markers to move them".to_owned(),
+            (false, _) => {
+                "Markers unlocked — grid off, cuts close up, drag markers to move them".to_owned()
+            }
             (true, Some(n)) => format!("Markers locked — on {n} equal slots"),
-            (true, None) => "Markers locked — not an even split, so no grid (pick one to lay the slices out)".to_owned(),
+            (true, None) => {
+                "Markers locked — not an even split, so no grid (pick one to lay the slices out)"
+                    .to_owned()
+            }
         });
     }
-    let unlocked = ed.is_kit && !ed.markers_locked;
+    update_wave_view(ui, ed, pv, rect, &resp);
+    let g = WaveGeometry::new(ed, rect, frames, abrupt, trim.is_some());
+    let hot = handle_wave_mouse(ui, ed, pv, &resp, &g, homes, out);
+    paint_waveform(
+        ui,
+        ed,
+        pv,
+        &g,
+        hot,
+        trim,
+        lock_rect,
+        lock_resp.as_ref().is_some_and(|r| r.hovered()),
+        focused,
+    );
+}
 
+/// Wheel navigation and playback following run before the frame's map is captured.
+fn update_wave_view(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    pv: &PlayView,
+    rect: Rect,
+    resp: &egui::Response,
+) {
     // Wheel = zoom around the pointer, horizontal scroll = pan. Consumed so
     // nothing else on screen scrolls too.
     if resp.contains_pointer() {
@@ -88,178 +118,168 @@ pub(super) fn waveform(
         }
     }
     clamp_view(ed, rect.width());
+}
 
-    let m = Map {
-        rect,
-        start: ed.view.start,
-        fpp: ed.view.fpp,
-        frames,
-    };
-    let x_in = m.x(ed.sel.0 as f64);
-    let x_out = m.x(ed.sel.1 as f64);
-    let marks = if ed.is_kit { ed.marks() } else { Vec::new() };
+/// Geometry captured before mouse edits, shared by hit detection and painting.
+/// In particular, changing the selection or panning during a drag does not
+/// change the map halfway through the frame.
+struct WaveGeometry<'a> {
+    m: Map,
+    sel: (usize, usize),
+    marks: Vec<usize>,
+    abrupt: &'a [crate::editor::FadeEnd],
+    unlocked: bool,
+    off: usize,
+    /// Slot count, slot length, cut length, and each slot's sound length.
+    slot_cut: Option<(usize, usize, usize, Vec<usize>)>,
+}
 
-    // Fade handles: a knob at the middle of each trim fade's curve.
-    let fade_top = rect.top() + RULER_H + 4.0;
-    let fade_h = rect.bottom() - fade_top;
-    let handle_pos = |e: &crate::editor::FadeEnd| {
-        let x = m.x(e.start as f64 + (e.end - e.start) as f64 / 2.0);
-        let y = fade_top + (1.0 - crate::editor::fade_gain(0.5, e.k)) * fade_h;
-        Pos2::new(x, y)
-    };
-    let handle_at = |p: Pos2| {
-        abrupt
+impl<'a> WaveGeometry<'a> {
+    fn new(
+        ed: &Editor,
+        rect: Rect,
+        frames: usize,
+        abrupt: &'a [crate::editor::FadeEnd],
+        trimming: bool,
+    ) -> Self {
+        let slot_cut = match (trimming && ed.trims_by_length(), ed.grid, ed.slot_sounds()) {
+            (true, Some(n), Some((len, sounds))) => {
+                Some((n, len, ed.slot_cut_len().unwrap_or(len), sounds))
+            }
+            _ => None,
+        };
+        Self {
+            m: Map {
+                rect,
+                start: ed.view.start,
+                fpp: ed.view.fpp,
+                frames,
+            },
+            sel: ed.sel,
+            marks: if ed.is_kit { ed.marks() } else { Vec::new() },
+            abrupt,
+            unlocked: ed.is_kit && !ed.markers_locked,
+            off: ed.crop.map_or(0, |c| c.0),
+            slot_cut,
+        }
+    }
+
+    fn fade_bounds(&self) -> (f32, f32) {
+        let top = self.m.rect.top() + RULER_H + 4.0;
+        (top, self.m.rect.bottom() - top)
+    }
+
+    fn handle_at(&self, p: Pos2) -> Option<crate::editor::FadeEnd> {
+        let (top, height) = self.fade_bounds();
+        self.abrupt
             .iter()
-            .find(|e| handle_pos(e).distance(p) <= HANDLE_R + 4.0)
+            .find(|e| {
+                let x = self.m.x(e.start as f64 + (e.end - e.start) as f64 / 2.0);
+                let y = top + (1.0 - crate::editor::fade_gain(0.5, e.k)) * height;
+                Pos2::new(x, y).distance(p) <= HANDLE_R + 4.0
+            })
             .copied()
-    };
-    // Grid trim by length: the cut line in every slot, any of them
-    // draggable. (slot count, slot length, cut, each slot's sound length)
-    let off = ed.crop.map_or(0, |c| c.0);
-    let slot_cut = match (trim.is_some() && ed.trims_by_length(), ed.grid, ed.slot_sounds()) {
-        (true, Some(n), Some((len, sounds))) => Some((n, len, ed.slot_cut_len().unwrap_or(len), sounds)),
-        _ => None,
-    };
-    let cut_at = |p: Pos2| {
-        let (n, len, cut, _) = slot_cut.as_ref()?;
-        if p.y <= rect.top() + RULER_H {
+    }
+
+    fn cut_at(&self, p: Pos2) -> Option<usize> {
+        let (n, len, cut, _) = self.slot_cut.as_ref()?;
+        if p.y <= self.m.rect.top() + RULER_H {
             return None;
         }
-        (0..*n).find(|i| (m.x((i * len + cut) as f64 - off as f64) - p.x).abs() <= GRAB_PX)
-    };
-    let mut hot_cut = matches!(ed.drag, Some(Drag::SlotCut(..)));
-    let mut hot_fade = match ed.drag {
-        Some(Drag::Fade(i, ..)) => Some(i),
-        _ => None,
-    };
+        (0..*n)
+            .find(|i| (self.m.x((i * len + cut) as f64 - self.off as f64) - p.x).abs() <= GRAB_PX)
+    }
 
-    // ---- mouse ----
-    let near = |x: f32, p: Pos2| (p.x - x).abs() <= GRAB_PX;
-    // The kit slice marker under the pointer, if any (nearest wins).
-    let mark_at = |p: Pos2| {
-        marks
+    /// Nearest kit slice marker within the grab radius.
+    fn mark_at(&self, p: Pos2) -> Option<usize> {
+        self.marks
             .iter()
             .copied()
-            .map(|f| (f, (m.x(f as f64) - p.x).abs()))
+            .map(|f| (f, (self.m.x(f as f64) - p.x).abs()))
             .filter(|&(_, d)| d <= GRAB_PX)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(f, _)| f)
-    };
-    // Forgive small misclicks: a point within SNAP_PX of a slice marker or
-    // either end of the file lands exactly on it (nearest wins), so a
-    // selection never loses a few frames at an edge by accident.
-    let snapped = |x: f32| {
-        marks
+    }
+
+    /// Forgive small misclicks at slice markers and the ends of the file.
+    fn snapped(&self, x: f32) -> usize {
+        self.marks
             .iter()
             .copied()
-            .chain([0, frames])
-            .map(|f| (f, (m.x(f as f64) - x).abs()))
+            .chain([0, self.m.frames])
+            .map(|f| (f, (self.m.x(f as f64) - x).abs()))
             .filter(|&(_, d)| d <= SNAP_PX)
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map_or_else(|| m.frame(x), |(f, _)| f)
-    };
-    // The in or out point under the pointer (where the cursor shows the
-    // resize icon), nearest wins.
-    let sel = ed.sel;
-    let endpoint_at = |p: Pos2| {
-        let (di, dout) = ((p.x - x_in).abs(), (p.x - x_out).abs());
-        if near(x_in, p) && (!near(x_out, p) || di <= dout) {
-            Some(sel.0)
-        } else if near(x_out, p) {
-            Some(sel.1)
+            .map_or_else(|| self.m.frame(x), |(f, _)| f)
+    }
+
+    /// Nearest in/out point; ties belong to the in point.
+    fn endpoint_at(&self, p: Pos2) -> Option<usize> {
+        let di = (p.x - self.m.x(self.sel.0 as f64)).abs();
+        let dout = (p.x - self.m.x(self.sel.1 as f64)).abs();
+        if di <= GRAB_PX && (dout > GRAB_PX || di <= dout) {
+            Some(self.sel.0)
+        } else if dout <= GRAB_PX {
+            Some(self.sel.1)
         } else {
             None
         }
-    };
-    // Range bar: the ruler strip between the markers drags the whole region.
-    let on_bar = |p: Pos2| {
-        p.y >= rect.top()
-            && p.y <= rect.top() + RULER_H
-            && p.x > x_in + GRAB_PX
-            && p.x < x_out - GRAB_PX
-    };
-    let mut bar_hot = matches!(ed.drag, Some(Drag::Move(..)));
-    // Unlocked: a marker can be grabbed by its ruler tab (ahead of the
-    // in / out points, which often sit on it) or its line.
-    let in_ruler = |p: Pos2| p.y <= rect.top() + RULER_H;
-    let grab_mark = |p: Pos2, ruler_only: bool| {
-        if !unlocked || (ruler_only && !in_ruler(p)) {
+    }
+
+    fn on_bar(&self, p: Pos2) -> bool {
+        p.y >= self.m.rect.top()
+            && p.y <= self.m.rect.top() + RULER_H
+            && p.x > self.m.x(self.sel.0 as f64) + GRAB_PX
+            && p.x < self.m.x(self.sel.1 as f64) - GRAB_PX
+    }
+
+    fn grab_mark(&self, ed: &Editor, p: Pos2, ruler_only: bool) -> Option<usize> {
+        if !self.unlocked || (ruler_only && p.y > self.m.rect.top() + RULER_H) {
             return None;
         }
-        mark_at(p).and_then(|f| ed.marker_index(f))
-    };
-    let mut hot_mark = matches!(ed.drag, Some(Drag::Marker(_)));
-    if let Some(p) = resp.hover_pos() {
-        if ed.drag.is_none() {
-            if let Some(e) = handle_at(p) {
-                ui.ctx().set_cursor_icon(CursorIcon::Move);
-                hot_fade = Some(e.slice);
-            } else if grab_mark(p, true).is_some()
-                || (!near(x_in, p) && !near(x_out, p) && grab_mark(p, false).is_some())
-            {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
-                hot_mark = true;
-            } else if near(x_in, p) || near(x_out, p) {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-            } else if cut_at(p).is_some() {
-                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-                hot_cut = true;
-            } else if on_bar(p) {
-                ui.ctx().set_cursor_icon(CursorIcon::Grab);
-                bar_hot = true;
-            }
-        }
+        self.mark_at(p).and_then(|f| ed.marker_index(f))
     }
-    // Kit: the ruler and slice-number row name the file a slice came from.
-    if ed.is_kit && ed.drag.is_none() {
-        if let Some(p) = resp.hover_pos() {
-            if p.y <= rect.top() + RULER_H + 16.0 {
-                if let Some((n, name)) = ed.slice_name_at(m.frame(p.x)) {
-                    resp.clone()
-                        .on_hover_text_at_pointer(format!("Slice {n}: {name}"));
-                }
-            }
-        }
-    }
-    if matches!(ed.drag, Some(Drag::Move(..))) {
-        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-    }
-    if resp.drag_started() {
-        out.push(EdIntent::TookFocus);
-        let origin = ui
-            .input(|i| i.pointer.press_origin())
-            .or(resp.interact_pointer_pos());
-        let alt = ui.input(|i| i.modifiers.alt);
-        ed.drag = origin.map(|o| {
-            let fade = handle_at(o).filter(|_| !resp.dragged_by(egui::PointerButton::Middle));
-            if let Some(e) = fade {
-                // Every fade shares one shape; ⌥ shapes just this one.
-                Drag::Fade(e.slice, if e.tail { e.start } else { e.end }, e.tail, alt || e.own)
-            } else if resp.dragged_by(egui::PointerButton::Middle) || alt {
-                Drag::Pan
-            } else if let Some(i) = grab_mark(o, true) {
-                Drag::Marker(i)
-            } else if near(x_in, o)
-                && (!near(x_out, o) || (o.x - x_in).abs() <= (o.x - x_out).abs())
-            {
+
+    /// Shared hover/drag priority: fades, pan modifiers, marker tabs,
+    /// selection ends, marker lines, slot cuts, then the range bar.
+    fn drag_at(&self, ed: &Editor, p: Pos2, middle: bool, alt: bool) -> Drag {
+        if let Some(e) = self.handle_at(p).filter(|_| !middle) {
+            Drag::Fade(
+                e.slice,
+                if e.tail { e.start } else { e.end },
+                e.tail,
+                alt || e.own,
+            )
+        } else if middle || alt {
+            Drag::Pan
+        } else if let Some(i) = self.grab_mark(ed, p, true) {
+            Drag::Marker(i)
+        } else if let Some(f) = self.endpoint_at(p) {
+            if f == self.sel.0 {
                 Drag::In
-            } else if near(x_out, o) {
-                Drag::Out
-            } else if let Some(i) = grab_mark(o, false) {
-                Drag::Marker(i)
-            } else if let Some(i) = cut_at(o) {
-                Drag::SlotCut(i)
-            } else if on_bar(o) {
-                Drag::Move(ed.sel, m.frame(o.x))
             } else {
-                Drag::Select(snapped(o.x))
+                Drag::Out
             }
-        });
+        } else if let Some(i) = self.grab_mark(ed, p, false) {
+            Drag::Marker(i)
+        } else if let Some(i) = self.cut_at(p) {
+            Drag::SlotCut(i)
+        } else if self.on_bar(p) {
+            Drag::Move(ed.sel, self.m.frame(p.x))
+        } else {
+            Drag::Select(self.snapped(p.x))
+        }
     }
-    if resp.dragged() {
+
+    fn update_drag(&self, ui: &mut Ui, ed: &mut Editor, resp: &egui::Response) {
+        let m = &self.m;
+        let rect = m.rect;
+        let (fade_top, fade_h) = self.fade_bounds();
+        let slot_cut = &self.slot_cut;
+        let off = self.off;
         if let (Some(d), Some(p)) = (ed.drag, resp.interact_pointer_pos()) {
             let px = p.x.clamp(rect.left(), rect.right());
-            let f = snapped(px);
+            let f = self.snapped(px);
             match d {
                 Drag::In => ed.set_in(f),
                 Drag::Out => ed.set_out(f),
@@ -292,7 +312,9 @@ pub(super) fn waveform(
                         let rel = sounds
                             .iter()
                             .copied()
-                            .filter(|&s| s > 0 && (s.abs_diff(rel) as f64 / m.fpp) <= SNAP_PX as f64)
+                            .filter(|&s| {
+                                s > 0 && (s.abs_diff(rel) as f64 / m.fpp) <= SNAP_PX as f64
+                            })
                             .min_by_key(|&s| s.abs_diff(rel))
                             .unwrap_or(rel)
                             .clamp(1, *len);
@@ -312,6 +334,85 @@ pub(super) fn waveform(
             }
         }
     }
+}
+
+struct WaveHot {
+    cut: bool,
+    fade: Option<usize>,
+    bar: bool,
+    mark: bool,
+}
+
+fn handle_wave_mouse(
+    ui: &mut Ui,
+    ed: &mut Editor,
+    pv: &PlayView,
+    resp: &egui::Response,
+    g: &WaveGeometry<'_>,
+    homes: &[super::SliceHome],
+    out: &mut Vec<EdIntent>,
+) -> WaveHot {
+    let m = &g.m;
+    let rect = m.rect;
+    let mut hot = WaveHot {
+        cut: matches!(ed.drag, Some(Drag::SlotCut(..))),
+        fade: match ed.drag {
+            Some(Drag::Fade(i, ..)) => Some(i),
+            _ => None,
+        },
+        bar: matches!(ed.drag, Some(Drag::Move(..))),
+        mark: matches!(ed.drag, Some(Drag::Marker(_))),
+    };
+    if let Some(p) = resp.hover_pos() {
+        if ed.drag.is_none() {
+            match g.drag_at(ed, p, false, false) {
+                Drag::Fade(slice, ..) => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Move);
+                    hot.fade = Some(slice);
+                }
+                Drag::Marker(_) => {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
+                    hot.mark = true;
+                }
+                Drag::In | Drag::Out => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+                Drag::SlotCut(_) => {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                    hot.cut = true;
+                }
+                Drag::Move(..) => {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                    hot.bar = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    // Kit: the ruler and slice-number row name the file a slice came from.
+    if ed.is_kit && ed.drag.is_none() {
+        if let Some(p) = resp.hover_pos() {
+            if p.y <= rect.top() + RULER_H + 16.0 {
+                if let Some((n, name)) = ed.slice_name_at(m.frame(p.x)) {
+                    resp.clone()
+                        .on_hover_text_at_pointer(format!("Slice {n}: {name}"));
+                }
+            }
+        }
+    }
+    if matches!(ed.drag, Some(Drag::Move(..))) {
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    }
+    if resp.drag_started() {
+        out.push(EdIntent::TookFocus);
+        let origin = ui
+            .input(|i| i.pointer.press_origin())
+            .or(resp.interact_pointer_pos());
+        let alt = ui.input(|i| i.modifiers.alt);
+        ed.drag =
+            origin.map(|o| g.drag_at(ed, o, resp.dragged_by(egui::PointerButton::Middle), alt));
+    }
+    if resp.dragged() {
+        g.update_drag(ui, ed, resp);
+    }
     if resp.drag_stopped() {
         if matches!(ed.drag, Some(Drag::Marker(_))) {
             ed.markers_moved();
@@ -323,7 +424,7 @@ pub(super) fn waveform(
         if let Some(p) = resp.interact_pointer_pos() {
             // On the in/out point: land exactly on it; else snap to a slice
             // marker or a file end when close.
-            ed.playhead = endpoint_at(p).unwrap_or_else(|| snapped(p.x));
+            ed.playhead = g.endpoint_at(p).unwrap_or_else(|| g.snapped(p.x));
             if pv.playing {
                 out.push(EdIntent::Seek(ed.playhead));
             }
@@ -333,8 +434,8 @@ pub(super) fn waveform(
         // On a marker: park the playhead exactly on it. Elsewhere: select
         // the kit slice there, or everything.
         let p = resp.interact_pointer_pos();
-        let fade = p.and_then(handle_at);
-        let target = p.and_then(|p| endpoint_at(p).or_else(|| mark_at(p)));
+        let fade = p.and_then(|p| g.handle_at(p));
+        let target = p.and_then(|p| g.endpoint_at(p).or_else(|| g.mark_at(p)));
         if let Some(e) = fade {
             // Its own shape goes first, back to the shared one; then the
             // shared one back to the default.
@@ -344,21 +445,21 @@ pub(super) fn waveform(
                 ed.reset_all_fades();
             }
         } else {
-        match target {
-            Some(f) => {
-                ed.playhead = f;
-                if pv.playing {
-                    out.push(EdIntent::Seek(f));
+            match target {
+                Some(f) => {
+                    ed.playhead = f;
+                    if pv.playing {
+                        out.push(EdIntent::Seek(f));
+                    }
                 }
-            }
-            None if ed.is_kit => {
-                if let Some(p) = p {
-                    let (a, b) = ed.slice_at(m.frame(p.x));
-                    ed.sel = (a, b);
+                None if ed.is_kit => {
+                    if let Some(p) = p {
+                        let (a, b) = ed.slice_at(m.frame(p.x));
+                        ed.sel = (a, b);
+                    }
                 }
+                None => ed.select_all(),
             }
-            None => ed.select_all(),
-        }
         }
     }
     if resp.secondary_clicked() {
@@ -378,7 +479,28 @@ pub(super) fn waveform(
         ed.slice_menu = None;
     }
 
-    // ---- paint ----
+    hot
+}
+
+fn paint_waveform(
+    ui: &mut Ui,
+    ed: &Editor,
+    pv: &PlayView,
+    g: &WaveGeometry<'_>,
+    hot: WaveHot,
+    trim: Option<&crate::editor::TrimPlan>,
+    lock_rect: Option<Rect>,
+    lock_hovered: bool,
+    focused: bool,
+) {
+    let m = &g.m;
+    let rect = m.rect;
+    let x_in = m.x(g.sel.0 as f64);
+    let x_out = m.x(g.sel.1 as f64);
+    let marks = &g.marks;
+    let abrupt = g.abrupt;
+    let slot_cut = &g.slot_cut;
+    let off = g.off;
     let painter = ui.painter_at(rect);
     let vis = ui.visuals().clone();
     painter.rect_filled(rect, 2.0, vis.extreme_bg_color);
@@ -395,7 +517,7 @@ pub(super) fn waveform(
         painter.rect_filled(reg, 0.0, vis.selection.bg_fill.gamma_multiply(0.12));
     }
 
-    draw_ruler(&painter, &m, ruler, ed.sample().map_or(1, |s| s.rate), &vis);
+    draw_ruler(&painter, m, ruler, ed.sample().map_or(1, |s| s.rate), &vis);
 
     // Range bar across the ruler between the markers.
     let bar = Rect::from_x_y_ranges(
@@ -403,14 +525,14 @@ pub(super) fn waveform(
         ruler.y_range(),
     );
     if bar.width() > 0.0 {
-        let a = if bar_hot { 0.45 } else { 0.25 };
+        let a = if hot.bar { 0.45 } else { 0.25 };
         painter.rect_filled(bar, 0.0, vis.selection.bg_fill.gamma_multiply(a));
         // Grip dots in the middle hint that it can be dragged.
         let c = bar.center();
         if bar.width() > 30.0 {
             let col = vis
                 .strong_text_color()
-                .gamma_multiply(if bar_hot { 0.8 } else { 0.45 });
+                .gamma_multiply(if hot.bar { 0.8 } else { 0.45 });
             for dx in [-6.0, -2.0, 2.0, 6.0] {
                 for dy in [-2.5, 2.5] {
                     painter.circle_filled(Pos2::new(c.x + dx, c.y + dy), 1.0, col);
@@ -419,7 +541,7 @@ pub(super) fn waveform(
         }
     }
 
-    draw_lanes(&painter, ed, &m, lanes, &vis);
+    draw_lanes(&painter, ed, m, lanes, &vis);
 
     // Grid: each slot's padding (the silence after its sound, up to the
     // slot end) in solid dark, so a cut that the grid pads back shows up.
@@ -463,13 +585,13 @@ pub(super) fn waveform(
     if let Some(plan) = trim {
         // On a grid every slot shrinks to the same length.
         let uniform = ed.grid.map(|n| plan.new_total / n.max(1));
-        let grip = slot_cut.as_ref().map(|(_, _, cut, _)| (*cut, hot_cut));
-        trim_cues(&painter, &m, lanes, plan, off, uniform, grip);
+        let grip = slot_cut.as_ref().map(|(_, _, cut, _)| (*cut, hot.cut));
+        trim_cues(&painter, m, lanes, plan, off, uniform, grip);
     }
-    fade_cues(&painter, &m, lanes, abrupt, hot_fade, rate, &vis);
+    fade_cues(&painter, m, lanes, abrupt, hot.fade, rate, &vis);
     if let Some(tp) = ed.trim_preview() {
         let rate = ed.sample().map_or(1, |s| s.rate);
-        trim_overlay(&painter, &m, lanes, &tp, rate, &vis);
+        trim_overlay(&painter, m, lanes, &tp, rate, &vis);
     }
 
     // The slice whose menu is open: a faint wash so it's clear which one.
@@ -487,9 +609,9 @@ pub(super) fn waveform(
         }
     }
 
-    slice_marks(&painter, &m, rect, RULER_H, &marks);
+    slice_marks(&painter, m, rect, RULER_H, marks);
     if let Some(r) = lock_rect {
-        let hov = lock_resp.as_ref().is_some_and(|r| r.hovered()) || hot_mark;
+        let hov = lock_hovered || hot.mark;
         padlock(&painter, r, ed.markers_locked, hov, &vis);
     }
     marker(&painter, rect, x_in, IN_COLOR, true);

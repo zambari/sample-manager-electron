@@ -28,6 +28,15 @@ impl Preset {
         be32(&self.data, 8).unwrap_or(0)
     }
 
+    /// Replace only the shared sound-header tag bitmap. The container remains
+    /// the validated template; the preset writer rebuilds it and its checksum.
+    pub fn set_tags(&mut self, mask: u32) -> Result<(), String> {
+        self.data.get_mut(8..12).ok_or("Missing preset tags")?
+            .copy_from_slice(&mask.to_be_bytes());
+        self.sound.tags = mask;
+        Ok(())
+    }
+
     /// Validate an importable container before any edit can be staged.
     pub(super) fn from_container(model: Model, loc: &PresetSlot, container: Vec<u8>) -> Result<Self, String> {
         let data = decode_sound(model, &container)?.to_vec();

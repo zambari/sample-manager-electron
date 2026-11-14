@@ -1,6 +1,6 @@
 //! Compact device-style sound tags, bitmap editor and a shared tags-only clipboard.
 use crate::device::presets::{TAG_NAMES, tag_names};
-use crate::ui::theme::{OLED, OLED_BG, OLED_DIM, oled_font};
+use crate::ui::theme::{OLED_BG, OLED_DIM, oled_font};
 use egui::{Color32, Id, Rect, Sense};
 
 pub const WIDTH: f32 = 156.0;
@@ -28,39 +28,63 @@ pub fn show(
     editable: bool,
     changed: bool,
 ) -> Option<u32> {
+    show_with_open(ui, rect, id, mask, editable, changed).0
+}
+
+/// Also report opening the editor/menu, so a preset row can lazily load its sound.
+pub fn show_with_open(
+    ui: &egui::Ui,
+    rect: Rect,
+    id: Id,
+    mask: u32,
+    editable: bool,
+    changed: bool,
+) -> (Option<u32>, bool) {
     let response = ui.interact(rect, id, Sense::click());
+    let opened = response.clicked() || response.secondary_clicked();
     let p = ui.painter().with_clip_rect(rect);
     let ink = if changed {
         crate::ui::theme::CHANGED
     } else {
-        OLED
+        Color32::from_gray(176)
     };
-    let mut x = rect.left();
+    // Keep the group against the right edge, preserving the device's bit order.
+    let y = rect.center().y - 1.0;
     if mask == 0 {
         p.text(
-            rect.left_center(),
-            egui::Align2::LEFT_CENTER,
+            egui::pos2(rect.right(), y),
+            egui::Align2::RIGHT_CENTER,
             "+ TAGS",
             oled_font(9.0),
             OLED_DIM,
         );
     } else {
         let bits: Vec<usize> = (0..32).filter(|&bit| mask & (1u32 << bit) != 0).collect();
+        let ellipsis = p.layout_no_wrap("…".into(), oled_font(10.0), ink);
+        let mut labels = Vec::new();
+        let mut width = 0.0;
+        let mut overflow = false;
         for (n, &bit) in bits.iter().enumerate() {
             let text = p.layout_no_wrap(ABBR[bit].into(), oled_font(10.0), OLED_BG);
             let w = text.size().x + 9.0;
-            let reserve = if n + 1 < bits.len() { 12.0 } else { 0.0 };
-            if x + w + reserve > rect.right() {
-                p.text(
-                    egui::pos2(x, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "…",
-                    oled_font(10.0),
-                    ink,
-                );
+            let gap = if labels.is_empty() { 0.0 } else { 3.0 };
+            let reserve = if n + 1 < bits.len() {
+                ellipsis.size().x + 3.0
+            } else {
+                0.0
+            };
+            if width + gap + w + reserve > rect.width() {
+                overflow = true;
                 break;
             }
-            let y = rect.center().y;
+            width += gap + w;
+            labels.push((text, w));
+        }
+        if overflow {
+            width += ellipsis.size().x + if labels.is_empty() { 0.0 } else { 3.0 };
+        }
+        let mut x = rect.right() - width;
+        for (text, w) in labels {
             let r = Rect::from_min_size(egui::pos2(x, y - 5.5), egui::vec2(w, 11.0));
             p.add(egui::Shape::convex_polygon(
                 vec![
@@ -76,6 +100,9 @@ pub fn show(
             p.circle_filled(egui::pos2(x + 3.0, y), 0.8, OLED_BG);
             p.galley(egui::pos2(x + 6.0, y - text.size().y / 2.0), text, OLED_BG);
             x += w + 3.0;
+        }
+        if overflow {
+            p.galley(egui::pos2(x, y - ellipsis.size().y / 2.0), ellipsis, ink);
         }
     }
     if response.hovered() {
@@ -129,7 +156,7 @@ pub fn show(
                 }
             });
             if !editable {
-                ui.label("Read-only until project editing is available");
+                ui.label("Editing unavailable while loading or busy");
             }
             ui.separator();
             ui.add_enabled_ui(editable, |ui| {
@@ -159,5 +186,5 @@ pub fn show(
                     .color(Color32::GRAY),
             );
         });
-    (editable && value != mask).then_some(value)
+    ((editable && value != mask).then_some(value), opened)
 }
