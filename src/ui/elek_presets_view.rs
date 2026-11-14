@@ -875,16 +875,12 @@ pub(crate) fn finish_copy(st: &mut ElekState, ctx: &egui::Context) {
         tags: None,
     };
     let track_ok = st.project.as_deref().ok_or_else(|| "No project loaded".to_owned())
-        .and_then(|p| p.accepts_preset(preset.model, match &cell.src {
-            crate::device::library::SoundSrc::Preset { data, .. } => data, _ => unreachable!(),
-        }))
-        // A preset's sample slot must be translated through the pool first.
-        .and_then(|_| if preset.sample.is_some() { Err("Paste this preset into the sound pool first to resolve its sample".into()) } else { Ok(()) });
+        .and_then(|p| p.pool_sound_for_track(&cell).map(|_| ()));
     st.proj.set_pool_clip(crate::ui::elek_project_view::PoolClip {
         at: 0, cell, name: preset.sound.name, track_ok,
     });
     st.presets.copy_pending = None;
-    let msg = format!("Copied preset {}:{:03}. Paste into Sounds or a preset slot; Push saves the edit", loc.bank, loc.slot);
+    let msg = format!("Copied preset {}:{:03}. Paste into Sounds, Presets, or an audio track on Patterns; Push saves the edit", loc.bank, loc.slot);
     ctx.copy_text(msg.clone());
     st.status = msg.clone();
     st.presets.status = msg;
@@ -892,7 +888,7 @@ pub(crate) fn finish_copy(st: &mut ElekState, ctx: &egui::Context) {
 
 fn paste_sound(st: &mut ElekState, loc: PresetSlot, out: &mut Vec<ElekIntent>) {
     let Some(clip) = st.proj.pool_clip.clone() else {
-        st.presets.status = "Copy a sound on the Sounds or Presets page first".into();
+        st.presets.status = "Copy a sound on Sounds, Presets, or Patterns first".into();
         return;
     };
     let mut preset = match &clip.cell.src {

@@ -239,12 +239,15 @@ Right-click to clear the selection, move it here, insert empty slots or close
 an empty gap (empty-slot insertion and gap closing stay within that bank).
 Cross-bank inserts read any affected intermediate banks before staging.
 Copy a sound with **⌘C** or right-click → **Copy sound**, then select a slot
-on **Sounds** or **Presets** and use **⌘V** or right-click → **Paste**. A filled
+on **Sounds** or **Presets**, or a sound row in **Patterns → SOUNDS**, and use
+**⌘V** or right-click → **Paste**. Pattern sound rows also support **⌘C** and
+**Copy sound**: sounds can move between all three pages, or onto another track
+number, with their tags and pending edits. Pasting a track sound leaves its
+trigs and p-locks unchanged. A filled
 target is replaced; **Undo** restores it before pushing. Copies include pending
-sound renames. Pasting a preset into Sounds resolves its source sample by
+sound renames. Pasting a preset into Sounds or a pattern track resolves its source sample by
 +Drive identity and, if needed, adds it to an empty sample-pool slot. Missing
-samples on +Drive stop the paste with a persistent message above the sound
-rows; nothing is pasted. Supported older presets keep their versioned sound
+samples on +Drive stop the paste with an explanation; nothing is pasted. Supported older presets keep their versioned sound
 payload for the device to upgrade on Push. Sounds from newer firmware are
 refused with an explanation; pasting directly onto kit tracks still needs a
 matching sound version.

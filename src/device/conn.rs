@@ -79,9 +79,10 @@ pub(super) fn product(id: u8) -> Option<(&'static str, bool)> {
     })
 }
 
-/// How long to wait for a port's first answer. Short, so trying a port that
-/// isn't a usable device doesn't hold up the others.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(1500);
+/// USB MIDI ports can appear well before the device has finished booting.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Repeat device identification in case a booting device ignored it.
+const HANDSHAKE_RETRY_EVERY: Duration = Duration::from_secs(5);
 
 impl Conn {
     /// Try each Elektron-looking port in turn; the first that answers and
@@ -178,7 +179,7 @@ impl Conn {
         let r = c
             .request_within(proto::DEVICE, Args::default(), HANDSHAKE_TIMEOUT)
             .map_err(|e| format!(
-                "Detected {in_name}, but it did not complete the MIDI handshake. A DAW or another MIDI app may be using it. Disable this device in that app or close the app, check USB config is Overbridge or USB MIDI, then click Retry connection. Details: {e}"
+                "Detected {in_name}, but it did not complete the MIDI handshake. Let the device finish booting, then click Retry connection. If it is ready, check USB config is Overbridge or USB MIDI and whether a DAW or another MIDI app is using it. Details: {e}"
             ))?;
         let mut rd = Reader::new(&r);
         let id = rd.u8().map_err(|e| format!("bad device reply: {e}"))?;
@@ -246,16 +247,54 @@ impl Conn {
                 pending.push_back(msg);
             }
         }
+        let frame = proto::frame(id, cmd, &args.0);
         self.out
-            .send(&proto::frame(id, cmd, &args.0))
+            .send(&frame)
             .map_err(|e| Fail::Link(format!("MIDI send failed: {e}")))?;
         let deadline = Instant::now() + timeout;
+        // Identification is read-only and safe to repeat. Keep the same id
+        // so a late answer to any attempt is accepted. Never replay writes.
+        let handshake = cmd == proto::DEVICE;
+        let mut retry_at = Instant::now() + HANDSHAKE_RETRY_EVERY;
         loop {
+            if handshake {
+                if super::switched_off() {
+                    return Err(Fail::Link("Device switched off".into()));
+                }
+                if !self.probe() {
+                    return Err(Fail::Link("Device disconnected".into()));
+                }
+            }
             let left = deadline.saturating_duration_since(Instant::now());
-            let msg = self.rx.recv_timeout(left).map_err(|_| {
+            if left.is_zero() {
                 crate::log::line(format!("device: cmd 0x{cmd:02x} id {id} timed out"));
-                Fail::Link("The device stopped answering (timed out)".into())
-            })?;
+                return Err(Fail::Link("The device stopped answering (timed out)".into()));
+            }
+            let wait = if handshake {
+                left.min(PROBE_EVERY).min(retry_at.saturating_duration_since(Instant::now()))
+            } else {
+                left
+            };
+            let msg = match self.rx.recv_timeout(wait) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    if handshake && Instant::now() >= retry_at && Instant::now() < deadline {
+                        if super::switched_off() {
+                            return Err(Fail::Link("Device switched off".into()));
+                        }
+                        if !self.probe() {
+                            return Err(Fail::Link("Device disconnected".into()));
+                        }
+                        self.out.send(&frame)
+                            .map_err(|e| Fail::Link(format!("MIDI send failed: {e}")))?;
+                        retry_at = Instant::now() + HANDSHAKE_RETRY_EVERY;
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(Fail::Link("Device MIDI input closed".into()));
+                }
+            };
             if let Some((c, a)) = proto::unframe(&msg, id) {
                 if c == cmd | 0x80 {
                     return Ok(a);

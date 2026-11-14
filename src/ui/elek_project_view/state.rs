@@ -20,9 +20,13 @@ pub struct ProjEd {
     /// events alone drops the copied sounds.
     pub(super) tclip_ev: Option<TrackClip>,
     pub(super) tclip_snd: Option<TrackClip>,
-    /// A pool sound copied on the Sounds page. Copying it drops the copied
+    /// One sound shared by Sounds, Presets and Patterns. Copying it drops the copied
     /// tracks and patterns, and copying those drops it.
     pub pool_clip: Option<PoolClip>,
+    /// A selected SOUNDS row uses sound-only keyboard copy/paste.
+    pub(super) sound_selected: Option<(usize, usize)>,
+    pub(super) sound_copy: Option<(usize, usize)>,
+    pub(super) sound_paste: Option<(usize, Vec<u8>)>,
     /// A track paste that would lose trigs, until confirmed.
     pub(super) confirm: Option<TrackPaste>,
     /// Row a drag started on.
@@ -63,7 +67,7 @@ impl ProjEd {
         let (used_only, banks, bytes) = (self.used_only, self.banks, self.bytes);
         let pool_clip = self.pool_clip.clone().filter(|c| matches!(c.cell.src, SoundSrc::Preset { .. }))
             .map(|mut c| {
-                c.track_ok = Err("Paste this preset into the sound pool first to resolve its sample in this project".into());
+                c.track_ok = p.pool_sound_for_track(&c.cell).map(|_| ());
                 c
             });
         *self = Self { used_only, banks, bytes, pool_clip, ..Self::default() };
@@ -73,6 +77,9 @@ impl ProjEd {
     /// The project's patterns changed under the same slots (another one
     /// arrived, or the read finished): keep the edits, update what's loaded.
     pub fn refresh(&mut self, p: &ElekProject) {
+        if let Some(clip) = &mut self.pool_clip {
+            clip.track_ok = p.pool_sound_for_track(&clip.cell).map(|_| ());
+        }
         match p.patterns.as_deref() {
             Ok(pats) => {
                 if self.cells.len() != PATTERNS {
@@ -89,6 +96,9 @@ impl ProjEd {
                 self.cursor = None;
                 self.tsel.clear();
                 self.tsel_pat = None;
+                self.sound_selected = None;
+                self.sound_copy = None;
+                self.sound_paste = None;
                 self.confirm = None;
                 self.ready = [false; BANKS];
             }
@@ -164,6 +174,7 @@ impl ProjEd {
     }
 
     pub(super) fn clear_tracks(&mut self) {
+        self.sound_selected = None;
         self.tsel.clear();
         self.tsel_pat = None;
         self.tanchor = None;
@@ -180,6 +191,7 @@ impl ProjEd {
 
     /// A click on track `t` of pattern `i`; `shown` = the row's track lines.
     pub(super) fn click_track(&mut self, i: usize, t: u8, shown: &[u8], m: egui::Modifiers) {
+        self.sound_selected = None;
         if self.tsel_pat != Some(i) {
             self.clear_tracks();
             self.tsel_pat = Some(i);

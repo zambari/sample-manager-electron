@@ -9,6 +9,7 @@ pub(super) struct ListActions {
     pub(super) toggles: Vec<usize>,
     pub(super) track_click: Option<(usize, u8, Vec<u8>)>,
     pub(super) snd_toggles: Vec<usize>,
+    pub(super) snd_click: Option<(usize, usize)>,
     pub(super) snd_copy: Option<(usize, usize)>,
     pub(super) snd_paste: Option<(usize, usize)>,
     pub(super) tag_edit: Option<(usize, usize, u32)>,
@@ -32,7 +33,7 @@ pub(super) fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     } else {
         proj.pool_sounds().unwrap_or_default()
     };
-    let pool_label = ed.pool_clip.as_ref().filter(|c| c.track_ok.is_ok()).map(PoolClip::desc);
+    let sound_clip = ed.pool_clip.clone();
     let mut actions = ListActions::default();
     let names = &st.names;
     let vis = ed.visible(p);
@@ -287,8 +288,10 @@ pub(super) fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
                                 pointer,
                                 hover: &mut step_hover,
                                 toggle: &mut actions.snd_toggles,
+                                selected: ed.sound_selected,
+                                click: &mut actions.snd_click,
                                 copy: &mut actions.snd_copy,
-                                paste_label: pool_label.as_deref().filter(|_| editable),
+                                paste_clip: sound_clip.as_ref(),
                                 paste: &mut actions.snd_paste,
                                 editable,
                                 tag_edit: &mut actions.tag_edit,
@@ -363,7 +366,7 @@ pub(super) fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
     });
     ed.rows = rows;
 
-    let ListActions { bank_toggles, toggles, track_click, snd_toggles, snd_copy,
+    let ListActions { bank_toggles, toggles, track_click, snd_toggles, snd_click, snd_copy,
         snd_paste, tag_edit, inline_done, mut status } = actions;
 
     if let Some((i, t, shown)) = track_click {
@@ -387,29 +390,13 @@ pub(super) fn list(ui: &mut egui::Ui, st: &mut ElekState, busy: bool) {
         status = Some(format!("{} T{} tags changed. Push to send them", patterns::label(i), t + 1));
     }
     if let Some((i, t)) = snd_paste {
-        status = Some(paste_pool_sound(ed, p, i, &[t as u8], audio));
+        status = Some(request_sound_paste(ed, i, &[t as u8]));
     }
-    if let Some((i, t)) = snd_copy.filter(|(i, t)| edited_track_cell(&ed.cells[*i], *t).is_some()) {
-        // Copy the sound as edited, including pending tag changes.
-        let cell = edited_track_cell(&ed.cells[i], t).expect("overridden sound");
-        let at = match cell.src {
-            SoundSrc::Read(o) => o as usize,
-            _ => 0,
-        };
-        let name = pool_cell_sound(p, &pool_snd, &cell).map(|s| s.name).unwrap_or_default();
-        let ok = proj.pool_sound_for_track(&cell).map(|_| ());
-        ed.set_pool_clip(PoolClip { at, cell, name, track_ok: ok });
-        let msg = format!("Copied {} (as on {} {})", ed.pool_clip.as_ref().map(PoolClip::desc).unwrap_or_default(), patterns::label(i), track_name(t, audio));
-        ui.ctx().copy_text(msg.clone());
-        status = Some(msg);
-    } else if let Some((i, t)) = snd_copy {
-        let src = ed.cells[i].sound_src(t);
-        ed.tclip_snd = Some(TrackClip { tracks: vec![(t as u8, src)], from: i, overrides: Default::default(), tags: Default::default() });
-        ed.pool_clip = None;
-        let msg = format!("Copied the sound of {}; paste it into the sound pool on the Sounds page (⌘V on a highlighted sound, or right-click → Paste), or into other patterns", clip_desc(ed.tclip_snd.as_ref().expect("just set"), audio));
-        ui.ctx().copy_text(msg.clone());
-        status = Some(msg);
+    if let Some((i, t)) = snd_click.or(snd_copy).or(snd_paste) {
+        ed.click_track(i, t as u8, &[t as u8], egui::Modifiers::NONE);
+        ed.sound_selected = Some((i, t));
     }
+    if let Some(target) = snd_copy { ed.sound_copy = Some(target); }
     if let Some((i, text)) = inline_done {
         ed.inline = None;
         if let Some(t) = text {

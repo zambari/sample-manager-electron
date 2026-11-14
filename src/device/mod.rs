@@ -38,7 +38,8 @@ use worker::{Worker, serve_lists};
 /// Where elk-herd (and we) put deleted items, so a stray keypress is undoable.
 pub const TRASH: &str = "/trash";
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// Allow a busy device time to react without replaying a timed-out write.
+const TIMEOUT: Duration = Duration::from_secs(15);
 /// Times one read chunk is asked for before the file counts as failed.
 const CHUNK_TRIES: u32 = 4;
 /// Times a whole file is read before it is reported as failed.

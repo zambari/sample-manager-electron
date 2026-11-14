@@ -67,6 +67,7 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
             .small(),
     );
     list(ui, st, busy);
+    finish_sound_actions(st, ui.ctx());
     out.append(&mut st.proj.want);
     if let Some(m) = st.proj.refused.take() {
         st.status = m;
@@ -121,7 +122,10 @@ fn keys(ctx: &egui::Context, st: &mut ElekState) {
         status = Some(clear(ed, p));
     }
     if ev_copy || (m.command && c) {
-        let msg = if tracks_on { copy_tracks(ed, Part::Track, audio) } else { copy(ed) };
+        let msg = if let Some(target) = ed.sound_selected {
+            ed.sound_copy = Some(target);
+            "Copying track sound…".into()
+        } else if tracks_on { copy_tracks(ed, Part::Track, audio) } else { copy(ed) };
         // ⌘V only arrives when the system clipboard holds text.
         ctx.copy_text(msg.clone());
         status = Some(msg);
@@ -131,10 +135,12 @@ fn keys(ctx: &egui::Context, st: &mut ElekState) {
             match ed.tsel_pat.filter(|_| tracks_on) {
                 Some(i) => {
                     let ts: Vec<u8> = ed.tsel.iter().copied().collect();
-                    paste_pool_sound(ed, p, i, &ts, audio)
+                    request_sound_paste(ed, i, &ts)
                 }
-                None => "Select the track(s) to paste the pool sound onto (click a track name in a folded-out pattern), then ⌘V".into(),
+                None => "Select the track(s) to paste the copied sound onto (click a track name in a folded-out pattern), then ⌘V".into(),
             }
+        } else if ed.sound_selected.is_some() {
+            "Copy a single sound on Sounds, Presets, or Patterns first".into()
         } else if !ed.has_tclip() {
             paste(ed)
         } else {

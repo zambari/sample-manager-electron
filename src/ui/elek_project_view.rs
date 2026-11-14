@@ -48,8 +48,8 @@ pub use controls::show;
 pub(crate) use controls::view_tools;
 pub use state::ProjEd;
 
-use clipboard::{TrackPaste, TrackClip, Part, clip_desc, copy_tracks,
-    paste_tracks, apply_tracks, paste_pool_sound, pool_cell_sound, edited_track_cell,
+use clipboard::{TrackPaste, TrackClip, Part, copy_tracks,
+    paste_tracks, apply_tracks, request_sound_paste, pool_cell_sound, finish_sound_actions,
     copy_items, paste_items, confirm_tracks};
 use edit::{drop_sel, clear, copy, paste, pack, rename};
 use list::{list, ListActions};

@@ -851,33 +851,11 @@ fn paste_sounds(st: &mut ElekState, at: usize, sounds: &[PoolSound], over: bool)
         if !over && sounds.get(at).is_some_and(|s| !s.blank) {
             return format!("Pool sound {:03} isn't empty: right-click it → Paste … over this one to replace it", at + 1);
         }
-        let mut added_sample = None;
-        if let SoundSrc::Preset { model, data } = &c.cell.src {
-            let Some(p) = st.project.as_deref() else { return "No project loaded".into(); };
-            if let Err(e) = p.accepts_preset(*model, data) { return e; }
-            let mut translated = data.clone();
-            if let Some(key) = crate::device::presets::sample_key(*model, data) {
-                let old = (1..st.order.len()).map(|pos| st.order[pos])
-                    .find(|&old| { let e = st.entry(old as usize); !e.is_empty() && e.key() == key });
-                let slot = if let Some(old) = old { old as usize } else {
-                    if !st.names.contains_key(&key) {
-                        return format!("Cannot paste {}: its source sample is missing from +Drive. Restore that sample on the device, then reload presets and copy it again. Nothing was pasted", c.desc());
-                    }
-                    let Some((_, old)) = st.first_free() else {
-                        return "No empty sample-pool slot for the preset's source sample".into();
-                    };
-                    added_sample = Some((old, crate::device::PoolEntry::new_file(key.0, key.1)));
-                    old as usize
-                };
-                crate::device::presets::translate_slot(*model, &mut translated, slot);
-            } else {
-                let sound = crate::device::library::parse_sound(*model, 0, data);
-                if crate::device::machines::plays_sample(*model, sound.machine.as_ref().map_or(0, |(id, _)| *id)) && sound.slot != 0 {
-                    return format!("Cannot paste {}: its source sample cannot be identified (the preset has no usable sample file ID). Nothing was pasted", c.desc());
-                }
-            }
-            c.cell.src = SoundSrc::Preset { model: *model, data: translated };
-        }
+        let (cell, added_sample) = match prepare_sound_paste(st, &c) {
+            Ok(prepared) => prepared,
+            Err(e) => return e,
+        };
+        c.cell = cell;
         if c.cell == st.lib.sounds.get(at).cloned().unwrap_or_else(|| SoundCell::as_read(at)) {
             return format!("Pool sound {:03} already is {}", at + 1, c.desc());
         }
@@ -975,4 +953,38 @@ fn blocked_tip(ctx: &egui::Context, st: &ElekState) {
     }
     ctx.request_repaint_after(std::time::Duration::from_secs_f64(BLOCKED_SECS - age));
     theme::pointer_note(ctx, msg, WARN);
+}
+
+/// Resolve a shared sound clipboard without changing the project. The caller
+/// stages the optional sample only after its destination accepts the sound.
+pub(crate) fn prepare_sound_paste(st: &ElekState, clip: &PoolClip) -> Result<(SoundCell, Option<(u16, crate::device::PoolEntry)>), String> {
+    let mut c = clip.clone();
+    let mut added_sample = None;
+    if let SoundSrc::Preset { model, data } = &c.cell.src {
+        let p = st.project.as_deref().ok_or("No project loaded")?;
+        p.accepts_preset(*model, data)?;
+        let mut translated = data.clone();
+        if let Some(key) = crate::device::presets::sample_key(*model, data) {
+            let old = (1..st.order.len()).map(|pos| st.order[pos])
+                .find(|&old| { let e = st.entry(old as usize); !e.is_empty() && e.key() == key });
+            let slot = if let Some(old) = old { old as usize } else {
+                if !st.names.contains_key(&key) {
+                    return Err(format!("Cannot paste {}: its source sample is missing from +Drive. Restore that sample on the device, then reload presets and copy it again. Nothing was pasted", c.desc()));
+                }
+                let Some((_, old)) = st.first_free() else {
+                    return Err("No empty sample-pool slot for the preset's source sample".into());
+                };
+                added_sample = Some((old, crate::device::PoolEntry::new_file(key.0, key.1)));
+                old as usize
+            };
+            crate::device::presets::translate_slot(*model, &mut translated, slot);
+        } else {
+            let sound = crate::device::library::parse_sound(*model, 0, data);
+            if crate::device::machines::plays_sample(*model, sound.machine.as_ref().map_or(0, |(id, _)| *id)) && sound.slot != 0 {
+                return Err(format!("Cannot paste {}: its source sample cannot be identified (the preset has no usable sample file ID). Nothing was pasted", c.desc()));
+            }
+        }
+        c.cell.src = SoundSrc::Preset { model: *model, data: translated };
+    }
+    Ok((c.cell, added_sample))
 }

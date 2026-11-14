@@ -38,8 +38,7 @@ pub(super) struct TrackClip {
     pub(super) tags: std::collections::BTreeMap<u8, u32>,
 }
 
-/// A pool sound copied on the Sounds page, to paste into another pool
-/// sound or onto kit tracks.
+/// One sound copied on Sounds, Presets or Patterns, shared across all three.
 #[derive(Clone)]
 pub struct PoolClip {
     /// The pool sound it was copied from (index).
@@ -55,6 +54,8 @@ impl PoolClip {
     pub fn desc(&self) -> String {
         if matches!(self.cell.src, SoundSrc::Preset { .. }) {
             format!("preset “{}”", self.name)
+        } else if let SoundSrc::Track { pattern, track } = self.cell.src {
+            format!("sound of T{} in {}", track + 1, patterns::label(pattern as usize))
         } else {
             format!("pool sound {:03} “{}”", self.at + 1, self.name)
         }
@@ -150,6 +151,10 @@ pub(super) fn copy_tracks(ed: &mut ProjEd, part: Part, audio: usize) -> String {
     }
     ed.clip.clear();
     ed.pool_clip = None;
+    if part == Part::Sound && ed.tsel.len() == 1 {
+        let t = *ed.tsel.first().expect("one selected track") as usize;
+        if t < audio { ed.sound_copy = Some((i, t)); }
+    }
     format!("Copied {}; select a pattern and paste (⌘V or right-click)", tclip_desc(ed, part, audio))
 }
 
@@ -231,26 +236,61 @@ pub(super) fn apply_tracks(ed: &mut ProjEd, into: &[usize], part: Part, audio: u
     format!("Pasted {} into {at}", tclip_desc(ed, part, audio))
 }
 
-/// Paste the copied pool sound onto kit tracks `tracks` of pattern `i`.
-pub(super) fn paste_pool_sound(ed: &mut ProjEd, p: &Patterns, i: usize, tracks: &[u8], audio: usize) -> String {
-    let Some(c) = ed.pool_clip.clone() else { return "No pool sound copied: on the Sounds page, right-click a sound → Copy (or ⌘C)".into() };
-    if let Err(e) = &c.track_ok {
-        return format!("Can't paste {} onto a track: {e}", c.desc());
-    }
-    if let Some(why) = p.track_copy_blocked() {
-        return format!("Can't paste onto tracks: {why}");
-    }
-    let ts: Vec<u8> = tracks.iter().copied().filter(|&t| (t as usize) < audio).collect();
-    if ts.is_empty() {
-        return "Only kit (audio) tracks hold a sound: select one by clicking its name".into();
-    }
-    ed.edit(|cells| {
-        for &t in &ts {
-            cells[i].set_pool_sound(t as usize, c.cell.clone());
+/// Queue a shared sound paste onto kit tracks; resolved after drawing the list.
+pub(super) fn request_sound_paste(ed: &mut ProjEd, i: usize, tracks: &[u8]) -> String {
+    ed.sound_paste = Some((i, tracks.to_vec()));
+    "Preparing sound paste…".into()
+}
+
+/// Finish sound actions with access to the sample pool, shared by all three pages.
+pub(super) fn finish_sound_actions(st: &mut ElekState, ctx: &egui::Context) {
+    if let Some((i, t)) = st.proj.sound_copy.take() {
+        let result = (|| {
+            let proj = st.project.as_deref().ok_or("No project loaded")?;
+            let c = st.proj.cells.get(i).ok_or("Pattern not loaded")?;
+            let cell = edited_track_cell(c, t).or_else(|| c.sound_src(t).map(|pattern| SoundCell {
+                src: SoundSrc::Track { pattern, track: t as u8 }, name: None, tags: None,
+            })).ok_or("This track has no sound to copy")?;
+            let sound = proj.pool_sound_for_track(&cell)?;
+            Ok::<_, String>(PoolClip { at: match cell.src { SoundSrc::Read(o) => o as usize, _ => 0 }, cell, name: sound.name, track_ok: Ok(()) })
+        })();
+        match result {
+            Ok(clip) => {
+                let msg = format!("Copied {}: paste into Sounds, Presets, or another track on Patterns", clip.desc());
+                st.proj.set_pool_clip(clip);
+                ctx.copy_text(msg.clone());
+                st.status = msg;
+            }
+            Err(e) => { st.proj.clear_sound_clipboard(); st.status = format!("Cannot copy sound: {e}"); }
         }
-    });
-    let names: Vec<String> = ts.iter().map(|&t| track_name(t as usize, audio)).collect();
-    format!("Pasted {} onto {} of {}. Push to send it", c.desc(), names.join(", "), patterns::label(i))
+    }
+    if let Some((i, tracks)) = st.proj.sound_paste.take() {
+        let result = (|| {
+            let c = st.proj.pool_clip.clone().ok_or("Copy a sound on Sounds, Presets, or Patterns first")?;
+            let proj = st.project.as_deref().ok_or("No project loaded")?;
+            let p = proj.patterns.as_deref().map_err(|e| e.clone())?;
+            if let Some(why) = p.track_copy_blocked() { return Err(why.to_owned()); }
+            let audio = proj.model.kit_tracks();
+            let ts: Vec<u8> = tracks.into_iter().filter(|&t| (t as usize) < audio).collect();
+            if ts.is_empty() { return Err("Select an audio track to paste a sound onto".into()); }
+            let (cell, sample) = crate::ui::elek_library_view::prepare_sound_paste(st, &c)?;
+            proj.pool_sound_for_track(&cell)?;
+            if let SoundSrc::Track { pattern, .. } = cell.src {
+                if (pattern as usize) < PATTERNS && !p.bank_loaded(pattern as usize / PER_BANK) {
+                    return Err("The source pattern's bank hasn't fully loaded yet".into());
+                }
+            }
+            st.proj.edit(|cells| {
+                for &t in &ts { cells[i].set_pool_sound(t as usize, cell.clone()); }
+            });
+            if let Some(why) = st.proj.refused.take() { return Err(why); }
+            if let Some((old, entry)) = sample { st.fill(old, entry); }
+            let names: Vec<String> = ts.iter().map(|&t| track_name(t as usize, audio)).collect();
+            Ok(format!("Pasted {} onto {} of {}.{} Push to send it", c.desc(), names.join(", "), patterns::label(i), if sample.is_some() { " Its source sample was added to the sample pool." } else { "" }))
+        })();
+        st.status = result.unwrap_or_else(|e| format!("Cannot paste sound: {e}"));
+        crate::log::line(format!("elek-pat: {}", st.status));
+    }
 }
 
 /// The pool sound a track was given from the Sounds page, decoded: from
@@ -288,7 +328,7 @@ pub(super) fn copy_items(ui: &mut egui::Ui, ed: &mut ProjEd, audio: usize) -> Op
     for (part, text) in [(Part::Track, "Copy track  ⌘C"), (Part::Sound, "Copy track sound"), (Part::Events, "Copy track events")] {
         let tip = match part {
             Part::Track => "Its trigs, p-locks and sound",
-            Part::Sound => "The kit sound (sample, parameters); copied events stay",
+            Part::Sound => "The kit sound (sample, parameters, tags); a single sound can also be pasted into Sounds or Presets",
             Part::Events => "Trigs, length, scale and p-locks; drops a copied sound",
         };
         if ui.button(text).on_hover_text(tip).clicked() {
@@ -326,7 +366,7 @@ pub(super) fn paste_items(ui: &mut egui::Ui, ed: &mut ProjEd, p: &Patterns, into
         ui.separator();
         if ui.add_enabled(editable && ok, egui::Button::new(format!("Paste {}  ⌘V", c.desc()))).on_hover_text(tip.clone()).on_disabled_hover_text(tip).clicked() {
             let ts: Vec<u8> = ed.tsel.iter().copied().collect();
-            status = Some(paste_pool_sound(ed, p, into[0], &ts, audio));
+            status = Some(request_sound_paste(ed, into[0], &ts));
             ui.close();
         }
     }
