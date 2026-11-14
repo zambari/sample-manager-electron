@@ -265,29 +265,9 @@ pub(super) fn finish_sound_actions(st: &mut ElekState, ctx: &egui::Context) {
         }
     }
     if let Some((i, tracks)) = st.proj.sound_paste.take() {
-        let result = (|| {
-            let c = st.proj.pool_clip.clone().ok_or("Copy a sound on Sounds, Presets, or Patterns first")?;
-            let proj = st.project.as_deref().ok_or("No project loaded")?;
-            let p = proj.patterns.as_deref().map_err(|e| e.clone())?;
-            if let Some(why) = p.track_copy_blocked() { return Err(why.to_owned()); }
-            let audio = proj.model.kit_tracks();
-            let ts: Vec<u8> = tracks.into_iter().filter(|&t| (t as usize) < audio).collect();
-            if ts.is_empty() { return Err("Select an audio track to paste a sound onto".into()); }
-            let (cell, sample) = crate::ui::elek_library_view::prepare_sound_paste(st, &c)?;
-            proj.pool_sound_for_track(&cell)?;
-            if let SoundSrc::Track { pattern, .. } = cell.src {
-                if (pattern as usize) < PATTERNS && !p.bank_loaded(pattern as usize / PER_BANK) {
-                    return Err("The source pattern's bank hasn't fully loaded yet".into());
-                }
-            }
-            st.proj.edit(|cells| {
-                for &t in &ts { cells[i].set_pool_sound(t as usize, cell.clone()); }
-            });
-            if let Some(why) = st.proj.refused.take() { return Err(why); }
-            if let Some((old, entry)) = sample { st.fill(old, entry); }
-            let names: Vec<String> = ts.iter().map(|&t| track_name(t as usize, audio)).collect();
-            Ok(format!("Pasted {} onto {} of {}.{} Push to send it", c.desc(), names.join(", "), patterns::label(i), if sample.is_some() { " Its source sample was added to the sample pool." } else { "" }))
-        })();
+        let result = st.proj.pool_clip.clone()
+            .ok_or_else(|| "Copy a sound on Sounds, Presets, or Patterns first".to_owned())
+            .and_then(|c| paste_sound_on_tracks(st, c, i, tracks, false));
         st.status = result.unwrap_or_else(|e| format!("Cannot paste sound: {e}"));
         crate::log::line(format!("elek-pat: {}", st.status));
     }
@@ -402,3 +382,38 @@ pub(super) fn confirm_tracks(ctx: &egui::Context, c: &TrackPaste) -> Option<bool
     answer
 }
 
+
+/// Validate and apply the captured sound paste, asking before adding a sample.
+pub(crate) fn paste_sound_on_tracks(st: &mut ElekState, c: PoolClip, i: usize, tracks: Vec<u8>, confirmed: bool) -> Result<String, String> {
+    if st.edit_locked() { return Err("The device is busy".into()); }
+    let proj = st.project.as_deref().ok_or("No project loaded")?;
+    let p = proj.patterns.as_deref().map_err(|e| e.clone())?;
+    if let Some(why) = p.track_copy_blocked() { return Err(why.to_owned()); }
+    if i >= st.proj.cells.len() || !p.bank_loaded(i / PER_BANK) {
+        return Err("The destination pattern's bank hasn't fully loaded yet".into());
+    }
+    let audio = proj.model.kit_tracks();
+    let ts: Vec<u8> = tracks.into_iter().filter(|&t| (t as usize) < audio).collect();
+    if ts.is_empty() { return Err("Select an audio track to paste a sound onto".into()); }
+    let (cell, sample) = crate::ui::elek_library_view::prepare_sound_paste(st, &c)?;
+    proj.pool_sound_for_track(&cell)?;
+    if let SoundSrc::Track { pattern, .. } = cell.src {
+        if (pattern as usize) < PATTERNS && !p.bank_loaded(pattern as usize / PER_BANK) {
+            return Err("The source pattern's bank hasn't fully loaded yet".into());
+        }
+    }
+    if !confirmed {
+        if let Some(sample) = sample {
+            return Ok(crate::ui::elek_library_view::ask_sample_paste(
+                st, c, crate::ui::elek_library_view::SoundPasteTarget::Tracks { pattern: i, tracks: ts }, sample,
+            ));
+        }
+    }
+    st.proj.edit(|cells| {
+        for &t in &ts { cells[i].set_pool_sound(t as usize, cell.clone()); }
+    });
+    if let Some(why) = st.proj.refused.take() { return Err(why); }
+    if let Some((old, entry)) = sample { st.fill(old, entry); }
+    let names: Vec<String> = ts.iter().map(|&t| track_name(t as usize, audio)).collect();
+    Ok(format!("Pasted {} onto {} of {}.{} Push to send it", c.desc(), names.join(", "), patterns::label(i), if sample.is_some() { " Its source sample was added to the sample pool." } else { "" }))
+}

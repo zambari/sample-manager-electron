@@ -33,6 +33,7 @@ pub(crate) fn finish(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIn
         return;
     }
     st.dialogs_pass = pass;
+    crate::ui::elek_library_view::confirm_sample_paste(ui.ctx(), st);
     if let Some(r) = st.renaming.as_mut() {
         if let Some(ok) = rename_dialog(ui.ctx(), r) {
             let (key, from, to, _) = st.renaming.take().unwrap_or_default();

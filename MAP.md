@@ -53,7 +53,11 @@ for a row, menu or action; the entry file need not be read in full each time.
 ### Bottom status bar: `App::status_bar` in `src/app/bars.rs`
 
 Progress bar for the whole queue, per-file bar, **Cancel** / **Cancel all**,
-status text, latest error, ETA (`Batch::started_at`, average byte rate). Data: `ActiveJob` and `Batch` in `src/app/mod.rs`.
+status text, latest error, ETA (`Batch::started_at`, average byte rate). Device page feedback
+(including copy/paste on Patterns, Presets and Sounds) appears here as a single
+truncated line with the full message on hover; preset push failures also stay
+above the preset list. Data: `ActiveJob` and `Batch` in `src/app/mod.rs`,
+`ElekState::status` and `PresetView::status`.
 
 ### File pane (Source / Destination): `App::show_pane` in `src/app/pane_view.rs`
 
@@ -108,7 +112,7 @@ answers land in `App::elek_event` (`src/app/elek/events.rs`).
 | Control | Where |
 |---|---|
 | Mode header: Sample Editor / Device (Samples / Patterns / Presets / Sounds / +Drive; the Sample Editor title becomes an accent **▶ PLAYING** button while a sample plays, `ElekState::playing` set in `App::logic`), **⇥ Dock beside files** (accent-filled, Samples page only), **Hide file panes** | `mode_header`, `device_pages` in `src/ui/elek_view/chrome.rs` |
-| Device bar: **⬇ Load current project**, **⬆ Push to device**, **💾 File** menu (Save / Load project…), **+Drive projects** menu, status line | `device_bar`, `file_menu`, `projects_menu`, `status_line` in `src/ui/elek_view/chrome.rs` |
+| Device bar: **⬇ Load current project**, **⬆ Push to device**, **💾 File** menu (Save / Load project…), **+Drive projects** menu, progress line | `device_bar`, `file_menu`, `projects_menu`, `status_line` in `src/ui/elek_view/chrome.rs` |
 | Samples page tools: **🔊 Preview on click**, **⬇ Fetch all for preview**, Cache menu, Undo / Reset, **⚡ Live** | `preview_tools`, `order_tools` in `src/ui/elek_view/chrome.rs` |
 | Live mode (push each pool edit after a pause; needs the whole project read, every pattern renumbered) | `App::live_push_tick`, `App::elek_push` in `src/app/elek/commands.rs`; gate `ElekState::pool_pushable` in `src/ui/elek_view/state.rs` |
 | Project-load completion and push read-back verification | `App::elek_event` in `src/app/elek/events.rs` delegates `Loaded` to `App::elek_loaded` in `src/app/elek/readback.rs`; `App::check_elek_readback` there coordinates `log_pool_read`, `check_pattern_readback`, `sample_readback_status`, `sound_readback_status`, `stopped_read_status`. Pattern diagnostics are gathered first; displayed status follows sample pool, sound pool, patterns, then incomplete-read warnings |
@@ -144,8 +148,9 @@ the same-frame answer order: `show_transfer_dialogs`, `show_device_dialogs`,
 
 ### Sound tags (Patterns, Sounds and Presets)
 
-- Tiny uppercase, gray tag-shaped badges right-aligned in their field, with
-  the drawing shifted up 1 px. Shown in the Sounds pool, Patterns → SOUNDS
+- Tiny uppercase, gray tag-shaped badges without dots, with vertically centered
+  glyphs, right-aligned in their field and the drawing shifted up 1 px.
+  Shown in the Sounds pool, Patterns → SOUNDS
   foldouts and Presets; click a badge or **+ TAGS** to toggle any
   of the 32 flags. Right-click the tag field or use its popup for **Copy tags** /
   **Paste tags** (replaces the bitmap, also across pages). Hover lists full names;
@@ -167,9 +172,15 @@ the same-frame answer order: `show_transfer_dialogs`, `show_device_dialogs`,
 - `SoundSrc::Preset` carries a sound snapshot. `prepare_sound_paste` in
   `src/ui/elek_library_view.rs`, shared by pool and track pastes, validates the model/version and resolves the embedded
   sample ID, and stages a sample absent from the project in an empty sample
-  slot. A sample missing from +Drive refuses the paste without editing anything.
-  Paste feedback stays visible above the sound rows (`LibraryView::paste_notice`)
-  until dismissed and is also logged. Supported older presets are sent as
+  slot only after a **Cancel / Commit** dialog names the sample and paste destination.
+  `LibraryView::pending_sample`, `ask_sample_paste` and `confirm_sample_paste`
+  retain the original clipboard/destination; Commit revalidates the paste, and Cancel
+  leaves both sound and sample pool unchanged. The dialog runs from `elek_view::finish`
+  on every device page and is cleared when the project changes. Existing project
+  samples need no confirmation. A sample missing from +Drive refuses the paste without editing anything.
+  Copy/paste feedback appears in the bottom status bar (`App::status_bar`),
+  without adding clipboard hints or paste banners above the sound rows.
+  Sound-pool paste feedback is also logged. Supported older presets are sent as
   independent versioned sound dumps for the firmware to upgrade; kit track
   pastes still require matching sound layouts. Direct preset-to-track pastes resolve
   samples without a detour through Sounds; incompatible track pastes show their

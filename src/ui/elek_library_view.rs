@@ -62,8 +62,8 @@ pub struct LibraryView {
     blocked: Option<(String, f64)>,
     /// The sound pool was read (or tried) by itself for this project.
     auto_read: bool,
-    /// Persistent, dismissible feedback for the last paste attempt.
-    paste_notice: Option<String>,
+    /// A sound paste awaiting permission to add its source sample.
+    pending_sample: Option<SamplePaste>,
 }
 
 impl LibraryView {
@@ -73,11 +73,11 @@ impl LibraryView {
         self.pool_sounds = p.pool_sounds().map(Ok);
         self.sound_progress = None;
         self.auto_read = false;
+        self.pending_sample = None;
         self.sounds.clear();
         self.sound_undo.clear();
         self.renaming = None;
         self.selected = None;
-        self.paste_notice = None;
         self.patterns_changed();
     }
 
@@ -86,12 +86,12 @@ impl LibraryView {
         self.pool_sounds = None;
         self.sound_progress = None;
         self.auto_read = false;
+        self.pending_sample = None;
         self.sounds.clear();
         self.sound_undo.clear();
         self.renaming = None;
         self.selected = None;
         self.blocked = None;
-        self.paste_notice = None;
         self.patterns_changed();
     }
 
@@ -381,17 +381,6 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
             if changed > 0 {
                 ui.label(RichText::new(format!("{changed} pool sound(s) changed: ⬆ Push to device sends them")).color(DIFFERS));
             }
-            let copied = st.proj.copied_sounds();
-            if let Some(c) = &st.proj.pool_clip {
-                ui.label(RichText::new(format!("Copied: {}. Highlight a sound, then ⌘V or right-click → Paste; also paste into Presets or onto tracks on Patterns", c.desc())).weak());
-            } else if !copied.is_empty() {
-                let what = match copied.as_slice() {
-                    [(t, Some(pat))] => format!("T{} sound of {}", *t as usize + 1, patterns::label(*pat as usize)),
-                    [(t, None)] => format!("T{} sound (empty pattern)", *t as usize + 1),
-                    many => format!("{} track sounds", many.len()),
-                };
-                ui.label(RichText::new(format!("Copied: {what}. Highlight a sound, then ⌘V or right-click → Paste")).weak());
-            }
         } else {
             let label = if st.lib.pool_sounds.is_some() { "⟳ Read sound pool again" } else { "⬇ Read sound pool" };
             if ui
@@ -413,16 +402,6 @@ fn sound_pool(ui: &mut egui::Ui, st: &mut ElekState, ping: &mut Option<(u32, u32
             ui.add(theme::progress_bar(done as f32 / total.max(1) as f32).desired_width(200.0).text(format!("{done}/{total}")));
         }
     });
-    if let Some(note) = st.lib.paste_notice.clone() {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(note).color(OLED));
-                if ui.small_button(theme::CLOSE_GLYPH).on_hover_text("Dismiss paste message").clicked() {
-                    st.lib.paste_notice = None;
-                }
-            });
-        });
-    }
     let Some(p) = st.project.as_deref() else { return };
     let sounds: Vec<PoolSound> = if editable {
         p.edited_sounds(&st.lib.sounds)
@@ -842,30 +821,15 @@ fn copy_pool_sound(st: &mut ElekState, at: usize, sounds: &[PoolSound]) -> Strin
 fn paste_track_sounds(st: &mut ElekState, at: usize, sounds: &[PoolSound], over: bool) -> String {
     let message = paste_sounds(st, at, sounds, over);
     crate::log::line(format!("elek-lib: paste into sound {:03}: {message}", at + 1));
-    st.lib.paste_notice = Some(message.clone());
     message
 }
 
 fn paste_sounds(st: &mut ElekState, at: usize, sounds: &[PoolSound], over: bool) -> String {
-    if let Some(mut c) = st.proj.pool_clip.clone() {
+    if let Some(c) = st.proj.pool_clip.clone() {
         if !over && sounds.get(at).is_some_and(|s| !s.blank) {
             return format!("Pool sound {:03} isn't empty: right-click it → Paste … over this one to replace it", at + 1);
         }
-        let (cell, added_sample) = match prepare_sound_paste(st, &c) {
-            Ok(prepared) => prepared,
-            Err(e) => return e,
-        };
-        c.cell = cell;
-        if c.cell == st.lib.sounds.get(at).cloned().unwrap_or_else(|| SoundCell::as_read(at)) {
-            return format!("Pool sound {:03} already is {}", at + 1, c.desc());
-        }
-        if let Some((old, entry)) = added_sample {
-            st.fill(old, entry);
-        }
-        st.lib.cells_mut()[at] = c.cell.clone();
-        st.lib.selected = Some(at);
-        let sample_note = if added_sample.is_some() { " Its source sample was added to the sample pool." } else { "" };
-        return format!("{} pasted into pool sound {:03}.{sample_note} Push on Sounds to send it", c.desc(), at + 1);
+        return paste_pool_clip(st, c, at, false).unwrap_or_else(|e| e);
     }
     let copied = st.proj.copied_sounds();
     if copied.is_empty() {
@@ -987,4 +951,95 @@ pub(crate) fn prepare_sound_paste(st: &ElekState, clip: &PoolClip) -> Result<(So
         c.cell.src = SoundSrc::Preset { model: *model, data: translated };
     }
     Ok((c.cell, added_sample))
+}
+
+/// The original paste destination is retained while its sample load is confirmed.
+#[derive(Clone)]
+pub(crate) enum SoundPasteTarget {
+    Pool(usize),
+    Tracks { pattern: usize, tracks: Vec<u8> },
+}
+
+struct SamplePaste {
+    clip: PoolClip,
+    target: SoundPasteTarget,
+    sample_name: String,
+    slot: usize,
+}
+
+pub(crate) fn ask_sample_paste(
+    st: &mut ElekState,
+    clip: PoolClip,
+    target: SoundPasteTarget,
+    sample: (u16, crate::device::PoolEntry),
+) -> String {
+    let (old, entry) = sample;
+    let sample_name = st.names.get(&entry.key()).cloned().unwrap_or_else(|| "Unknown sample".into());
+    let slot = st.order.iter().position(|&o| o == old).unwrap_or(old as usize);
+    st.lib.pending_sample = Some(SamplePaste { clip, target, sample_name, slot });
+    "Waiting for confirmation to add the sound's source sample".into()
+}
+
+fn paste_pool_clip(st: &mut ElekState, mut c: PoolClip, at: usize, confirmed: bool) -> Result<String, String> {
+    if let Some(why) = sounds_locked(st) { return Err(why.into()); }
+    if at >= SOUND_POOL { return Err("Sound destination is no longer available".into()); }
+    let (cell, added_sample) = prepare_sound_paste(st, &c)?;
+    if cell == st.lib.sounds.get(at).cloned().unwrap_or_else(|| SoundCell::as_read(at)) {
+        return Ok(format!("Pool sound {:03} already is {}", at + 1, c.desc()));
+    }
+    if !confirmed {
+        if let Some(sample) = added_sample {
+            return Ok(ask_sample_paste(st, c, SoundPasteTarget::Pool(at), sample));
+        }
+    }
+    c.cell = cell;
+    if let Some((old, entry)) = added_sample { st.fill(old, entry); }
+    st.lib.cells_mut()[at] = c.cell.clone();
+    st.lib.selected = Some(at);
+    let sample_note = if added_sample.is_some() { " Its source sample was added to the sample pool." } else { "" };
+    Ok(format!("{} pasted into pool sound {:03}.{sample_note} Push on Sounds to send it", c.desc(), at + 1))
+}
+
+/// Called with the other device dialogs, once per frame, on every device page.
+pub(crate) fn confirm_sample_paste(ctx: &egui::Context, st: &mut ElekState) {
+    let Some(pending) = &st.lib.pending_sample else { return };
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique("elek_sample_paste_modal")).show(ctx, |ui| {
+        ui.set_width(440.0);
+        ui.heading("Add a sample to project memory?");
+        ui.add_space(6.0);
+        ui.label(format!("{} uses a sample that isn't in this project's sample pool:", pending.clip.desc()));
+        ui.label(RichText::new(&pending.sample_name).strong());
+        ui.label(format!("It will be added to sample slot {:03}.", pending.slot));
+        let destination = match &pending.target {
+            SoundPasteTarget::Pool(at) => format!("pool sound {:03}", at + 1),
+            SoundPasteTarget::Tracks { pattern, tracks } => format!("track(s) {} of {}", tracks.iter().map(|t| (usize::from(*t) + 1).to_string()).collect::<Vec<_>>().join(", "), patterns::label(*pattern)),
+        };
+        ui.label(format!("Commit adds the sample and pastes the sound into {destination}. Cancel leaves both unchanged."));
+        ui.label(RichText::new(if st.live {
+            "Live is on: committed changes will be sent to the device automatically."
+        } else {
+            "Changes stay local until you push to the device."
+        }).weak());
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() { answer = Some(false); }
+            if ui.button(RichText::new("Commit").color(theme::DEVICE_ACCENT_BRIGHT)).clicked() { answer = Some(true); }
+        });
+    });
+    if modal.should_close() && answer.is_none() { answer = Some(false); }
+    let Some(commit) = answer else { return };
+    let pending = st.lib.pending_sample.take().expect("pending sample paste");
+    if !commit {
+        st.status = "Paste cancelled; no sample added".into();
+        return;
+    }
+    // Resolve again against the current pool and validate before applying any edit.
+    let result = match pending.target {
+        SoundPasteTarget::Pool(at) => paste_pool_clip(st, pending.clip, at, true),
+        SoundPasteTarget::Tracks { pattern, tracks } =>
+            crate::ui::elek_project_view::paste_sound_on_tracks(st, pending.clip, pattern, tracks, true),
+    };
+    st.status = result.unwrap_or_else(|e| format!("Cannot paste sound: {e}"));
+    crate::log::line(format!("elek: confirmed sample paste: {}", st.status));
 }

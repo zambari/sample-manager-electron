@@ -44,6 +44,7 @@ mod state;
 mod steps;
 
 pub use clipboard::PoolClip;
+pub(crate) use clipboard::paste_sound_on_tracks;
 pub use controls::show;
 pub(crate) use controls::view_tools;
 pub use state::ProjEd;

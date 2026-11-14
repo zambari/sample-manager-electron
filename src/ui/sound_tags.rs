@@ -97,8 +97,9 @@ pub fn show_with_open(
                 ink,
                 egui::Stroke::NONE,
             ));
-            p.circle_filled(egui::pos2(x + 3.0, y), 0.8, OLED_BG);
-            p.galley(egui::pos2(x + 6.0, y - text.size().y / 2.0), text, OLED_BG);
+            // Center the visible glyphs rather than the font's line box.
+            let text_y = y - text.mesh_bounds.center().y;
+            p.galley(egui::pos2(x + 6.0, text_y), text, OLED_BG);
             x += w + 3.0;
         }
         if overflow {

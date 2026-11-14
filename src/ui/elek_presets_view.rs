@@ -751,15 +751,8 @@ pub fn show(ui: &mut egui::Ui, st: &mut ElekState) -> Vec<ElekIntent> {
                 .desired_width(ui.available_width()),
         );
     }
-    if !st.presets.status.is_empty() {
-        ui.colored_label(
-            if st.presets.push_failed {
-                theme::CHANGED
-            } else {
-                OLED_DIM
-            },
-            &st.presets.status,
-        );
+    if st.presets.push_failed && !st.presets.status.is_empty() {
+        ui.colored_label(theme::CHANGED, &st.presets.status);
     }
     ui.horizontal_wrapped(|ui| {
         ui.add(

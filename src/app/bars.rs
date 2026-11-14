@@ -544,9 +544,22 @@ impl App {
                 ));
             }
 
-            if !self.status.is_empty() {
+            // Device feedback uses the existing footer instead of adding rows
+            // above Patterns / Presets / Sounds after clipboard operations.
+            let device_status = if self.elek_mode && !self.pool_focused
+                && self.elek.page == crate::ui::elek_view::ElekPage::Presets
+            {
+                &self.elek.presets.status
+            } else if self.elek_mode || self.pool_focused {
+                &self.elek.status
+            } else {
+                &self.status
+            };
+            let status = if device_status.is_empty() { &self.status } else { device_status };
+            if !status.is_empty() {
                 ui.separator();
-                ui.label(egui::RichText::new(&self.status).weak());
+                ui.add(egui::Label::new(egui::RichText::new(status).weak()).truncate())
+                    .on_hover_text(status);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

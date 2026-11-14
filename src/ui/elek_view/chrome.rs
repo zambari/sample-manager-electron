@@ -86,7 +86,7 @@ pub(crate) fn device_pages(ui: &mut egui::Ui, active: Option<ElekPage>, drive: b
 }
 
 /// The full-window top: mode tabs, then the device bar with the page's own
-/// tools and the status.
+/// tools and progress. Status messages live in the app's bottom bar.
 pub(crate) fn top(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent>, page_tools: impl FnOnce(&mut egui::Ui, &mut ElekState)) {
     ui.horizontal(|ui| mode_header(ui, st, out));
     ui.horizontal_wrapped(|ui| {
@@ -349,7 +349,7 @@ fn projects_menu(ui: &mut egui::Ui, st: &mut ElekState, out: &mut Vec<ElekIntent
         });
 }
 
-/// The progress bar while the device works, else the last status.
+/// The progress bar while the device works; idle feedback lives in the bottom bar.
 pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElekState, wide: bool) {
     if let Some((label, done, total)) = &st.busy {
         // Leave room for Stop: a bar that fills the row pushes the button
@@ -359,8 +359,6 @@ pub(crate) fn status_line(ui: &mut egui::Ui, st: &ElekState, wide: bool) {
         let w = if wide { room.clamp(160.0, 420.0) } else { room.max(60.0) };
         ui.add(theme::progress_bar(*done as f32 / (*total).max(1) as f32).desired_width(w).text(format!("{label} {done}/{total}")));
         stop_read(ui, st);
-    } else if !st.status.is_empty() && st.project.is_some() {
-        ui.add(egui::Label::new(RichText::new(&st.status).weak()).truncate()).on_hover_text(&st.status);
     }
 }
 
